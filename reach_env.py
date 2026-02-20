@@ -39,14 +39,13 @@ class SO101ReachEnv(gym.Env):
         self.joint_low = self.model.jnt_range[self.joint_ids, 0]
         self.joint_high = self.model.jnt_range[self.joint_ids, 1]
 
-        # Config (with defaults)
         cfg = env_cfg or {}
-        self.action_scale = float(cfg.get("action_scale", 0.05))
-        self.max_steps = int(cfg.get("max_steps", 100))
-        self.success_threshold = float(cfg.get("success_threshold", 0.02))
-        self.success_bonus = float(cfg.get("success_bonus", 10.0))
-        self.target_low = np.array(cfg.get("target_low", [-0.15, -0.20, 0.05]))
-        self.target_high = np.array(cfg.get("target_high", [0.30, 0.20, 0.35]))
+        self.action_scale = float(cfg["action_scale"])
+        self.max_steps = int(cfg["max_steps"])
+        self.success_threshold = float(cfg["success_threshold"])
+        self.success_bonus = float(cfg["success_bonus"])
+        self.target_low = np.array(cfg["target_low"])
+        self.target_high = np.array(cfg["target_high"])
 
         # Action: delta joint positions (scaled to [-1, 1])
         self.action_space = spaces.Box(low=-1.0, high=1.0,

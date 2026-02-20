@@ -1,4 +1,4 @@
-"""Train SAC on SO-101 reach task with Hydra config and W&B logging."""
+"""Train SAC on SO-101 tasks with Hydra config and W&B logging."""
 
 import os
 
@@ -8,11 +8,27 @@ from omegaconf import DictConfig, OmegaConf
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import EvalCallback
 from reach_env import SO101ReachEnv
+from pickplace_env import SO101PickPlaceEnv
+
+ENV_REGISTRY = {
+    "reach": SO101ReachEnv,
+    "pickplace": SO101PickPlaceEnv,
+}
 
 
-def make_env(env_cfg):
-    """Create reach env from Hydra config."""
-    return SO101ReachEnv(env_cfg=env_cfg)
+def make_env(cfg: DictConfig, render_mode=None, slow_factor=1):
+    """Create env by name from Hydra config."""
+    env_name = cfg.env_name
+    env_cls = ENV_REGISTRY[env_name]
+
+    if env_name == "reach":
+        env_cfg = cfg.env
+    elif env_name == "pickplace":
+        env_cfg = cfg.pickplace_env
+    else:
+        raise ValueError(f"Unknown env: {env_name}")
+
+    return env_cls(render_mode=render_mode, env_cfg=env_cfg, slow_factor=slow_factor)
 
 
 def train(cfg: DictConfig):
@@ -20,10 +36,10 @@ def train(cfg: DictConfig):
     orig_dir = hydra.utils.get_original_cwd()
     os.chdir(orig_dir)
 
-    env = make_env(cfg.env)
-    eval_env = make_env(cfg.env)
+    env = make_env(cfg)
+    eval_env = make_env(cfg)
 
-    log_dir = os.path.join(orig_dir, "logs", "sac_reach")
+    log_dir = os.path.join(orig_dir, "logs", f"sac_{cfg.env_name}")
     os.makedirs(log_dir, exist_ok=True)
 
     # W&B init (syncs metrics via tensorboard, no checkpoint uploads)
@@ -59,7 +75,7 @@ def train(cfg: DictConfig):
         tensorboard_log=os.path.join(orig_dir, "logs"),
     )
 
-    print(f"Training SAC for {cfg.train.total_timesteps} steps...")
+    print(f"Training SAC ({cfg.env_name}) for {cfg.train.total_timesteps} steps...")
     model.learn(total_timesteps=cfg.train.total_timesteps, callback=callbacks)
     model.save(os.path.join(log_dir, "final_model"))
     print(f"Model saved to {log_dir}/final_model.zip")
@@ -75,8 +91,9 @@ def evaluate(cfg: DictConfig):
     orig_dir = hydra.utils.get_original_cwd()
     os.chdir(orig_dir)
 
-    model_path = cfg.eval_model_path or os.path.join(orig_dir, "logs", "sac_reach", "best_model.zip")
-    env = SO101ReachEnv(render_mode="human", env_cfg=cfg.env, slow_factor=5)
+    model_path = cfg.eval_model_path or os.path.join(
+        orig_dir, "logs", f"sac_{cfg.env_name}", "best_model.zip")
+    env = make_env(cfg, render_mode="human", slow_factor=5)
     model = SAC.load(model_path)
 
     for ep in range(cfg.eval_episodes):
@@ -88,7 +105,7 @@ def evaluate(cfg: DictConfig):
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += reward
             done = terminated or truncated
-        print(f"Episode {ep + 1}: reward={total_reward:.2f}, final_dist={info['distance']:.4f}")
+        print(f"Episode {ep + 1}: reward={total_reward:.2f}")
 
     env.close()
 
