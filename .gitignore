@@ -1,0 +1,6 @@
+__pycache__/
+logs/
+outputs/
+wandb/
+*.zip
+MUJOCO_LOG.TXT
