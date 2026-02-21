@@ -11,9 +11,15 @@ from gymnasium import spaces
 class Phase(enum.IntEnum):
     REACH = 0
     GRASP = 1
-    LIFT = 2
-    PLACE = 3
-    RETURN = 4
+    PLACE = 2
+    RETURN = 3
+
+
+class Bonus(enum.Enum):
+    REACH_CLOSE = enum.auto()
+    GRASPED = enum.auto()
+    PLACE_CLOSE = enum.auto()
+    RETURN_CLOSE = enum.auto()
 
 
 class SO101PickPlaceEnv(gym.Env):
@@ -21,12 +27,14 @@ class SO101PickPlaceEnv(gym.Env):
 
     metadata = {"render_modes": ["human"], "render_fps": 20}
 
-    def __init__(self, render_mode=None, env_cfg=None, slow_factor=1):
+    XML_PATH = "so101/scene_pickplace.xml"
+
+    def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None):
         super().__init__()
         self.render_mode = render_mode
         self.slow_factor = slow_factor
 
-        self.model = mujoco.MjModel.from_xml_path("so101/scene_pickplace.xml")
+        self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
         self.data = mujoco.MjData(self.model)
 
         self.joint_names = [
@@ -37,22 +45,27 @@ class SO101PickPlaceEnv(gym.Env):
 
         self.joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)
                           for n in self.joint_names]
+        self.joint_qposadr = self.model.jnt_qposadr[self.joint_ids]
+        self.joint_dofadr = self.model.jnt_dofadr[self.joint_ids]
         self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
 
         # Cube geom ID
         self.cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
 
         # Gripper geom IDs (fixed + moving jaw)
+        gripper_geom_names = [
+            "fixed_jaw_box1", "fixed_jaw_box2", "fixed_jaw_box3",
+            "fixed_jaw_box4", "fixed_jaw_box5", "fixed_jaw_box6",
+            "fixed_jaw_box7", "fixed_jaw_sph_tip1", "fixed_jaw_sph_tip2",
+            "fixed_jaw_sph_tip3",
+            "moving_jaw_box1", "moving_jaw_box2", "moving_jaw_box3",
+            "moving_jaw_sph_tip1", "moving_jaw_sph_tip2", "moving_jaw_sph_tip3",
+        ]
         self.gripper_geom_ids = set()
-        for name in ["fixed_jaw_box1", "fixed_jaw_box2", "fixed_jaw_box3",
-                      "fixed_jaw_box4", "fixed_jaw_box5", "fixed_jaw_box6",
-                      "fixed_jaw_box7", "fixed_jaw_sph_tip1", "fixed_jaw_sph_tip2",
-                      "fixed_jaw_sph_tip3",
-                      "moving_jaw_box1", "moving_jaw_box2", "moving_jaw_box3",
-                      "moving_jaw_sph_tip1", "moving_jaw_sph_tip2", "moving_jaw_sph_tip3"]:
+        for name in gripper_geom_names:
             gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
-            if gid >= 0:
-                self.gripper_geom_ids.add(gid)
+            assert gid >= 0, f"Gripper geom '{name}' not found in XML"
+            self.gripper_geom_ids.add(gid)
 
         # Cube freejoint qpos index
         cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
@@ -67,13 +80,13 @@ class SO101PickPlaceEnv(gym.Env):
         self.action_scale = float(cfg["action_scale"])
         self.max_steps = int(cfg["max_steps"])
         self.n_substeps = int(cfg["n_substeps"])
-        self.lift_height = float(cfg["lift_height"])
         self.cube_low = np.array(cfg["cube_low"])
         self.cube_high = np.array(cfg["cube_high"])
         self.place_target = np.array(cfg["place_target"])
+        self.ring_center = np.array(cfg["ring_center"])
+        self.ring_exclusion_radius = float(cfg["ring_exclusion_radius"])
         self.passive_pose = np.array(cfg["passive_pose"])
 
-        # Gripper joint index
         self.gripper_idx = self.joint_names.index("gripper")
 
         # Spaces: 6 joint pos + 6 joint vel + 3 ee pos + 3 cube pos = 18
@@ -85,6 +98,7 @@ class SO101PickPlaceEnv(gym.Env):
         self.step_count = 0
         self.phase = Phase.REACH
         self.max_phase = Phase.REACH
+        self._bonuses_collected = set()
         self.viewer = None
 
     def _get_cube_pos(self):
@@ -94,11 +108,11 @@ class SO101PickPlaceEnv(gym.Env):
         return self.data.site_xpos[self.ee_site_id].copy()
 
     def _get_joint_pos(self):
-        return self.data.qpos[:self.n_joints].copy()
+        return self.data.qpos[self.joint_qposadr].copy()
 
     def _get_obs(self):
-        qpos = self.data.qpos[:self.n_joints].copy()
-        qvel = self.data.qvel[:self.n_joints].copy()
+        qpos = self.data.qpos[self.joint_qposadr].copy()
+        qvel = self.data.qvel[self.joint_dofadr].copy()
         ee_pos = self._get_ee_pos()
         cube_pos = self._get_cube_pos()
         return np.concatenate([qpos, qvel, ee_pos, cube_pos]).astype(np.float32)
@@ -128,8 +142,12 @@ class SO101PickPlaceEnv(gym.Env):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
 
-        # Random cube position
-        cube_pos = self.np_random.uniform(self.cube_low, self.cube_high)
+        # Random cube position (reject if inside ring)
+        while True:
+            cube_pos = self.np_random.uniform(self.cube_low, self.cube_high)
+            dist_to_ring = np.linalg.norm(cube_pos[:2] - self.ring_center)
+            if dist_to_ring > self.ring_exclusion_radius:
+                break
         self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
         # Cube orientation: identity quaternion
         self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = [1, 0, 0, 0]
@@ -137,13 +155,14 @@ class SO101PickPlaceEnv(gym.Env):
         # Small random arm joint noise, gripper open
         noise = self.np_random.uniform(-0.1, 0.1, size=self.n_joints)
         noise[self.gripper_idx] = self.joint_high[self.gripper_idx]  # gripper open
-        self.data.qpos[:self.n_joints] = np.clip(noise, self.joint_low, self.joint_high)
-        self.data.ctrl[:self.n_joints] = self.data.qpos[:self.n_joints]
+        self.data.qpos[self.joint_qposadr] = np.clip(noise, self.joint_low, self.joint_high)
+        self.data.ctrl[:self.n_joints] = self.data.qpos[self.joint_qposadr]
 
         mujoco.mj_forward(self.model, self.data)
         self.step_count = 0
         self.phase = Phase.REACH
         self.max_phase = Phase.REACH
+        self._bonuses_collected = set()
         return self._get_obs(), {}
 
     def step(self, action):
@@ -199,14 +218,9 @@ class SO101PickPlaceEnv(gym.Env):
                 self.phase = Phase.GRASP
         elif self.phase == Phase.GRASP:
             if grasped:
-                self.phase = Phase.LIFT
+                self.phase = Phase.PLACE
             elif ee_cube_dist > 0.08:
                 self.phase = Phase.REACH
-        elif self.phase == Phase.LIFT:
-            if not grasped:
-                self.phase = Phase.REACH
-            elif cube_pos[2] > self.lift_height:
-                self.phase = Phase.PLACE
         elif self.phase == Phase.PLACE:
             if not grasped:
                 self.phase = Phase.REACH
@@ -215,41 +229,37 @@ class SO101PickPlaceEnv(gym.Env):
                 if xy_dist < 0.03 and cube_pos[2] < 0.05:
                     self.phase = Phase.RETURN
 
+    def _bonus(self, name, amount):
+        """Give a bonus only once per episode."""
+        if name in self._bonuses_collected:
+            return 0.0
+        self._bonuses_collected.add(name)
+        return amount
+
     def _compute_reward(self, ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped):
         reward = -0.01  # time penalty
 
         if self.phase == Phase.REACH:
             reward += -ee_cube_dist
             if ee_cube_dist < 0.03:
-                reward += 1.0
+                reward += self._bonus(Bonus.REACH_CLOSE, 1.0)
 
         elif self.phase == Phase.GRASP:
-            # Reward for closing gripper near cube
-            gripper_val = self.data.qpos[self.joint_ids[self.gripper_idx]]
             reward += -ee_cube_dist
-            reward += 0.5 * (1.0 - gripper_val)  # reward closing
             if grasped:
-                reward += 5.0
-
-        elif self.phase == Phase.LIFT:
-            height = cube_pos[2]
-            reward += 2.0 * min(height / self.lift_height, 1.0)
-            if height > self.lift_height:
-                reward += 3.0
+                reward += self._bonus(Bonus.GRASPED, 10.0)
 
         elif self.phase == Phase.PLACE:
             xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
             reward += -xy_dist
             if xy_dist < 0.03:
-                reward += 2.0
-                # Reward for lowering
-                reward += 1.0 * max(0, 1.0 - cube_pos[2] / 0.05)
+                reward += self._bonus(Bonus.PLACE_CLOSE, 2.0)
 
         elif self.phase == Phase.RETURN:
             joint_dist = np.linalg.norm(joint_pos - self.passive_pose)
             reward += -joint_dist
             if joint_dist < 0.5:
-                reward += 2.0
+                reward += self._bonus(Bonus.RETURN_CLOSE, 2.0)
 
         return reward
 

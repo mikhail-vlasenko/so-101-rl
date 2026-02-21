@@ -1,7 +1,6 @@
 """Train SAC on SO-101 tasks with Hydra config and W&B logging."""
 
 import os
-from collections import deque
 
 import gymnasium
 import hydra
@@ -11,16 +10,14 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
-from reach_env import SO101ReachEnv
 from pickplace_env import SO101PickPlaceEnv
 
 class InfoLoggingCallback(BaseCallback):
-    """Log rolling mean of custom info dict metrics across episodes."""
+    """Log per-episode custom info dict metrics (no averaging)."""
 
-    def __init__(self, info_keys: list[str], window: int = 100):
+    def __init__(self, info_keys: list[str]):
         super().__init__()
         self.info_keys = info_keys
-        self._windows: dict[str, deque] = {k: deque(maxlen=window) for k in info_keys}
 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []):
@@ -28,11 +25,7 @@ class InfoLoggingCallback(BaseCallback):
                 continue
             for key in self.info_keys:
                 if key in info:
-                    self._windows[key].append(float(info[key]))
-                    self.logger.record(
-                        f"rollout/mean_{key}",
-                        sum(self._windows[key]) / len(self._windows[key]),
-                    )
+                    self.logger.record(f"rollout/{key}", float(info[key]))
         return True
 
 
@@ -70,31 +63,21 @@ class _EvalPhaseCallback(BaseCallback):
 
 
 ENV_REGISTRY = {
-    "reach": SO101ReachEnv,
     "pickplace": SO101PickPlaceEnv,
 }
 
 
-def make_env(cfg: DictConfig, render_mode=None, slow_factor=1):
+def make_env(cfg: DictConfig, xml_path=None, render_mode=None, slow_factor=1):
     """Create env by name from Hydra config."""
-    env_name = cfg.env_name
-    env_cls = ENV_REGISTRY[env_name]
-
-    if env_name == "reach":
-        env_cfg = cfg.env
-    elif env_name == "pickplace":
-        env_cfg = cfg.pickplace_env
-    else:
-        raise ValueError(f"Unknown env: {env_name}")
-
-    return env_cls(render_mode=render_mode, env_cfg=env_cfg, slow_factor=slow_factor)
+    env_cls = ENV_REGISTRY[cfg.env_name]
+    return env_cls(render_mode=render_mode, env_cfg=cfg.pickplace_env,
+                   slow_factor=slow_factor, xml_path=xml_path)
 
 
-def _make_env_fn(cfg, orig_dir):
-    """Factory closure for SubprocVecEnv — each subprocess needs the correct cwd."""
+def _make_env_fn(cfg, xml_path):
+    """Factory closure for SubprocVecEnv — uses absolute XML path."""
     def _init():
-        os.chdir(orig_dir)
-        return Monitor(make_env(cfg))
+        return Monitor(make_env(cfg, xml_path=xml_path))
     return _init
 
 
@@ -102,16 +85,17 @@ def train(cfg: DictConfig):
     # Hydra changes cwd — go back to original for MuJoCo XML paths
     orig_dir = hydra.utils.get_original_cwd()
     os.chdir(orig_dir)
+    xml_path = os.path.join(orig_dir, SO101PickPlaceEnv.XML_PATH)
 
     gamma = cfg.train.gamma
     n_envs = cfg.train.n_envs
 
-    vec_env = SubprocVecEnv([_make_env_fn(cfg, orig_dir) for _ in range(n_envs)])
-    env = VecNormalize(vec_env, norm_reward=True, gamma=gamma)
+    vec_env = SubprocVecEnv([_make_env_fn(cfg, xml_path) for _ in range(n_envs)])
+    env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, gamma=gamma)
 
-    phase_tracker = _MaxPhaseTracker(make_env(cfg))
+    phase_tracker = _MaxPhaseTracker(make_env(cfg, xml_path=xml_path))
     eval_vec_env = DummyVecEnv([lambda: Monitor(phase_tracker)])
-    eval_env = VecNormalize(eval_vec_env, training=False, norm_reward=False)
+    eval_env = VecNormalize(eval_vec_env, norm_obs=False, training=False, norm_reward=False)
 
     log_dir = os.path.join(orig_dir, "logs", f"sac_{cfg.env_name}")
     os.makedirs(log_dir, exist_ok=True)
@@ -155,12 +139,13 @@ def train(cfg: DictConfig):
         tau=cfg.train.tau,
         gamma=cfg.train.gamma,
         policy_kwargs={"net_arch": list(cfg.train.net_arch)},
+        stats_window_size=1,
         verbose=1,
         tensorboard_log=os.path.join(orig_dir, "logs"),
     )
 
     print(f"Training SAC ({cfg.env_name}) for {cfg.train.total_timesteps} steps...")
-    model.learn(total_timesteps=cfg.train.total_timesteps, callback=callbacks)
+    model.learn(total_timesteps=cfg.train.total_timesteps, callback=callbacks, log_interval=100)
     model.save(os.path.join(log_dir, "final_model"))
     print(f"Model saved to {log_dir}/final_model.zip")
 
@@ -171,35 +156,9 @@ def train(cfg: DictConfig):
     eval_env.close()
 
 
-def evaluate(cfg: DictConfig):
-    orig_dir = hydra.utils.get_original_cwd()
-    os.chdir(orig_dir)
-
-    model_path = cfg.eval_model_path or os.path.join(
-        orig_dir, "logs", f"sac_{cfg.env_name}", "best_model.zip")
-    env = make_env(cfg, render_mode="human", slow_factor=2)
-    model = SAC.load(model_path)
-
-    for ep in range(cfg.eval_episodes):
-        obs, _ = env.reset()
-        total_reward = 0
-        done = False
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            total_reward += reward
-            done = terminated or truncated
-        print(f"Episode {ep + 1}: return={total_reward:.2f}")
-
-    env.close()
-
-
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig):
-    if cfg.eval:
-        evaluate(cfg)
-    else:
-        train(cfg)
+    train(cfg)
 
 
 if __name__ == "__main__":

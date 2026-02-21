@@ -1,21 +1,14 @@
 env_name: pickplace
 
-env:
-  action_scale: 0.05
-  max_steps: 100
-  success_threshold: 0.02
-  success_bonus: 10.0
-  target_low: [-0.15, -0.20, 0.05]
-  target_high: [0.30, 0.20, 0.35]
-
 pickplace_env:
   action_scale: 0.05
   max_steps: 300
   n_substeps: 10
-  lift_height: 0.08
-  cube_low: [0.08, -0.15, 0.015]
-  cube_high: [0.25, 0.15, 0.015]
-  place_target: [0.05, 0.0, 0.015]
+  cube_low: [0.15, -0.15, 0.015]
+  cube_high: [0.30, 0.15, 0.015]
+  place_target: [0.18, 0.0, 0.015]
+  ring_center: [0.18, 0.0]
+  ring_exclusion_radius: 0.065
   passive_pose: [0.0, -1.0, 0.7, 0.9, 0.0, 0.0]
 
 train:
@@ -36,7 +29,3 @@ wandb:
   project: robot-arm
   entity: mvlasenko
   enabled: true
-
-eval: false
-eval_episodes: 10
-eval_model_path: null

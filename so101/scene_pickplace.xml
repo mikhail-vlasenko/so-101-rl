@@ -15,6 +15,7 @@
         markrgb="0.8 0.8 0.8" width="300" height="300" />
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"
         reflectance="0.2" />
+    <mesh name="ring" file="ring.stl"/>
   </asset>
 
   <worldbody>
@@ -22,7 +23,7 @@
     <geom name="floor" size="0 0 0.05" pos="0 0 0" type="plane" material="groundplane" />
 
     <!-- Cube: free body, 3cm edge, 20g, green -->
-    <body name="cube" pos="0.15 0 0.015">
+    <body name="cube" pos="0.10 0.10 0.015">
       <freejoint name="cube_joint"/>
       <geom name="cube_geom" type="box" size="0.015 0.015 0.015" mass="0.02"
           rgba="0 0.8 0 1" condim="6" friction="1 0.005 0.0005"
@@ -30,7 +31,13 @@
     </body>
 
     <!-- Place target: visual-only flat cylinder -->
-    <site name="place_target" type="cylinder" size="0.03 0.001" pos="0.05 0 0.001"
+    <site name="place_target" type="cylinder" size="0.04 0.001" pos="0.18 0 0.001"
         rgba="0.2 0.4 1 0.4"/>
+
+    <!-- Ring: mesh, R_inner=0.0425, R_outer=0.0475, 3cm tall -->
+    <body name="ring" pos="0.18 0 0">
+      <geom type="mesh" mesh="ring" rgba="0.6 0.6 0.6 1"
+          contype="1" conaffinity="1"/>
+    </body>
   </worldbody>
 </mujoco>
