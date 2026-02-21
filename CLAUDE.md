@@ -11,19 +11,33 @@ Train RL policies in MuJoCo to make the SO-101 arm perform basic manipulation ta
 - Source: [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101)
 - Requires MuJoCo >= 3.1.3 (installed: 3.5.0)
 
-## Reach Task
+## Tasks
 
-First training task: move end-effector to a random target position.
+### Reach
+
+Move end-effector to a random target position.
 
 - `so101/scene_reach.xml` — scene with mocap target sphere
 - `reach_env.py` — Gymnasium env (18-dim obs, 6-dim action, dense reward)
+
+### Pick and Place
+
+Pick up a cube and place it at a target location. 5-phase task: REACH → GRASP → LIFT → PLACE → RETURN.
+
+- `so101/scene_pickplace.xml` — scene with free-body cube and visual place target
+- `pickplace_env.py` — Gymnasium env (18-dim obs, 6-dim action, phase-based reward)
+
+## Training
+
 - `train.py` — SAC training with Hydra config + W&B logging
 - `conf/config.yaml` — all hyperparameters (env, train, wandb)
+- `env_name` selects task: `reach` or `pickplace`
 
 ### Usage
 
 ```bash
-python train.py                              # train with defaults
+python train.py                              # train reach (default)
+python train.py env_name=pickplace           # train pick-and-place
 python train.py wandb.enabled=false          # train without W&B
 python train.py train.total_timesteps=200000 # override params
 python train.py eval=true                    # visualize trained policy

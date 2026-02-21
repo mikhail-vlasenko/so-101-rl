@@ -84,6 +84,7 @@ class SO101PickPlaceEnv(gym.Env):
 
         self.step_count = 0
         self.phase = Phase.REACH
+        self.max_phase = Phase.REACH
         self.viewer = None
 
     def _get_cube_pos(self):
@@ -142,6 +143,7 @@ class SO101PickPlaceEnv(gym.Env):
         mujoco.mj_forward(self.model, self.data)
         self.step_count = 0
         self.phase = Phase.REACH
+        self.max_phase = Phase.REACH
         return self._get_obs(), {}
 
     def step(self, action):
@@ -166,6 +168,7 @@ class SO101PickPlaceEnv(gym.Env):
 
         # Phase transitions
         self._update_phase(ee_cube_dist, grasped, cube_pos, joint_pos)
+        self.max_phase = max(self.max_phase, self.phase)
 
         # Reward
         reward = self._compute_reward(ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped)
@@ -185,6 +188,7 @@ class SO101PickPlaceEnv(gym.Env):
 
         return self._get_obs(), float(reward), terminated, truncated, {
             "phase": self.phase.name,
+            "max_phase": int(self.max_phase),
             "ee_cube_dist": ee_cube_dist,
             "grasped": grasped,
         }
