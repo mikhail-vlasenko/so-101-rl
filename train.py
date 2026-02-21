@@ -1,4 +1,4 @@
-"""Train SAC on SO-101 tasks with Hydra config and W&B logging."""
+"""Train RL policies on SO-101 tasks with Hydra config and W&B logging."""
 
 import os
 
@@ -6,7 +6,7 @@ import gymnasium
 import hydra
 import wandb
 from omegaconf import DictConfig, OmegaConf
-from stable_baselines3 import SAC
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
@@ -64,6 +64,33 @@ ENV_REGISTRY = {
 }
 
 
+def _sac_kwargs(cfg: DictConfig) -> dict:
+    return {
+        "buffer_size": cfg.sac.buffer_size,
+        "learning_starts": cfg.sac.learning_starts,
+        "train_freq": cfg.sac.train_freq,
+        "gradient_steps": cfg.sac.gradient_steps,
+        "tau": cfg.sac.tau,
+    }
+
+
+def _ppo_kwargs(cfg: DictConfig) -> dict:
+    return {
+        "n_steps": cfg.ppo.n_steps,
+        "n_epochs": cfg.ppo.n_epochs,
+        "clip_range": cfg.ppo.clip_range,
+        "ent_coef": cfg.ppo.ent_coef,
+        "gae_lambda": cfg.ppo.gae_lambda,
+        "vf_coef": cfg.ppo.vf_coef,
+    }
+
+
+ALGORITHM_REGISTRY = {
+    "sac": (SAC, _sac_kwargs),
+    "ppo": (PPO, _ppo_kwargs),
+}
+
+
 def make_env(cfg: DictConfig, xml_path=None, render_mode=None, slow_factor=1):
     """Create env by name from Hydra config."""
     env_cls = ENV_REGISTRY[cfg.env_name]
@@ -84,6 +111,9 @@ def train(cfg: DictConfig):
     os.chdir(orig_dir)
     xml_path = os.path.join(orig_dir, SO101PickPlaceEnv.XML_PATH)
 
+    algo_name = cfg.algorithm
+    algo_cls, algo_kwargs_fn = ALGORITHM_REGISTRY[algo_name]
+
     gamma = cfg.train.gamma
     n_envs = cfg.train.n_envs
 
@@ -94,7 +124,7 @@ def train(cfg: DictConfig):
     eval_vec_env = DummyVecEnv([lambda: Monitor(phase_tracker)])
     eval_env = VecNormalize(eval_vec_env, norm_obs=False, training=False, norm_reward=False)
 
-    log_dir = os.path.join(orig_dir, "logs", f"sac_{cfg.env_name}")
+    log_dir = os.path.join(orig_dir, "logs", f"{algo_name}_{cfg.env_name}")
     os.makedirs(log_dir, exist_ok=True)
 
     # W&B init (syncs metrics via tensorboard, no checkpoint uploads)
@@ -113,7 +143,7 @@ def train(cfg: DictConfig):
     callbacks.append(CheckpointCallback(
         save_freq=cfg.train.checkpoint_freq // n_envs,
         save_path=os.path.join(log_dir, "checkpoints"),
-        name_prefix="sac",
+        name_prefix=algo_name,
     ))
 
     callbacks.append(EvalCallback(
@@ -131,30 +161,26 @@ def train(cfg: DictConfig):
         if not os.path.isabs(checkpoint_path):
             checkpoint_path = os.path.join(orig_dir, checkpoint_path)
         print(f"Loading checkpoint from {checkpoint_path}")
-        model = SAC.load(
+        model = algo_cls.load(
             checkpoint_path,
             env=env,
             tensorboard_log=os.path.join(orig_dir, "logs"),
         )
     else:
-        model = SAC(
+        model = algo_cls(
             "MlpPolicy",
             env,
             learning_rate=cfg.train.learning_rate,
             batch_size=cfg.train.batch_size,
-            buffer_size=cfg.train.buffer_size,
-            learning_starts=cfg.train.learning_starts,
-            train_freq=cfg.train.train_freq,
-            gradient_steps=cfg.train.gradient_steps,
-            tau=cfg.train.tau,
             gamma=cfg.train.gamma,
             policy_kwargs={"net_arch": list(cfg.train.net_arch)},
             stats_window_size=1,
             verbose=1,
             tensorboard_log=os.path.join(orig_dir, "logs"),
+            **algo_kwargs_fn(cfg),
         )
 
-    print(f"Training SAC ({cfg.env_name}) for {cfg.train.total_timesteps} steps...")
+    print(f"Training {algo_name.upper()} ({cfg.env_name}) for {cfg.train.total_timesteps} steps...")
     model.learn(total_timesteps=cfg.train.total_timesteps, callback=callbacks, log_interval=cfg.train.log_interval)
     model.save(os.path.join(log_dir, "final_model"))
     print(f"Model saved to {log_dir}/final_model.zip")
