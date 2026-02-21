@@ -1,4 +1,5 @@
 env_name: pickplace
+resume: null
 
 pickplace_env:
   action_scale: 0.05
@@ -20,8 +21,11 @@ train:
   buffer_size: 100000
   learning_starts: 10000
   checkpoint_freq: 50000
+  train_freq: 4
+  gradient_steps: 2
   tau: 0.005
   gamma: 0.99
+  log_interval: 100
   eval_freq: 50000
   n_eval_episodes: 10
 

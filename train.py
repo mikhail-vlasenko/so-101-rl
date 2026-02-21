@@ -12,20 +12,17 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from pickplace_env import SO101PickPlaceEnv
 
-class InfoLoggingCallback(BaseCallback):
-    """Log per-episode custom info dict metrics (no averaging)."""
+class _MeanMaxPhaseCallback(BaseCallback):
+    """Log mean max_phase across episodes in each log window.
 
-    def __init__(self, info_keys: list[str]):
-        super().__init__()
-        self.info_keys = info_keys
+    Uses logger.record_mean() which accumulates values and automatically
+    averages + resets on each dump_logs() call.
+    """
 
     def _on_step(self) -> bool:
-        for info in self.locals.get("infos", []):
-            if "episode" not in info:
-                continue
-            for key in self.info_keys:
-                if key in info:
-                    self.logger.record(f"rollout/{key}", float(info[key]))
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "max_phase" in info:
+                self.logger.record_mean("rollout/mean_max_phase", float(info["max_phase"]))
         return True
 
 
@@ -111,7 +108,7 @@ def train(cfg: DictConfig):
             sync_tensorboard=True,
         )
 
-    callbacks.append(InfoLoggingCallback(info_keys=["max_phase"]))
+    callbacks.append(_MeanMaxPhaseCallback())
 
     callbacks.append(CheckpointCallback(
         save_freq=cfg.train.checkpoint_freq // n_envs,
@@ -129,23 +126,36 @@ def train(cfg: DictConfig):
         callback_after_eval=_EvalPhaseCallback(phase_tracker),
     ))
 
-    model = SAC(
-        "MlpPolicy",
-        env,
-        learning_rate=cfg.train.learning_rate,
-        batch_size=cfg.train.batch_size,
-        buffer_size=cfg.train.buffer_size,
-        learning_starts=cfg.train.learning_starts,
-        tau=cfg.train.tau,
-        gamma=cfg.train.gamma,
-        policy_kwargs={"net_arch": list(cfg.train.net_arch)},
-        stats_window_size=1,
-        verbose=1,
-        tensorboard_log=os.path.join(orig_dir, "logs"),
-    )
+    if cfg.resume is not None:
+        checkpoint_path = cfg.resume
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(orig_dir, checkpoint_path)
+        print(f"Loading checkpoint from {checkpoint_path}")
+        model = SAC.load(
+            checkpoint_path,
+            env=env,
+            tensorboard_log=os.path.join(orig_dir, "logs"),
+        )
+    else:
+        model = SAC(
+            "MlpPolicy",
+            env,
+            learning_rate=cfg.train.learning_rate,
+            batch_size=cfg.train.batch_size,
+            buffer_size=cfg.train.buffer_size,
+            learning_starts=cfg.train.learning_starts,
+            train_freq=cfg.train.train_freq,
+            gradient_steps=cfg.train.gradient_steps,
+            tau=cfg.train.tau,
+            gamma=cfg.train.gamma,
+            policy_kwargs={"net_arch": list(cfg.train.net_arch)},
+            stats_window_size=1,
+            verbose=1,
+            tensorboard_log=os.path.join(orig_dir, "logs"),
+        )
 
     print(f"Training SAC ({cfg.env_name}) for {cfg.train.total_timesteps} steps...")
-    model.learn(total_timesteps=cfg.train.total_timesteps, callback=callbacks, log_interval=100)
+    model.learn(total_timesteps=cfg.train.total_timesteps, callback=callbacks, log_interval=cfg.train.log_interval)
     model.save(os.path.join(log_dir, "final_model"))
     print(f"Model saved to {log_dir}/final_model.zip")
 
