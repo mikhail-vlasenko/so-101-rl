@@ -93,13 +93,19 @@ class SO101PickPlaceEnv(gym.Env):
         self.ring_exclusion_radius = float(cfg["ring_exclusion_radius"])
         self.passive_pose = np.array(cfg["passive_pose"])
         self.floor_contact_penalty = float(cfg["floor_contact_penalty"])
+        self.ring_height_max = float(cfg["ring_height_max"])
+
+        # Ring body ID for randomizing height
+        self.ring_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ring")
+        assert self.ring_body_id >= 0, "Ring body not found in XML"
+        self.ring_height = self.ring_height_max  # effective height this episode
 
         self.gripper_idx = self.joint_names.index("gripper")
 
-        # Spaces: 6 joint pos + 6 joint vel + 3 ee pos + 3 cube pos = 18
+        # Spaces: 6 joint pos + 6 joint vel + 3 ee pos + 3 cube pos + 1 ring height = 19
         self.action_space = spaces.Box(low=-1.0, high=1.0,
                                        shape=(self.n_joints,), dtype=np.float32)
-        obs_high = np.full(18, np.inf, dtype=np.float32)
+        obs_high = np.full(19, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
         self.step_count = 0
@@ -122,7 +128,7 @@ class SO101PickPlaceEnv(gym.Env):
         qvel = self.data.qvel[self.joint_dofadr].copy()
         ee_pos = self._get_ee_pos()
         cube_pos = self._get_cube_pos()
-        return np.concatenate([qpos, qvel, ee_pos, cube_pos]).astype(np.float32)
+        return np.concatenate([qpos, qvel, ee_pos, cube_pos, [self.ring_height]]).astype(np.float32)
 
     def _has_gripper_contact(self):
         """Check if cube_geom is in contact with both jaws simultaneously."""
@@ -179,6 +185,12 @@ class SO101PickPlaceEnv(gym.Env):
         self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
         # Cube orientation: identity quaternion
         self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = [1, 0, 0, 0]
+
+        # Random ring height: sink the ring body into the floor
+        self.ring_height = self.np_random.uniform(0.0, self.ring_height_max)
+        ring_body_pos = self.model.body_pos[self.ring_body_id].copy()
+        ring_body_pos[2] = self.ring_height - self.ring_height_max
+        self.model.body_pos[self.ring_body_id] = ring_body_pos
 
         # Small random arm joint noise, gripper open
         noise = self.np_random.uniform(-0.1, 0.1, size=self.n_joints)

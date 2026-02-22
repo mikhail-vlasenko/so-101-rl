@@ -15,7 +15,6 @@
         markrgb="0.8 0.8 0.8" width="300" height="300" />
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"
         reflectance="0.2" />
-    <mesh name="ring" file="ring.stl"/>
   </asset>
 
   <worldbody>
@@ -34,10 +33,20 @@
     <site name="place_target" type="cylinder" size="0.04 0.001" pos="0.18 0 0.001"
         rgba="0.2 0.4 1 0.4"/>
 
-    <!-- Ring: mesh, R_inner=0.0425, R_outer=0.0475, 3cm tall -->
+    <!-- Hexagonal wall: 6 boxes, R=0.05, thickness=0.005, height=3cm -->
     <body name="ring" pos="0.18 0 0">
-      <geom type="mesh" mesh="ring" rgba="0.6 0.6 0.6 1"
-          contype="1" conaffinity="1"/>
+      <geom type="box" size="0.00250 0.03000 0.015" pos="-0.02165 0.03750 0.015" euler="0 0 -4.18879"
+          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+      <geom type="box" size="0.00250 0.03000 0.015" pos="-0.04330 0.00000 0.015" euler="0 0 -3.14159"
+          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+      <geom type="box" size="0.00250 0.03000 0.015" pos="-0.02165 -0.03750 0.015" euler="0 0 -2.09440"
+          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+      <geom type="box" size="0.00250 0.03000 0.015" pos="0.02165 -0.03750 0.015" euler="0 0 -1.04720"
+          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+      <geom type="box" size="0.00250 0.03000 0.015" pos="0.04330 0.00000 0.015" euler="0 0 0"
+          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+      <geom type="box" size="0.00250 0.03000 0.015" pos="0.02165 0.03750 0.015" euler="0 0 1.04720"
+          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
     </body>
   </worldbody>
 </mujoco>
