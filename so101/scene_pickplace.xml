@@ -27,7 +27,7 @@
       <freejoint name="cube_joint"/>
       <geom name="cube_geom" type="box" size="0.015 0.015 0.015" mass="0.02"
           rgba="0 0.8 0 1" condim="6" friction="1 0.005 0.0005"
-          contype="1" conaffinity="1" solref="0.01 1"/>
+          contype="1" conaffinity="1" solref="0.002 1"/>
     </body>
 
     <!-- Place target: visual-only flat cylinder -->

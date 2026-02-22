@@ -15,13 +15,6 @@ class Phase(enum.IntEnum):
     RETURN = 3
 
 
-class Bonus(enum.Enum):
-    REACH_CLOSE = enum.auto()
-    GRASPED = enum.auto()
-    PLACE_CLOSE = enum.auto()
-    RETURN_CLOSE = enum.auto()
-
-
 class SO101PickPlaceEnv(gym.Env):
     """Pick up a cube, place it at a target, and return to passive pose."""
 
@@ -52,20 +45,33 @@ class SO101PickPlaceEnv(gym.Env):
         # Cube geom ID
         self.cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
 
-        # Gripper geom IDs (fixed + moving jaw)
-        gripper_geom_names = [
+        # Gripper geom IDs per jaw
+        fixed_jaw_names = [
             "fixed_jaw_box1", "fixed_jaw_box2", "fixed_jaw_box3",
             "fixed_jaw_box4", "fixed_jaw_box5", "fixed_jaw_box6",
             "fixed_jaw_box7", "fixed_jaw_sph_tip1", "fixed_jaw_sph_tip2",
             "fixed_jaw_sph_tip3",
+        ]
+        moving_jaw_names = [
             "moving_jaw_box1", "moving_jaw_box2", "moving_jaw_box3",
             "moving_jaw_sph_tip1", "moving_jaw_sph_tip2", "moving_jaw_sph_tip3",
         ]
-        self.gripper_geom_ids = set()
-        for name in gripper_geom_names:
+        self.fixed_jaw_geom_ids = set()
+        self.moving_jaw_geom_ids = set()
+        for name in fixed_jaw_names:
             gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
             assert gid >= 0, f"Gripper geom '{name}' not found in XML"
-            self.gripper_geom_ids.add(gid)
+            self.fixed_jaw_geom_ids.add(gid)
+        for name in moving_jaw_names:
+            gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            assert gid >= 0, f"Gripper geom '{name}' not found in XML"
+            self.moving_jaw_geom_ids.add(gid)
+        self.gripper_geom_ids = self.fixed_jaw_geom_ids | self.moving_jaw_geom_ids
+
+        # Floor geom ID + all arm/gripper collision geom IDs (group 3)
+        self.floor_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        assert self.floor_geom_id >= 0, "Floor geom 'floor' not found in XML"
+        self.arm_geom_ids = {i for i in range(self.model.ngeom) if self.model.geom_group[i] == 3}
 
         # Cube freejoint qpos index
         cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
@@ -86,6 +92,7 @@ class SO101PickPlaceEnv(gym.Env):
         self.ring_center = np.array(cfg["ring_center"])
         self.ring_exclusion_radius = float(cfg["ring_exclusion_radius"])
         self.passive_pose = np.array(cfg["passive_pose"])
+        self.floor_contact_penalty = float(cfg["floor_contact_penalty"])
 
         self.gripper_idx = self.joint_names.index("gripper")
 
@@ -118,13 +125,34 @@ class SO101PickPlaceEnv(gym.Env):
         return np.concatenate([qpos, qvel, ee_pos, cube_pos]).astype(np.float32)
 
     def _has_gripper_contact(self):
-        """Check if cube_geom is in contact with any gripper geom."""
+        """Check if cube_geom is in contact with both jaws simultaneously."""
+        fixed_contact = False
+        moving_contact = False
         for i in range(self.data.ncon):
             c = self.data.contact[i]
             g1, g2 = c.geom1, c.geom2
-            if g1 == self.cube_geom_id and g2 in self.gripper_geom_ids:
+            if g1 == self.cube_geom_id:
+                other = g2
+            elif g2 == self.cube_geom_id:
+                other = g1
+            else:
+                continue
+            if other in self.fixed_jaw_geom_ids:
+                fixed_contact = True
+            if other in self.moving_jaw_geom_ids:
+                moving_contact = True
+            if fixed_contact and moving_contact:
                 return True
-            if g2 == self.cube_geom_id and g1 in self.gripper_geom_ids:
+        return False
+
+    def _has_floor_contact(self):
+        """Check if any arm/gripper geom is in contact with the floor."""
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            if g1 == self.floor_geom_id and g2 in self.arm_geom_ids:
+                return True
+            if g2 == self.floor_geom_id and g1 in self.arm_geom_ids:
                 return True
         return False
 
@@ -184,13 +212,14 @@ class SO101PickPlaceEnv(gym.Env):
         joint_pos = self._get_joint_pos()
         ee_cube_dist = np.linalg.norm(ee_pos - cube_pos)
         grasped = self._detect_grasp()
+        floor_contact = self._has_floor_contact() if self.floor_contact_penalty else False
 
         # Phase transitions
         self._update_phase(ee_cube_dist, grasped, cube_pos, joint_pos)
         self.max_phase = max(self.max_phase, self.phase)
 
         # Reward
-        reward = self._compute_reward(ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped)
+        reward = self._compute_reward(ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped, floor_contact)
 
         # Termination
         terminated = False
@@ -205,12 +234,16 @@ class SO101PickPlaceEnv(gym.Env):
         if self.render_mode == "human":
             self._render_human()
 
-        return self._get_obs(), float(reward), terminated, truncated, {
+        info = {
             "phase": self.phase.name,
             "max_phase": int(self.max_phase),
             "ee_cube_dist": ee_cube_dist,
             "grasped": grasped,
         }
+        if self.floor_contact_penalty:
+            info["floor_contact"] = floor_contact
+
+        return self._get_obs(), float(reward), terminated, truncated, info
 
     def _update_phase(self, ee_cube_dist, grasped, cube_pos, joint_pos):
         if self.phase == Phase.REACH:
@@ -236,30 +269,32 @@ class SO101PickPlaceEnv(gym.Env):
         self._bonuses_collected.add(name)
         return amount
 
-    def _compute_reward(self, ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped):
+    def _compute_reward(self, ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped, floor_contact):
         reward = -0.01  # time penalty
 
+        if floor_contact:
+            reward += self.floor_contact_penalty
+
+        xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
+
+        # Penalty for cube being on/near the floor
+        # Disabled when cube is within the place target area
+        above_target = xy_dist < 0.03
+        cube_ground_penalty = 0.0 if above_target else -0.2 * max(0.0, 1.0 - cube_pos[2] / 0.05)
+        reward += cube_ground_penalty
+
         if self.phase == Phase.REACH:
-            reward += -ee_cube_dist
-            if ee_cube_dist < 0.03:
-                reward += self._bonus(Bonus.REACH_CLOSE, 1.0)
+            reward += -ee_cube_dist - xy_dist
 
         elif self.phase == Phase.GRASP:
-            reward += -ee_cube_dist
-            if grasped:
-                reward += self._bonus(Bonus.GRASPED, 10.0)
+            reward += -ee_cube_dist - xy_dist
 
         elif self.phase == Phase.PLACE:
-            xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
             reward += -xy_dist
-            if xy_dist < 0.03:
-                reward += self._bonus(Bonus.PLACE_CLOSE, 2.0)
 
         elif self.phase == Phase.RETURN:
             joint_dist = np.linalg.norm(joint_pos - self.passive_pose)
             reward += -joint_dist
-            if joint_dist < 0.5:
-                reward += self._bonus(Bonus.RETURN_CLOSE, 2.0)
 
         return reward
 

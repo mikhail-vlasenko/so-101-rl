@@ -2,61 +2,18 @@
 
 import os
 
-import gymnasium
 import hydra
 import wandb
 from omegaconf import DictConfig, OmegaConf
 from stable_baselines3 import PPO, SAC
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
+from callbacks import (
+    EvalPhaseCallback, FloorContactCallback, MaxPhaseTracker, MeanMaxPhaseCallback,
+)
+from networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from pickplace_env import SO101PickPlaceEnv
-
-class _MeanMaxPhaseCallback(BaseCallback):
-    """Log mean max_phase across episodes in each log window.
-
-    Uses logger.record_mean() which accumulates values and automatically
-    averages + resets on each dump_logs() call.
-    """
-
-    def _on_step(self) -> bool:
-        for done, info in zip(self.locals["dones"], self.locals["infos"]):
-            if done and "max_phase" in info:
-                self.logger.record_mean("rollout/mean_max_phase", float(info["max_phase"]))
-        return True
-
-
-class _MaxPhaseTracker(gymnasium.Wrapper):
-    """Track max_phase at episode end for eval logging."""
-
-    def __init__(self, env):
-        super().__init__(env)
-        self.episode_phases: list[float] = []
-
-    def step(self, action):
-        obs, rew, term, trunc, info = self.env.step(action)
-        if (term or trunc) and "max_phase" in info:
-            self.episode_phases.append(float(info["max_phase"]))
-        return obs, rew, term, trunc, info
-
-    def pop_phases(self) -> list[float]:
-        phases = self.episode_phases.copy()
-        self.episode_phases.clear()
-        return phases
-
-
-class _EvalPhaseCallback(BaseCallback):
-    """Log mean max_phase after each evaluation round."""
-
-    def __init__(self, phase_tracker: _MaxPhaseTracker):
-        super().__init__()
-        self.phase_tracker = phase_tracker
-
-    def _on_step(self) -> bool:
-        phases = self.phase_tracker.pop_phases()
-        if phases:
-            self.logger.record("eval/mean_max_phase", sum(phases) / len(phases))
-        return True
 
 
 ENV_REGISTRY = {
@@ -86,8 +43,8 @@ def _ppo_kwargs(cfg: DictConfig) -> dict:
 
 
 ALGORITHM_REGISTRY = {
-    "sac": (SAC, _sac_kwargs),
-    "ppo": (PPO, _ppo_kwargs),
+    "sac": (SAC, _sac_kwargs, LayerNormSACPolicy),
+    "ppo": (PPO, _ppo_kwargs, LayerNormActorCriticPolicy),
 }
 
 
@@ -112,7 +69,7 @@ def train(cfg: DictConfig):
     xml_path = os.path.join(orig_dir, SO101PickPlaceEnv.XML_PATH)
 
     algo_name = cfg.algorithm
-    algo_cls, algo_kwargs_fn = ALGORITHM_REGISTRY[algo_name]
+    algo_cls, algo_kwargs_fn, policy_cls = ALGORITHM_REGISTRY[algo_name]
 
     gamma = cfg.train.gamma
     n_envs = cfg.train.n_envs
@@ -120,7 +77,7 @@ def train(cfg: DictConfig):
     vec_env = SubprocVecEnv([_make_env_fn(cfg, xml_path) for _ in range(n_envs)])
     env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, gamma=gamma)
 
-    phase_tracker = _MaxPhaseTracker(make_env(cfg, xml_path=xml_path))
+    phase_tracker = MaxPhaseTracker(make_env(cfg, xml_path=xml_path))
     eval_vec_env = DummyVecEnv([lambda: Monitor(phase_tracker)])
     eval_env = VecNormalize(eval_vec_env, norm_obs=False, training=False, norm_reward=False)
 
@@ -138,7 +95,8 @@ def train(cfg: DictConfig):
             sync_tensorboard=True,
         )
 
-    callbacks.append(_MeanMaxPhaseCallback())
+    callbacks.append(MeanMaxPhaseCallback())
+    callbacks.append(FloorContactCallback())
 
     callbacks.append(CheckpointCallback(
         save_freq=cfg.train.checkpoint_freq // n_envs,
@@ -153,7 +111,7 @@ def train(cfg: DictConfig):
         eval_freq=cfg.train.eval_freq // n_envs,
         n_eval_episodes=cfg.train.n_eval_episodes,
         deterministic=True,
-        callback_after_eval=_EvalPhaseCallback(phase_tracker),
+        callback_after_eval=EvalPhaseCallback(phase_tracker),
     ))
 
     if cfg.resume is not None:
@@ -168,12 +126,15 @@ def train(cfg: DictConfig):
         )
     else:
         model = algo_cls(
-            "MlpPolicy",
+            policy_cls,
             env,
             learning_rate=cfg.train.learning_rate,
             batch_size=cfg.train.batch_size,
             gamma=cfg.train.gamma,
-            policy_kwargs={"net_arch": list(cfg.train.net_arch)},
+            policy_kwargs={
+                "net_arch": list(cfg.train.net_arch),
+                "input_batchnorm": cfg.train.input_batchnorm,
+            },
             stats_window_size=1,
             verbose=1,
             tensorboard_log=os.path.join(orig_dir, "logs"),

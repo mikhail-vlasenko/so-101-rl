@@ -1,0 +1,12 @@
+defaults:
+  - config
+
+algorithm: sac
+
+train:
+  n_envs: 8
+  batch_size: 256
+  total_timesteps: 10_000_000
+  eval_freq: 500_000
+  checkpoint_freq: 500_000
+  log_interval: 100
