@@ -1,4 +1,7 @@
-"""Gymnasium environment: SO-101 arm pick-and-place task."""
+"""Gymnasium environment: SO-101 arm pick-and-place task.
+
+Phases: REACH → PLACE → RETURN.
+"""
 
 import enum
 
@@ -10,9 +13,8 @@ from gymnasium import spaces
 
 class Phase(enum.IntEnum):
     REACH = 0
-    GRASP = 1
-    PLACE = 2
-    RETURN = 3
+    PLACE = 1
+    RETURN = 2
 
 
 class SO101PickPlaceEnv(gym.Env):
@@ -89,6 +91,8 @@ class SO101PickPlaceEnv(gym.Env):
         self.cube_low = np.array(cfg["cube_low"])
         self.cube_high = np.array(cfg["cube_high"])
         self.place_target = np.array(cfg["place_target"])
+        self.place_target_radius = float(cfg["place_target_radius"])
+        self.place_target_height = float(cfg["place_target_height"])
         self.ring_center = np.array(cfg["ring_center"])
         self.ring_exclusion_radius = float(cfg["ring_exclusion_radius"])
         self.passive_pose = np.array(cfg["passive_pose"])
@@ -98,6 +102,7 @@ class SO101PickPlaceEnv(gym.Env):
         # Ring body ID for randomizing height
         self.ring_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ring")
         assert self.ring_body_id >= 0, "Ring body not found in XML"
+        self.ring_wall_height = 0.1  # must match geom half-height in scene XML (0.05 * 2)
         self.ring_height = self.ring_height_max  # effective height this episode
 
         self.gripper_idx = self.joint_names.index("gripper")
@@ -189,7 +194,7 @@ class SO101PickPlaceEnv(gym.Env):
         # Random ring height: sink the ring body into the floor
         self.ring_height = self.np_random.uniform(0.0, self.ring_height_max)
         ring_body_pos = self.model.body_pos[self.ring_body_id].copy()
-        ring_body_pos[2] = self.ring_height - self.ring_height_max
+        ring_body_pos[2] = self.ring_height - self.ring_wall_height
         self.model.body_pos[self.ring_body_id] = ring_body_pos
 
         # Small random arm joint noise, gripper open
@@ -259,19 +264,14 @@ class SO101PickPlaceEnv(gym.Env):
 
     def _update_phase(self, ee_cube_dist, grasped, cube_pos, joint_pos):
         if self.phase == Phase.REACH:
-            if ee_cube_dist < 0.03:
-                self.phase = Phase.GRASP
-        elif self.phase == Phase.GRASP:
             if grasped:
                 self.phase = Phase.PLACE
-            elif ee_cube_dist > 0.08:
-                self.phase = Phase.REACH
         elif self.phase == Phase.PLACE:
             if not grasped:
                 self.phase = Phase.REACH
             else:
                 xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
-                if xy_dist < 0.03 and cube_pos[2] < 0.05:
+                if xy_dist < self.place_target_radius and cube_pos[2] < self.place_target_height:
                     self.phase = Phase.RETURN
 
     def _bonus(self, name, amount):
@@ -291,22 +291,19 @@ class SO101PickPlaceEnv(gym.Env):
 
         # Penalty for cube being on/near the floor
         # Disabled when cube is within the place target area
-        above_target = xy_dist < 0.03
+        above_target = xy_dist < self.place_target_radius
         cube_ground_penalty = 0.0 if above_target else -0.2 * max(0.0, 1.0 - cube_pos[2] / 0.05)
         reward += cube_ground_penalty
+
+        joint_dist = np.linalg.norm(joint_pos - self.passive_pose)
+        # Small return-to-passive signal always active
+        reward += -0.01 * joint_dist
 
         if self.phase == Phase.REACH:
             reward += -ee_cube_dist - xy_dist
 
-        elif self.phase == Phase.GRASP:
-            reward += -ee_cube_dist - xy_dist
-
         elif self.phase == Phase.PLACE:
             reward += -xy_dist
-
-        elif self.phase == Phase.RETURN:
-            joint_dist = np.linalg.norm(joint_pos - self.passive_pose)
-            reward += -joint_dist
 
         return reward
 

@@ -13,7 +13,7 @@ Train RL policies in MuJoCo to make the SO-101 arm perform basic manipulation ta
 
 ## Task: Pick and Place
 
-Pick up a cube and place it at a target location. 4-phase task: REACH → GRASP → PLACE → RETURN.
+Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE → RETURN.
 
 - `so101/scene_pickplace.xml` — scene with free-body cube and visual place target
 - `pickplace_env.py` — Gymnasium env (18-dim obs, 6-dim action, phase-based reward)
