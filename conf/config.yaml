@@ -21,7 +21,7 @@ pickplace_env:
 train:
   n_envs: 16
   net_arch: [256, 256, 256, 256]
-  input_batchnorm: false
+  input_batchnorm: true
   total_timesteps: 20_000_000
   learning_rate: 3e-4
   batch_size: 4096
