@@ -13,6 +13,8 @@ import os
 import hydra
 from omegaconf import DictConfig
 from stable_baselines3 import PPO, SAC
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from pickplace_env import SO101PickPlaceEnv
 
@@ -59,23 +61,25 @@ def main(cfg: DictConfig):
     print(f"Loading {algo_name.upper()} model: {model_path}")
     model = algo_cls.load(model_path)
 
-    env = SO101PickPlaceEnv(
+    raw_env = SO101PickPlaceEnv(
         render_mode="human",
         env_cfg=cfg["pickplace_env"],
         slow_factor=2,
         xml_path=xml_path,
     )
+    env = DummyVecEnv([lambda: Monitor(raw_env)])
 
     try:
         for ep in range(episodes):
-            obs, _ = env.reset()
+            obs = env.reset()
             total_reward = 0.0
             done = False
             while not done:
                 action, _ = model.predict(obs, deterministic=True)
-                obs, reward, terminated, truncated, info = env.step(action)
-                total_reward += reward
-                done = terminated or truncated
+                obs, rewards, dones, infos = env.step(action)
+                total_reward += rewards[0]
+                done = dones[0]
+            info = infos[0]
             print(f"Episode {ep + 1}/{episodes}: return={total_reward:.2f}  phase={info['phase']}  max_phase={info['max_phase']}")
     except KeyboardInterrupt:
         pass

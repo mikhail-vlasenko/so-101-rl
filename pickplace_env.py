@@ -11,6 +11,18 @@ import gymnasium as gym
 from gymnasium import spaces
 
 
+# Reward constants
+TIME_PENALTY = -0.05
+JOINT_PASSIVE_COEFF = -0.01
+EE_CUBE_COEFF = -0.5
+XY_PROGRESS_COEFF = 200.0
+HEIGHT_MULT_MAX = 2.0
+HEIGHT_MULT_CEILING = 0.05
+GRASP_HOLD_REWARD = 0.05
+RETURN_BONUS = 10.0
+RETURN_THRESHOLD = 0.3
+
+
 class Phase(enum.IntEnum):
     REACH = 0
     PLACE = 1
@@ -208,6 +220,10 @@ class SO101PickPlaceEnv(gym.Env):
         self.phase = Phase.REACH
         self.max_phase = Phase.REACH
         self._bonuses_collected = set()
+        self._max_cube_height = cube_pos[2]
+        self._prev_xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
+        self._xy_progress_total = 0.0
+        self._xy_regress_total = 0.0
         return self._get_obs(), {}
 
     def step(self, action):
@@ -230,6 +246,7 @@ class SO101PickPlaceEnv(gym.Env):
         ee_cube_dist = np.linalg.norm(ee_pos - cube_pos)
         grasped = self._detect_grasp()
         floor_contact = self._has_floor_contact() if self.floor_contact_penalty else False
+        self._max_cube_height = max(self._max_cube_height, cube_pos[2])
 
         # Phase transitions
         self._update_phase(ee_cube_dist, grasped, cube_pos, joint_pos)
@@ -242,8 +259,8 @@ class SO101PickPlaceEnv(gym.Env):
         terminated = False
         if self.phase == Phase.RETURN:
             joint_dist = np.linalg.norm(joint_pos - self.passive_pose)
-            if joint_dist < 0.3:
-                reward += 10.0
+            if joint_dist < RETURN_THRESHOLD:
+                reward += RETURN_BONUS
                 terminated = True
 
         truncated = self.step_count >= self.max_steps
@@ -251,12 +268,17 @@ class SO101PickPlaceEnv(gym.Env):
         if self.render_mode == "human":
             self._render_human()
 
+        done = terminated or truncated
         info = {
             "phase": self.phase.name,
             "max_phase": int(self.max_phase),
             "ee_cube_dist": ee_cube_dist,
             "grasped": grasped,
         }
+        if done:
+            info["max_cube_height"] = self._max_cube_height
+            info["xy_progress"] = self._xy_progress_total
+            info["xy_regress"] = self._xy_regress_total
         if self.floor_contact_penalty:
             info["floor_contact"] = floor_contact
 
@@ -282,28 +304,37 @@ class SO101PickPlaceEnv(gym.Env):
         return amount
 
     def _compute_reward(self, ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped, floor_contact):
-        reward = -0.01  # time penalty
+        reward = TIME_PENALTY
 
         if floor_contact:
             reward += self.floor_contact_penalty
 
-        xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
-
-        # Penalty for cube being on/near the floor
-        # Disabled when cube is within the place target area
-        above_target = xy_dist < self.place_target_radius
-        cube_ground_penalty = 0.0 if above_target else -0.2 * max(0.0, 1.0 - cube_pos[2] / 0.05)
-        reward += cube_ground_penalty
-
         joint_dist = np.linalg.norm(joint_pos - self.passive_pose)
-        # Small return-to-passive signal always active
-        reward += -0.01 * joint_dist
+        reward += JOINT_PASSIVE_COEFF * joint_dist
+
+        # XY progress reward: positive for moving toward target, 2x negative for moving away
+        xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
+        xy_delta = self._prev_xy_dist - xy_dist  # positive = moved closer
+        self._prev_xy_dist = xy_dist
+
+        # Height multiplier: 1.0 at ground, 2.0 at HEIGHT_MULT_CEILING
+        height_frac = np.clip(cube_pos[2] / HEIGHT_MULT_CEILING, 0.0, 1.0)
+        height_mult = 1.0 + (HEIGHT_MULT_MAX - 1.0) * height_frac
+
+        if xy_delta >= 0:
+            xy_reward = XY_PROGRESS_COEFF * xy_delta * height_mult
+            self._xy_progress_total += xy_reward
+        else:
+            xy_reward = XY_PROGRESS_COEFF * HEIGHT_MULT_MAX * xy_delta * height_mult
+            self._xy_regress_total += xy_reward
+
+        if grasped:
+            reward += GRASP_HOLD_REWARD
 
         if self.phase == Phase.REACH:
-            reward += -ee_cube_dist - xy_dist
-
+            reward += EE_CUBE_COEFF * ee_cube_dist + xy_reward
         elif self.phase == Phase.PLACE:
-            reward += -xy_dist
+            reward += xy_reward
 
         return reward
 

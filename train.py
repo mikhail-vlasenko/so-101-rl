@@ -10,7 +10,8 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from callbacks import (
-    EvalPhaseCallback, FloorContactCallback, MaxPhaseTracker, MeanMaxPhaseCallback,
+    EvalPhaseCallback, FloorContactCallback, MaxCubeHeightCallback,
+    MaxPhaseTracker, MeanMaxPhaseCallback, XYProgressCallback,
 )
 from networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from pickplace_env import SO101PickPlaceEnv
@@ -96,7 +97,9 @@ def train(cfg: DictConfig):
         )
 
     callbacks.append(MeanMaxPhaseCallback())
+    callbacks.append(MaxCubeHeightCallback())
     callbacks.append(FloorContactCallback())
+    callbacks.append(XYProgressCallback())
 
     callbacks.append(CheckpointCallback(
         save_freq=cfg.train.checkpoint_freq // n_envs,

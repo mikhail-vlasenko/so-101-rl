@@ -18,6 +18,16 @@ class MeanMaxPhaseCallback(BaseCallback):
         return True
 
 
+class MaxCubeHeightCallback(BaseCallback):
+    """Log mean max cube height across episodes in each log window."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "max_cube_height" in info:
+                self.logger.record_mean("rollout/mean_max_cube_height", info["max_cube_height"])
+        return True
+
+
 class FloorContactCallback(BaseCallback):
     """Log fraction of steps where the arm touches the floor."""
 
@@ -40,34 +50,53 @@ class FloorContactCallback(BaseCallback):
         return True
 
 
+class XYProgressCallback(BaseCallback):
+    """Log mean episode XY progress and regress rewards."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "xy_progress" in info:
+                self.logger.record_mean("rollout/mean_xy_progress", info["xy_progress"])
+                self.logger.record_mean("rollout/mean_xy_regress", info["xy_regress"])
+        return True
+
+
 class MaxPhaseTracker(gymnasium.Wrapper):
-    """Track max_phase at episode end for eval logging."""
+    """Track max_phase and max_cube_height at episode end for eval logging."""
 
     def __init__(self, env):
         super().__init__(env)
         self.episode_phases: list[float] = []
+        self.episode_max_cube_heights: list[float] = []
 
     def step(self, action):
         obs, rew, term, trunc, info = self.env.step(action)
-        if (term or trunc) and "max_phase" in info:
-            self.episode_phases.append(float(info["max_phase"]))
+        if term or trunc:
+            if "max_phase" in info:
+                self.episode_phases.append(float(info["max_phase"]))
+            if "max_cube_height" in info:
+                self.episode_max_cube_heights.append(info["max_cube_height"])
         return obs, rew, term, trunc, info
 
-    def pop_phases(self) -> list[float]:
+    def pop_stats(self) -> tuple[list[float], list[float]]:
         phases = self.episode_phases.copy()
+        heights = self.episode_max_cube_heights.copy()
         self.episode_phases.clear()
-        return phases
+        self.episode_max_cube_heights.clear()
+        return phases, heights
 
 
 class EvalPhaseCallback(BaseCallback):
-    """Log mean max_phase after each evaluation round."""
+    """Log mean max_phase and max_cube_height after each evaluation round."""
 
     def __init__(self, phase_tracker: MaxPhaseTracker):
         super().__init__()
         self.phase_tracker = phase_tracker
 
     def _on_step(self) -> bool:
-        phases = self.phase_tracker.pop_phases()
+        phases, heights = self.phase_tracker.pop_stats()
         if phases:
             self.logger.record("eval/mean_max_phase", sum(phases) / len(phases))
+        if heights:
+            self.logger.record("eval/mean_max_cube_height", sum(heights) / len(heights))
         return True

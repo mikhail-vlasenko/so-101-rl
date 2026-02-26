@@ -36,17 +36,17 @@
     <!-- Hexagonal wall: 6 boxes, R=0.05, thickness=0.005, height=3cm -->
     <body name="ring" pos="0.18 0 0">
       <geom type="box" size="0.00250 0.03000 0.05" pos="-0.02165 0.03750 0.05" euler="0 0 -4.18879"
-          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+          rgba="0.6 0.6 0.6 1" contype="2" conaffinity="1"/>
       <geom type="box" size="0.00250 0.03000 0.05" pos="-0.04330 0.00000 0.05" euler="0 0 -3.14159"
-          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+          rgba="0.6 0.6 0.6 1" contype="2" conaffinity="1"/>
       <geom type="box" size="0.00250 0.03000 0.05" pos="-0.02165 -0.03750 0.05" euler="0 0 -2.09440"
-          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+          rgba="0.6 0.6 0.6 1" contype="2" conaffinity="1"/>
       <geom type="box" size="0.00250 0.03000 0.05" pos="0.02165 -0.03750 0.05" euler="0 0 -1.04720"
-          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+          rgba="0.6 0.6 0.6 1" contype="2" conaffinity="1"/>
       <geom type="box" size="0.00250 0.03000 0.05" pos="0.04330 0.00000 0.05" euler="0 0 0"
-          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+          rgba="0.6 0.6 0.6 1" contype="2" conaffinity="1"/>
       <geom type="box" size="0.00250 0.03000 0.05" pos="0.02165 0.03750 0.05" euler="0 0 1.04720"
-          rgba="0.6 0.6 0.6 1" contype="1" conaffinity="1"/>
+          rgba="0.6 0.6 0.6 1" contype="2" conaffinity="1"/>
     </body>
   </worldbody>
 </mujoco>
