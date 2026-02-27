@@ -19,6 +19,7 @@ XY_PROGRESS_COEFF = 200.0
 HEIGHT_MULT_MAX = 2.0
 HEIGHT_MULT_CEILING = 0.05
 GRASP_HOLD_REWARD = 0.05
+PLACE_BONUS = GRASP_HOLD_REWARD * 2
 RETURN_BONUS = 10.0
 RETURN_THRESHOLD = 0.3
 
@@ -328,13 +329,16 @@ class SO101PickPlaceEnv(gym.Env):
             xy_reward = XY_PROGRESS_COEFF * HEIGHT_MULT_MAX * xy_delta * height_mult
             self._xy_regress_total += xy_reward
 
-        if grasped:
-            reward += GRASP_HOLD_REWARD
-
         if self.phase == Phase.REACH:
+            if grasped:
+                reward += GRASP_HOLD_REWARD
             reward += EE_CUBE_COEFF * ee_cube_dist + xy_reward
         elif self.phase == Phase.PLACE:
+            if grasped:
+                reward += GRASP_HOLD_REWARD
             reward += xy_reward
+        elif self.phase == Phase.RETURN:
+            reward += PLACE_BONUS
 
         return reward
 
