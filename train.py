@@ -51,27 +51,29 @@ ALGORITHM_REGISTRY = {
 }
 
 
-def make_env(cfg: DictConfig, xml_path=None, render_mode=None, slow_factor=1):
-    """Create env by name from Hydra config."""
-    env_cls = ENV_REGISTRY[cfg.env_name]
-    env_cfg = cfg[f"{cfg.env_name}_env"]
+def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1):
+    """Create an env instance from class, config, and XML path."""
     return env_cls(render_mode=render_mode, env_cfg=env_cfg,
                    slow_factor=slow_factor, xml_path=xml_path)
 
 
-def _make_env_fn(cfg, xml_path):
-    """Factory closure for SubprocVecEnv — uses absolute XML path."""
+def _make_env_fn(env_cls, env_cfg, xml_path):
+    """Factory closure for SubprocVecEnv."""
     def _init():
-        return Monitor(make_env(cfg, xml_path=xml_path))
+        return Monitor(env_cls(env_cfg=env_cfg, xml_path=xml_path))
     return _init
+
+
+def _resolve_env(cfg, orig_dir, env_name):
+    """Return (env_cls, env_cfg, xml_path) for a single env type."""
+    env_cls = ENV_REGISTRY[env_name]
+    return env_cls, cfg[f"{env_name}_env"], os.path.join(orig_dir, env_cls.XML_PATH)
 
 
 def train(cfg: DictConfig):
     # Hydra changes cwd — go back to original for MuJoCo XML paths
     orig_dir = hydra.utils.get_original_cwd()
     os.chdir(orig_dir)
-    env_cls = ENV_REGISTRY[cfg.env_name]
-    xml_path = os.path.join(orig_dir, env_cls.XML_PATH)
 
     algo_name = cfg.algorithm
     algo_cls, algo_kwargs_fn, policy_cls = ALGORITHM_REGISTRY[algo_name]
@@ -79,10 +81,26 @@ def train(cfg: DictConfig):
     gamma = cfg.train.gamma
     n_envs = cfg.train.n_envs
 
-    vec_env = SubprocVecEnv([_make_env_fn(cfg, xml_path) for _ in range(n_envs)])
+    if cfg.env_name == "multitask":
+        lift_cls, lift_cfg, lift_xml = _resolve_env(cfg, orig_dir, "lift")
+        pp_cls, pp_cfg, pp_xml = _resolve_env(cfg, orig_dir, "pickplace")
+        n_lift = round(n_envs * cfg.lift_ratio)
+        env_fns = [
+            _make_env_fn(lift_cls, lift_cfg, lift_xml) if i < n_lift
+            else _make_env_fn(pp_cls, pp_cfg, pp_xml)
+            for i in range(n_envs)
+        ]
+        # Eval on pickplace (the harder task)
+        eval_inner = make_env(pp_cls, pp_cfg, pp_xml)
+    else:
+        env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, cfg.env_name)
+        env_fns = [_make_env_fn(env_cls, env_cfg, xml_path) for _ in range(n_envs)]
+        eval_inner = make_env(env_cls, env_cfg, xml_path)
+
+    vec_env = SubprocVecEnv(env_fns)
     env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, gamma=gamma)
 
-    phase_tracker = MaxPhaseTracker(make_env(cfg, xml_path=xml_path))
+    phase_tracker = MaxPhaseTracker(eval_inner)
     eval_vec_env = DummyVecEnv([lambda: Monitor(phase_tracker)])
     eval_env = VecNormalize(eval_vec_env, norm_obs=False, training=False, norm_reward=False)
 

@@ -13,12 +13,16 @@ Train RL policies in MuJoCo to make the SO-101 arm perform basic manipulation ta
 
 ## Tasks
 
+### Shared
+
+- `base_env.py` — Base Gymnasium env with MuJoCo setup, contact detection, rendering, reset/step skeleton (20-dim obs, 6-dim action)
+
 ### Lift
 
 Grasp a cube and lift it to 10cm. Simpler grasping prerequisite for pick-and-place.
 
 - `so101/scene_lift.xml` — scene with cube only
-- `lift_env.py` — Gymnasium env (18-dim obs, 6-dim action, height-progress reward)
+- `lift_env.py` — Gymnasium env (height-progress reward)
 - `conf/env/lift.yaml` — env config
 
 ### Pick and Place
@@ -26,14 +30,14 @@ Grasp a cube and lift it to 10cm. Simpler grasping prerequisite for pick-and-pla
 Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE → RETURN.
 
 - `so101/scene_pickplace.xml` — scene with free-body cube, place target, and ring
-- `pickplace_env.py` — Gymnasium env (19-dim obs, 6-dim action, phase-based reward)
+- `pickplace_env.py` — Gymnasium env (phase-based reward)
 - `conf/env/pickplace.yaml` — env config
 
 ## Training
 
 - `train.py` — Training with Hydra config + W&B logging
 - `conf/config.yaml` — shared hyperparameters (train, algorithm, wandb), default env: pickplace
-- `conf/env/` — per-env config group (selected via `env=lift` or `env=pickplace`)
+- `conf/env/` — per-env config group (selected via `env=lift`, `env=pickplace`, or `env=multitask`)
 
 ### Usage
 
@@ -44,6 +48,7 @@ conda activate mujoco_env
 
 python train.py env=lift                     # train lift
 python train.py env=pickplace                # train pick-and-place (default)
+python train.py env=multitask                # train on both lift + pickplace (50/50)
 python train.py env=lift wandb.enabled=false # without W&B
 python train.py train.total_timesteps=200000 # override params
 python eval.py env=lift                      # eval lift checkpoint

@@ -16,13 +16,7 @@ from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from lift_env import SO101LiftEnv
-from pickplace_env import SO101PickPlaceEnv
-
-ENV_REGISTRY = {
-    "pickplace": SO101PickPlaceEnv,
-    "lift": SO101LiftEnv,
-}
+from train import ENV_REGISTRY, _resolve_env, make_env
 
 ALGORITHM_CLASSES = {
     "sac": SAC,
@@ -53,8 +47,9 @@ def _resolve_model_path(model_arg: str, log_dir: str) -> str:
 def main(cfg: DictConfig):
     orig_dir = hydra.utils.get_original_cwd()
     os.chdir(orig_dir)
-    env_cls = ENV_REGISTRY[cfg.env_name]
-    xml_path = os.path.join(orig_dir, env_cls.XML_PATH)
+    # Multitask evals on pickplace (the harder task), matching training eval
+    eval_env_name = "pickplace" if cfg.env_name == "multitask" else cfg.env_name
+    env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, eval_env_name)
 
     algo_name = cfg.algorithm
     algo_cls = ALGORITHM_CLASSES[algo_name]
@@ -68,13 +63,7 @@ def main(cfg: DictConfig):
     print(f"Loading {algo_name.upper()} model: {model_path}")
     model = algo_cls.load(model_path)
 
-    env_cfg = cfg[f"{cfg.env_name}_env"]
-    raw_env = env_cls(
-        render_mode="human",
-        env_cfg=env_cfg,
-        slow_factor=2,
-        xml_path=xml_path,
-    )
+    raw_env = make_env(env_cls, env_cfg, xml_path, render_mode="human", slow_factor=2)
     env = DummyVecEnv([lambda: Monitor(raw_env)])
 
     try:

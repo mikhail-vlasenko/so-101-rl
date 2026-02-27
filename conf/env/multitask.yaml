@@ -1,0 +1,27 @@
+# @package _global_
+env_name: multitask
+lift_ratio: 0.25  # fraction of workers assigned to lift (rest are pickplace)
+
+lift_env:
+  action_scale: 0.05
+  max_steps: 200
+  n_substeps: 10
+  cube_low: [0.15, -0.15, 0.015]
+  cube_high: [0.30, 0.15, 0.015]
+  floor_contact_penalty: -0.02
+  target_height: 0.10
+
+pickplace_env:
+  action_scale: 0.05
+  max_steps: 300
+  n_substeps: 10
+  cube_low: [0.15, -0.15, 0.015]
+  cube_high: [0.30, 0.15, 0.015]
+  place_target: [0.18, 0.0, 0.02]
+  place_target_radius: 0.04
+  place_target_height: 0.02
+  ring_center: [0.18, 0.0]
+  ring_exclusion_radius: 0.075
+  passive_pose: [0.0, -1.0, 0.7, 0.9, 0.0, 0.0]
+  floor_contact_penalty: -0.02
+  ring_height_max: 0.05
