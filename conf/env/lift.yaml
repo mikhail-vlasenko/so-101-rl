@@ -1,0 +1,11 @@
+# @package _global_
+env_name: lift
+
+lift_env:
+  action_scale: 0.05
+  max_steps: 200
+  n_substeps: 10
+  cube_low: [0.15, -0.15, 0.015]
+  cube_high: [0.30, 0.15, 0.015]
+  floor_contact_penalty: -0.02
+  target_height: 0.10

@@ -11,25 +11,43 @@ Train RL policies in MuJoCo to make the SO-101 arm perform basic manipulation ta
 - Source: [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101)
 - Requires MuJoCo >= 3.1.3 (installed: 3.5.0)
 
-## Task: Pick and Place
+## Tasks
+
+### Lift
+
+Grasp a cube and lift it to 10cm. Simpler grasping prerequisite for pick-and-place.
+
+- `so101/scene_lift.xml` — scene with cube only
+- `lift_env.py` — Gymnasium env (18-dim obs, 6-dim action, height-progress reward)
+- `conf/env/lift.yaml` — env config
+
+### Pick and Place
 
 Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE → RETURN.
 
-- `so101/scene_pickplace.xml` — scene with free-body cube and visual place target
-- `pickplace_env.py` — Gymnasium env (18-dim obs, 6-dim action, phase-based reward)
+- `so101/scene_pickplace.xml` — scene with free-body cube, place target, and ring
+- `pickplace_env.py` — Gymnasium env (19-dim obs, 6-dim action, phase-based reward)
+- `conf/env/pickplace.yaml` — env config
 
 ## Training
 
-- `train.py` — SAC training with Hydra config + W&B logging
-- `conf/config.yaml` — all hyperparameters (env, train, wandb)
+- `train.py` — Training with Hydra config + W&B logging
+- `conf/config.yaml` — shared hyperparameters (train, algorithm, wandb), default env: pickplace
+- `conf/env/` — per-env config group (selected via `env=lift` or `env=pickplace`)
 
 ### Usage
 
+All commands must run in the `mujoco_env` conda environment:
+
 ```bash
-python train.py                              # train pick-and-place
-python train.py wandb.enabled=false          # train without W&B
+conda activate mujoco_env
+
+python train.py env=lift                     # train lift
+python train.py env=pickplace                # train pick-and-place (default)
+python train.py env=lift wandb.enabled=false # without W&B
 python train.py train.total_timesteps=200000 # override params
-python eval.py                               # eval latest checkpoint
+python eval.py env=lift                      # eval lift checkpoint
+python eval.py env=pickplace                 # eval pickplace checkpoint
 python eval.py model=best                    # eval best model
 python eval.py model=path/to/model.zip       # eval specific model
 python show_starts.py                        # visualize spawn positions
@@ -37,9 +55,10 @@ python show_starts.py                        # visualize spawn positions
 
 ### Stack
 
-- **Config:** Hydra (`conf/config.yaml`)
+- **Conda env:** `mujoco_env`
+- **Config:** Hydra (`conf/config.yaml` + per-env overrides)
 - **Logging:** W&B (entity: `mvlasenko`, project: `robot-arm`)
-- **Algorithm:** SAC (Stable-Baselines3)
+- **Algorithm:** SAC or PPO (Stable-Baselines3)
 - **Deps:** gymnasium, stable-baselines3, wandb, hydra-core
 
 ## Coding Principles

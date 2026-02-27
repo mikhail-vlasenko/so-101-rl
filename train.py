@@ -14,11 +14,13 @@ from callbacks import (
     MaxPhaseTracker, MeanMaxPhaseCallback, XYProgressCallback,
 )
 from networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
+from lift_env import SO101LiftEnv
 from pickplace_env import SO101PickPlaceEnv
 
 
 ENV_REGISTRY = {
     "pickplace": SO101PickPlaceEnv,
+    "lift": SO101LiftEnv,
 }
 
 
@@ -52,7 +54,8 @@ ALGORITHM_REGISTRY = {
 def make_env(cfg: DictConfig, xml_path=None, render_mode=None, slow_factor=1):
     """Create env by name from Hydra config."""
     env_cls = ENV_REGISTRY[cfg.env_name]
-    return env_cls(render_mode=render_mode, env_cfg=cfg.pickplace_env,
+    env_cfg = cfg[f"{cfg.env_name}_env"]
+    return env_cls(render_mode=render_mode, env_cfg=env_cfg,
                    slow_factor=slow_factor, xml_path=xml_path)
 
 
@@ -67,7 +70,8 @@ def train(cfg: DictConfig):
     # Hydra changes cwd — go back to original for MuJoCo XML paths
     orig_dir = hydra.utils.get_original_cwd()
     os.chdir(orig_dir)
-    xml_path = os.path.join(orig_dir, SO101PickPlaceEnv.XML_PATH)
+    env_cls = ENV_REGISTRY[cfg.env_name]
+    xml_path = os.path.join(orig_dir, env_cls.XML_PATH)
 
     algo_name = cfg.algorithm
     algo_cls, algo_kwargs_fn, policy_cls = ALGORITHM_REGISTRY[algo_name]

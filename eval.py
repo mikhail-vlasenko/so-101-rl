@@ -16,7 +16,13 @@ from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
+from lift_env import SO101LiftEnv
 from pickplace_env import SO101PickPlaceEnv
+
+ENV_REGISTRY = {
+    "pickplace": SO101PickPlaceEnv,
+    "lift": SO101LiftEnv,
+}
 
 ALGORITHM_CLASSES = {
     "sac": SAC,
@@ -47,7 +53,8 @@ def _resolve_model_path(model_arg: str, log_dir: str) -> str:
 def main(cfg: DictConfig):
     orig_dir = hydra.utils.get_original_cwd()
     os.chdir(orig_dir)
-    xml_path = os.path.join(orig_dir, SO101PickPlaceEnv.XML_PATH)
+    env_cls = ENV_REGISTRY[cfg.env_name]
+    xml_path = os.path.join(orig_dir, env_cls.XML_PATH)
 
     algo_name = cfg.algorithm
     algo_cls = ALGORITHM_CLASSES[algo_name]
@@ -61,9 +68,10 @@ def main(cfg: DictConfig):
     print(f"Loading {algo_name.upper()} model: {model_path}")
     model = algo_cls.load(model_path)
 
-    raw_env = SO101PickPlaceEnv(
+    env_cfg = cfg[f"{cfg.env_name}_env"]
+    raw_env = env_cls(
         render_mode="human",
-        env_cfg=cfg["pickplace_env"],
+        env_cfg=env_cfg,
         slow_factor=2,
         xml_path=xml_path,
     )
@@ -80,7 +88,12 @@ def main(cfg: DictConfig):
                 total_reward += rewards[0]
                 done = dones[0]
             info = infos[0]
-            print(f"Episode {ep + 1}/{episodes}: return={total_reward:.2f}  phase={info['phase']}  max_phase={info['max_phase']}")
+            extras = ""
+            if "phase" in info:
+                extras += f"  phase={info['phase']}  max_phase={info['max_phase']}"
+            if "max_cube_height" in info:
+                extras += f"  max_height={info['max_cube_height']:.3f}"
+            print(f"Episode {ep + 1}/{episodes}: return={total_reward:.2f}{extras}")
     except KeyboardInterrupt:
         pass
     finally:
