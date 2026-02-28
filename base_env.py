@@ -187,6 +187,7 @@ class SO101BaseEnv(gym.Env):
         mujoco.mj_forward(self.model, self.data)
         self.step_count = 0
         self._max_cube_height = cube_pos[2]
+        self._floor_contact_steps = 0
         return self._get_obs(), {}
 
     def _compute_step(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):
@@ -213,6 +214,8 @@ class SO101BaseEnv(gym.Env):
         ee_cube_dist = np.linalg.norm(ee_pos - cube_pos)
         grasped = self._detect_grasp()
         floor_contact = self._has_floor_contact() if self.floor_contact_penalty else False
+        if floor_contact:
+            self._floor_contact_steps += 1
         self._max_cube_height = max(self._max_cube_height, cube_pos[2])
 
         reward, terminated, info = self._compute_step(
@@ -223,6 +226,8 @@ class SO101BaseEnv(gym.Env):
         truncated = self.step_count >= self.max_steps
         if terminated or truncated:
             info["max_cube_height"] = self._max_cube_height
+            if self.floor_contact_penalty:
+                info["floor_contact_ratio"] = self._floor_contact_steps / self.step_count
             self._on_episode_end(info)
 
         if self.render_mode == "human":

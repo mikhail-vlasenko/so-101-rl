@@ -1,7 +1,5 @@
 """Training callbacks and metrics logging for SB3."""
 
-from collections import defaultdict
-
 import gymnasium
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -37,37 +35,15 @@ class MaxCubeHeightCallback(BaseCallback):
 
 
 class FloorContactCallback(BaseCallback):
-    """Log fraction of steps where the arm touches the floor."""
-
-    def __init__(self):
-        super().__init__()
-        self._contact_steps = 0
-        self._total_steps = 0
-        self._per_task_contact = defaultdict(int)
-        self._per_task_total = defaultdict(int)
+    """Log mean per-episode floor contact ratio across episodes in each log window."""
 
     def _on_step(self) -> bool:
-        for info in self.locals["infos"]:
-            if "floor_contact" in info:
-                self._total_steps += 1
-                if info["floor_contact"]:
-                    self._contact_steps += 1
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "floor_contact_ratio" in info:
+                val = info["floor_contact_ratio"]
+                self.logger.record_mean("rollout/floor_contact_ratio", val)
                 if "task_name" in info:
-                    task = info["task_name"]
-                    self._per_task_total[task] += 1
-                    if info["floor_contact"]:
-                        self._per_task_contact[task] += 1
-        if self._total_steps > 0:
-            self.logger.record_mean(
-                "rollout/floor_contact_ratio",
-                self._contact_steps / self._total_steps,
-            )
-        for task in self._per_task_total:
-            if self._per_task_total[task] > 0:
-                self.logger.record_mean(
-                    f"rollout/{task}/floor_contact_ratio",
-                    self._per_task_contact[task] / self._per_task_total[task],
-                )
+                    self.logger.record_mean(f"rollout/{info['task_name']}/floor_contact_ratio", val)
         return True
 
 
@@ -84,6 +60,24 @@ class XYProgressCallback(BaseCallback):
                     self.logger.record_mean(f"rollout/{task}/mean_xy_progress", info["xy_progress"])
                     self.logger.record_mean(f"rollout/{task}/mean_xy_regress", info["xy_regress"])
         return True
+
+
+class EpisodeCountCallback(BaseCallback):
+    """Log the number of completed episodes per rollout."""
+
+    def __init__(self):
+        super().__init__()
+        self._episode_count = 0
+
+    def _on_step(self) -> bool:
+        for done in self.locals["dones"]:
+            if done:
+                self._episode_count += 1
+        return True
+
+    def _on_rollout_end(self) -> None:
+        self.logger.record("rollout/episodes", self._episode_count)
+        self._episode_count = 0
 
 
 class MaxPhaseTracker(gymnasium.Wrapper):

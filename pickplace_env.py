@@ -100,9 +100,6 @@ class SO101PickPlaceEnv(SO101BaseEnv):
             "ee_cube_dist": ee_cube_dist,
             "grasped": grasped,
         }
-        if self.floor_contact_penalty:
-            info["floor_contact"] = floor_contact
-
         return reward, terminated, info
 
     def _on_episode_end(self, info):

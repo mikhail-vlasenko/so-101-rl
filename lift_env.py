@@ -53,7 +53,4 @@ class SO101LiftEnv(SO101BaseEnv):
             "grasped": grasped,
             "cube_height": cube_pos[2],
         }
-        if self.floor_contact_penalty:
-            info["floor_contact"] = floor_contact
-
         return reward, terminated, info
