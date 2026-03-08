@@ -141,6 +141,14 @@ class SO101BaseEnv(gym.Env):
                 return True
         return False
 
+    def _has_arm_collision(self):
+        """Check if any arm/gripper geom has a contact (with environment or itself)."""
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            if c.geom1 in self.arm_geom_ids or c.geom2 in self.arm_geom_ids:
+                return True
+        return False
+
     def _has_floor_contact(self):
         """Check if any arm/gripper geom is in contact with the floor."""
         for i in range(self.data.ncon):
@@ -177,14 +185,20 @@ class SO101BaseEnv(gym.Env):
         self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
         self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = [1, 0, 0, 0]
 
-        noise = self.np_random.uniform(-0.1, 0.1, size=self.n_joints)
-        noise[self.gripper_idx] = self.joint_high[self.gripper_idx]
-        self.data.qpos[self.joint_qposadr] = np.clip(noise, self.joint_low, self.joint_high)
-        self.data.ctrl[:self.n_joints] = self.data.qpos[self.joint_qposadr]
-
         self._on_reset(cube_pos)
 
-        mujoco.mj_forward(self.model, self.data)
+        # Sample random arm position, rejecting any arm-environment collisions
+        attempt = 0
+        while True:
+            joint_pos = self.np_random.uniform(self.joint_low, self.joint_high)
+            self.data.qpos[self.joint_qposadr] = joint_pos
+            self.data.ctrl[:self.n_joints] = joint_pos
+            mujoco.mj_forward(self.model, self.data)
+            if not self._has_arm_collision():
+                break
+            attempt += 1
+            if attempt % 10 == 0:
+                print(f"WARNING: {attempt} arm position samples rejected (collision)")
         self.step_count = 0
         self._max_cube_height = cube_pos[2]
         self._floor_contact_steps = 0

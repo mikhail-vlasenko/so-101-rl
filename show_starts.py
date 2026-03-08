@@ -19,7 +19,8 @@ def main(cfg: DictConfig):
         while True:
             env.reset()
             i += 1
-            print(f"Reset #{i} — cube at {env._get_cube_pos()}")
+            joints = env._get_joint_pos()
+            print(f"Reset #{i} — cube={env._get_cube_pos()}  ring_h={env.ring_height:.3f}  joints={joints.round(3)}")
             t0 = time.time()
             while time.time() - t0 < 5:
                 env._render_human()

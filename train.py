@@ -11,7 +11,8 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from callbacks import (
     EpisodeCountCallback, EvalStatsCallback, EvalStatsTracker,
-    FloorContactCallback, MaxCubeHeightCallback, XYProgressCallback,
+    FloorContactCallback, MaxCubeHeightCallback, MeanReturnCallback,
+    XYProgressCallback,
 )
 from networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from lift_env import SO101LiftEnv
@@ -118,6 +119,7 @@ def train(cfg: DictConfig):
             sync_tensorboard=True,
         )
 
+    callbacks.append(MeanReturnCallback())
     callbacks.append(MaxCubeHeightCallback())
     callbacks.append(FloorContactCallback())
     callbacks.append(XYProgressCallback())

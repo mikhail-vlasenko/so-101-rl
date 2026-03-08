@@ -45,6 +45,19 @@ class XYProgressCallback(BaseCallback):
         return True
 
 
+class MeanReturnCallback(BaseCallback):
+    """Log mean episode return using record_mean, with per-task breakdown."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "episode" in info:
+                ep_return = info["episode"]["r"]
+                self.logger.record_mean("rollout/mean_return", ep_return)
+                if "task_name" in info:
+                    self.logger.record_mean(f"rollout/{info['task_name']}/mean_return", ep_return)
+        return True
+
+
 class EpisodeCountCallback(BaseCallback):
     """Log the number of completed episodes per rollout."""
 
