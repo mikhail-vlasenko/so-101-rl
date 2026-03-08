@@ -13,7 +13,7 @@ from pickplace_env import (
     SO101PickPlaceEnv, Phase,
     TIME_PENALTY, JOINT_PASSIVE_COEFF,
     XY_PROGRESS_COEFF, EE_CUBE_COEFF,
-    HEIGHT_MULT_MAX, HEIGHT_MULT_CEILING,
+    HEIGHT_MULT_CEILING,
     RETURN_BONUS, RETURN_THRESHOLD,
 )
 
@@ -81,14 +81,14 @@ def run():
             xy_delta = prev_xy_dist - xy_dist
 
             height_frac = np.clip(cube_pos[2] / HEIGHT_MULT_CEILING, 0.0, 1.0)
-            height_mult = 1.0 + (HEIGHT_MULT_MAX - 1.0) * height_frac
+            height_mult = 1.0 + (env.height_mult_max - 1.0) * height_frac
             totals["height_mult_avg"].append(height_mult)
 
             if xy_delta >= 0:
                 xy_reward = XY_PROGRESS_COEFF * xy_delta * height_mult
                 totals["xy_progress"] += xy_reward
             else:
-                xy_reward = XY_PROGRESS_COEFF * HEIGHT_MULT_MAX * xy_delta * height_mult
+                xy_reward = XY_PROGRESS_COEFF * env.height_mult_max * xy_delta * height_mult
                 totals["xy_regress"] += xy_reward
 
             if phase == Phase.REACH:

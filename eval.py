@@ -6,15 +6,16 @@ Usage:
     python eval.py model=path/to/model.zip  # specific path
     python eval.py episodes=20              # override episode count
     python eval.py algorithm=ppo            # evaluate PPO model
+    python eval.py seed=42                  # fixed seed (incremented per episode)
 """
 
 import os
 
 import hydra
+import numpy as np
 from omegaconf import DictConfig
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
 
 from train import ENV_REGISTRY, _resolve_env, make_env
 
@@ -59,25 +60,26 @@ def main(cfg: DictConfig):
     model_path = _resolve_model_path(model_arg, log_dir)
 
     episodes = int(cfg.get("episodes", 10))
+    deterministic = bool(cfg.get("deterministic", True))
+    base_seed = cfg.get("seed", None)
 
     print(f"Loading {algo_name.upper()} model: {model_path}")
     model = algo_cls.load(model_path)
 
-    raw_env = make_env(env_cls, env_cfg, xml_path, render_mode="human", slow_factor=2)
-    env = DummyVecEnv([lambda: Monitor(raw_env)])
+    env = make_env(env_cls, env_cfg, xml_path, render_mode="human", slow_factor=2)
 
     try:
         for ep in range(episodes):
-            obs = env.reset()
+            seed = (base_seed + ep) if base_seed is not None else int(np.random.SeedSequence().entropy % (2**31))
+            obs, _ = env.reset(seed=seed)
             total_reward = 0.0
             done = False
             while not done:
-                action, _ = model.predict(obs, deterministic=True)
-                obs, rewards, dones, infos = env.step(action)
-                total_reward += rewards[0]
-                done = dones[0]
-            info = infos[0]
-            extras = ""
+                action, _ = model.predict(obs, deterministic=deterministic)
+                obs, reward, terminated, truncated, info = env.step(action)
+                total_reward += reward
+                done = terminated or truncated
+            extras = f"  seed={seed}"
             if "phase" in info:
                 extras += f"  phase={info['phase']}  max_phase={info['max_phase']}"
             if "max_cube_height" in info:

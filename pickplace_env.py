@@ -16,7 +16,6 @@ TIME_PENALTY = -0.05
 JOINT_PASSIVE_COEFF = -0.01
 EE_CUBE_COEFF = -0.5
 XY_PROGRESS_COEFF = 200.0
-HEIGHT_MULT_MAX = 2.0
 HEIGHT_MULT_CEILING = 0.05
 GRASP_HOLD_REWARD = 0.05
 PLACE_BONUS = GRASP_HOLD_REWARD * 2
@@ -45,6 +44,7 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         self.ring_exclusion_radius = float(cfg["ring_exclusion_radius"])
         self.passive_pose = np.array(cfg["passive_pose"])
         self.ring_height_max = float(cfg["ring_height_max"])
+        self.height_mult_max = float(cfg["height_mult_max"])
 
         # Ring body ID for randomizing height
         self.ring_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ring")
@@ -141,13 +141,13 @@ class SO101PickPlaceEnv(SO101BaseEnv):
 
         # Height multiplier: 1.0 at ground, 2.0 at HEIGHT_MULT_CEILING
         height_frac = np.clip(cube_pos[2] / HEIGHT_MULT_CEILING, 0.0, 1.0)
-        height_mult = 1.0 + (HEIGHT_MULT_MAX - 1.0) * height_frac
+        height_mult = 1.0 + (self.height_mult_max - 1.0) * height_frac
 
         if xy_delta >= 0:
             xy_reward = XY_PROGRESS_COEFF * xy_delta * height_mult
             self._xy_progress_total += xy_reward
         else:
-            xy_reward = XY_PROGRESS_COEFF * HEIGHT_MULT_MAX * xy_delta * height_mult
+            xy_reward = XY_PROGRESS_COEFF * self.height_mult_max * xy_delta * height_mult
             self._xy_regress_total += xy_reward
 
         if self.phase == Phase.REACH:
