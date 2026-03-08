@@ -10,11 +10,11 @@ import yaml
 from stable_baselines3 import PPO
 
 from pickplace_env import (
-    SO101PickPlaceEnv, Phase,
+    SO101PickPlaceEnv,
     TIME_PENALTY, JOINT_PASSIVE_COEFF,
     XY_PROGRESS_COEFF, EE_CUBE_COEFF,
     HEIGHT_MULT_CEILING,
-    RETURN_BONUS, RETURN_THRESHOLD,
+    GRASP_HOLD_REWARD, PLACE_BONUS,
 )
 
 MODEL_PATH = "logs/ppo_pickplace/checkpoints/ppo_20000000_steps.zip"
@@ -42,19 +42,18 @@ def run():
             "xy_progress": 0.0,
             "xy_regress": 0.0,
             "height_mult_avg": [],
-            "reach_ee_cube": 0.0,
-            "return_bonus": 0.0,
+            "ee_cube": 0.0,
+            "grasp_hold": 0.0,
+            "place_bonus": 0.0,
             "total_reward": 0.0,
         }
         steps = 0
-        final_phase = Phase.REACH
-        max_phase = Phase.REACH
+        placed = False
 
         while not done:
             action, _ = model.predict(obs, deterministic=True)
 
             # Capture pre-step state for reward decomposition
-            cube_pos_before = env._get_cube_pos()
             prev_xy_dist = env._prev_xy_dist
 
             obs, reward, terminated, truncated, info = env.step(action)
@@ -66,7 +65,7 @@ def run():
             cube_pos = env._get_cube_pos()
             joint_pos = env._get_joint_pos()
             ee_cube_dist = np.linalg.norm(ee_pos - cube_pos)
-            phase = env.phase
+            grasped = info.get("grasped", False)
 
             totals["time_penalty"] += TIME_PENALTY
 
@@ -91,23 +90,20 @@ def run():
                 xy_reward = XY_PROGRESS_COEFF * env.height_mult_max * xy_delta * height_mult
                 totals["xy_regress"] += xy_reward
 
-            if phase == Phase.REACH:
-                totals["reach_ee_cube"] += EE_CUBE_COEFF * ee_cube_dist
+            totals["ee_cube"] += EE_CUBE_COEFF * ee_cube_dist
 
-            # Return bonus
-            if phase == Phase.RETURN:
-                jd = np.linalg.norm(joint_pos - env.passive_pose)
-                if jd < RETURN_THRESHOLD and terminated:
-                    totals["return_bonus"] += RETURN_BONUS
+            if grasped:
+                totals["grasp_hold"] += GRASP_HOLD_REWARD
+
+            if info.get("placed", False):
+                totals["place_bonus"] += PLACE_BONUS
+                placed = True
 
             totals["total_reward"] += reward
-            final_phase = phase
-            max_phase = max(max_phase, phase)
 
         totals["height_mult_avg"] = np.mean(totals["height_mult_avg"]) if totals["height_mult_avg"] else 1.0
         totals["steps"] = steps
-        totals["final_phase"] = final_phase.name
-        totals["max_phase"] = max_phase.name
+        totals["placed"] = placed
         all_episodes.append(totals)
 
     env.close()
@@ -118,19 +114,15 @@ def run():
     print(f"Episodes: {N_EPISODES}")
     print(f"{'='*60}\n")
 
-    # Phase distribution
-    phase_counts = {}
-    for ep in all_episodes:
-        p = ep["max_phase"]
-        phase_counts[p] = phase_counts.get(p, 0) + 1
-    print("Max phase reached:")
-    for p in ["REACH", "PLACE", "RETURN"]:
-        print(f"  {p}: {phase_counts.get(p, 0)}/{N_EPISODES}")
+    # Placement rate
+    n_placed = sum(1 for ep in all_episodes if ep["placed"])
+    print(f"Placed: {n_placed}/{N_EPISODES}")
     print()
 
     # Reward breakdown
     keys = ["time_penalty", "floor_contact", "joint_passive",
-            "xy_progress", "xy_regress", "reach_ee_cube", "return_bonus", "total_reward"]
+            "xy_progress", "xy_regress", "ee_cube", "grasp_hold",
+            "place_bonus", "total_reward"]
     print(f"{'Component':<20} {'Mean':>10} {'Std':>10} {'Min':>10} {'Max':>10}")
     print("-" * 60)
     for k in keys:

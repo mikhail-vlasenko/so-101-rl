@@ -1,9 +1,4 @@
-"""Gymnasium environment: SO-101 arm pick-and-place task.
-
-Phases: REACH → PLACE → RETURN.
-"""
-
-import enum
+"""Gymnasium environment: SO-101 arm pick-and-place task."""
 
 import numpy as np
 import mujoco
@@ -18,19 +13,11 @@ EE_CUBE_COEFF = -0.5
 XY_PROGRESS_COEFF = 200.0
 HEIGHT_MULT_CEILING = 0.05
 GRASP_HOLD_REWARD = 0.05
-PLACE_BONUS = GRASP_HOLD_REWARD * 2
-RETURN_BONUS = 10.0
-RETURN_THRESHOLD = 0.3
-
-
-class Phase(enum.IntEnum):
-    REACH = 0
-    PLACE = 1
-    RETURN = 2
+PLACE_BONUS = 10.0
 
 
 class SO101PickPlaceEnv(SO101BaseEnv):
-    """Pick up a cube, place it at a target, and return to passive pose."""
+    """Pick up a cube and place it at a target location."""
 
     XML_PATH = "so101/scene_pickplace.xml"
     TASK_ID = 1.0
@@ -69,61 +56,32 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         ring_body_pos[2] = self.ring_height - self.ring_wall_height
         self.model.body_pos[self.ring_body_id] = ring_body_pos
 
-        self.phase = Phase.REACH
-        self.max_phase = Phase.REACH
-        self._bonuses_collected = set()
         self._prev_xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
         self._xy_progress_total = 0.0
         self._xy_regress_total = 0.0
 
     def _compute_step(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):
         joint_pos = self._get_joint_pos()
-
-        # Phase transitions
-        self._update_phase(grasped, cube_pos)
-        self.max_phase = max(self.max_phase, self.phase)
-
-        # Reward
         reward = self._compute_reward(ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped, floor_contact)
 
-        # Termination
+        # Terminate with bonus when cube is placed in the target region
+        xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
+        placed = xy_dist < self.place_target_radius and cube_pos[2] < self.place_target_height
         terminated = False
-        if self.phase == Phase.RETURN:
-            joint_dist = np.linalg.norm(joint_pos - self.passive_pose)
-            if joint_dist < RETURN_THRESHOLD:
-                reward += RETURN_BONUS
-                terminated = True
+        if placed:
+            reward += PLACE_BONUS
+            terminated = True
 
         info = {
-            "phase": self.phase.name,
-            "max_phase": int(self.max_phase),
             "ee_cube_dist": ee_cube_dist,
             "grasped": grasped,
+            "placed": placed,
         }
         return reward, terminated, info
 
     def _on_episode_end(self, info):
         info["xy_progress"] = self._xy_progress_total
         info["xy_regress"] = self._xy_regress_total
-
-    def _update_phase(self, grasped, cube_pos):
-        if self.phase == Phase.REACH:
-            if grasped:
-                self.phase = Phase.PLACE
-        elif self.phase == Phase.PLACE:
-            if not grasped:
-                self.phase = Phase.REACH
-            else:
-                xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
-                if xy_dist < self.place_target_radius and cube_pos[2] < self.place_target_height:
-                    self.phase = Phase.RETURN
-
-    def _bonus(self, name, amount):
-        """Give a bonus only once per episode."""
-        if name in self._bonuses_collected:
-            return 0.0
-        self._bonuses_collected.add(name)
-        return amount
 
     def _compute_reward(self, ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped, floor_contact):
         reward = TIME_PENALTY
@@ -134,12 +92,12 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         joint_dist = np.linalg.norm(joint_pos - self.passive_pose)
         reward += JOINT_PASSIVE_COEFF * joint_dist
 
-        # XY progress reward: positive for moving toward target, 2x negative for moving away
+        # XY progress reward: positive for moving toward target, penalized for moving away
         xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
         xy_delta = self._prev_xy_dist - xy_dist  # positive = moved closer
         self._prev_xy_dist = xy_dist
 
-        # Height multiplier: 1.0 at ground, 2.0 at HEIGHT_MULT_CEILING
+        # Height multiplier: 1.0 at ground, height_mult_max at HEIGHT_MULT_CEILING
         height_frac = np.clip(cube_pos[2] / HEIGHT_MULT_CEILING, 0.0, 1.0)
         height_mult = 1.0 + (self.height_mult_max - 1.0) * height_frac
 
@@ -150,15 +108,9 @@ class SO101PickPlaceEnv(SO101BaseEnv):
             xy_reward = XY_PROGRESS_COEFF * self.height_mult_max * xy_delta * height_mult
             self._xy_regress_total += xy_reward
 
-        if self.phase == Phase.REACH:
-            if grasped:
-                reward += GRASP_HOLD_REWARD
-            reward += EE_CUBE_COEFF * ee_cube_dist + xy_reward
-        elif self.phase == Phase.PLACE:
-            if grasped:
-                reward += GRASP_HOLD_REWARD
-            reward += xy_reward
-        elif self.phase == Phase.RETURN:
-            reward += PLACE_BONUS
+        if grasped:
+            reward += GRASP_HOLD_REWARD
+
+        reward += EE_CUBE_COEFF * ee_cube_dist + xy_reward
 
         return reward

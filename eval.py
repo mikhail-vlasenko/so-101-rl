@@ -15,7 +15,6 @@ import hydra
 import numpy as np
 from omegaconf import DictConfig
 from stable_baselines3 import PPO, SAC
-from stable_baselines3.common.monitor import Monitor
 
 from train import ENV_REGISTRY, _resolve_env, make_env
 
@@ -80,8 +79,8 @@ def main(cfg: DictConfig):
                 total_reward += reward
                 done = terminated or truncated
             extras = f"  seed={seed}"
-            if "phase" in info:
-                extras += f"  phase={info['phase']}  max_phase={info['max_phase']}"
+            if "placed" in info:
+                extras += f"  placed={info['placed']}"
             if "max_cube_height" in info:
                 extras += f"  max_height={info['max_cube_height']:.3f}"
             print(f"Episode {ep + 1}/{episodes}: return={total_reward:.2f}{extras}")

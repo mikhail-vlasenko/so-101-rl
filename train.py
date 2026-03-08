@@ -10,9 +10,8 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from callbacks import (
-    EpisodeCountCallback, EvalPhaseCallback, FloorContactCallback,
-    MaxCubeHeightCallback, MaxPhaseTracker, MeanMaxPhaseCallback,
-    XYProgressCallback,
+    EpisodeCountCallback, EvalStatsCallback, EvalStatsTracker,
+    FloorContactCallback, MaxCubeHeightCallback, XYProgressCallback,
 )
 from networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from lift_env import SO101LiftEnv
@@ -101,8 +100,8 @@ def train(cfg: DictConfig):
     vec_env = SubprocVecEnv(env_fns)
     env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, gamma=gamma)
 
-    phase_tracker = MaxPhaseTracker(eval_inner)
-    eval_vec_env = DummyVecEnv([lambda: Monitor(phase_tracker)])
+    stats_tracker = EvalStatsTracker(eval_inner)
+    eval_vec_env = DummyVecEnv([lambda: Monitor(stats_tracker)])
     eval_env = VecNormalize(eval_vec_env, norm_obs=False, training=False, norm_reward=False)
 
     log_dir = os.path.join(orig_dir, "logs", f"{algo_name}_{cfg.env_name}")
@@ -119,7 +118,6 @@ def train(cfg: DictConfig):
             sync_tensorboard=True,
         )
 
-    callbacks.append(MeanMaxPhaseCallback())
     callbacks.append(MaxCubeHeightCallback())
     callbacks.append(FloorContactCallback())
     callbacks.append(XYProgressCallback())
@@ -138,7 +136,7 @@ def train(cfg: DictConfig):
         eval_freq=cfg.train.eval_freq // n_envs,
         n_eval_episodes=cfg.train.n_eval_episodes,
         deterministic=True,
-        callback_after_eval=EvalPhaseCallback(phase_tracker),
+        callback_after_eval=EvalStatsCallback(stats_tracker),
     ))
 
     if cfg.resume is not None:

@@ -201,7 +201,7 @@ class SO101BaseEnv(gym.Env):
         self.step_count += 1
         action = np.clip(action, -1.0, 1.0)
 
-        current = self.data.ctrl[:self.n_joints].copy()
+        current = self.data.qpos[self.joint_qposadr].copy()
         target = current + action * self.action_scale
         target = np.clip(target, self.joint_low, self.joint_high)
         self.data.ctrl[:self.n_joints] = target
