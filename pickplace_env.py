@@ -40,7 +40,9 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         self.ring_height = self.ring_height_max
 
     def _obs_extra(self):
-        return [self.ring_height, self.TASK_ID]
+        cube_pos = self._get_cube_pos()
+        cube_to_target = cube_pos[:2] - self.place_target[:2]
+        return [cube_to_target[0], cube_to_target[1]]
 
     def _sample_cube_pos(self):
         while True:
