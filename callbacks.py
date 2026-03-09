@@ -79,6 +79,20 @@ class MeanReturnCallback(BaseCallback):
         return True
 
 
+class CompletionRateCallback(BaseCallback):
+    """Log the fraction of episodes where the cube was successfully placed."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "placed" in info:
+                self.logger.record_mean("rollout/completion_rate", float(info["placed"]))
+                if "task_name" in info:
+                    self.logger.record_mean(
+                        f"rollout/{info['task_name']}/completion_rate", float(info["placed"]),
+                    )
+        return True
+
+
 class EpisodeCountCallback(BaseCallback):
     """Log the number of completed episodes per rollout."""
 

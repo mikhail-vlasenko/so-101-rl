@@ -8,7 +8,7 @@ import pandas as pd
 
 ENTITY = "mvlasenko"
 PROJECT = "robot-arm"
-METRIC = "rollout/lift/mean_max_cube_height"
+METRIC = "rollout/pickplace/completion_rate"
 
 
 def fetch_run(run_path: str) -> pd.DataFrame:

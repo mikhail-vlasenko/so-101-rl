@@ -10,9 +10,9 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from callbacks import (
-    EpisodeCountCallback, EvalStatsCallback, EvalStatsTracker,
-    FloorContactCallback, MaxCubeHeightCallback, MeanReturnCallback,
-    TimeLimitCallback, XYProgressCallback,
+    CompletionRateCallback, EpisodeCountCallback, EvalStatsCallback,
+    EvalStatsTracker, FloorContactCallback, MaxCubeHeightCallback,
+    MeanReturnCallback, TimeLimitCallback, XYProgressCallback,
 )
 from networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from lift_env import SO101LiftEnv
@@ -123,6 +123,7 @@ def train(cfg: DictConfig):
     callbacks.append(MaxCubeHeightCallback())
     callbacks.append(FloorContactCallback())
     callbacks.append(XYProgressCallback())
+    callbacks.append(CompletionRateCallback())
     callbacks.append(EpisodeCountCallback())
 
     if cfg.train.time_limit_minutes is not None:
