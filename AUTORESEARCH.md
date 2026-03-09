@@ -4,8 +4,8 @@ Autonomous RL research loop for the SO-101 pick-and-place task.
 
 ## Setup
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar9`). The branch `autoresearch/<tag>` must not already exist.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current HEAD.
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar9`).
+2. **Create the branch**: `git checkout -b autoresearch-<tag>` from current HEAD.
 3. **Read the in-scope files** for full context:
    - `base_env.py` — base Gymnasium env (observation space, MuJoCo setup, contact detection)
    - `pickplace_env.py` — pick-and-place task env (reward function, reset logic, success criteria)
