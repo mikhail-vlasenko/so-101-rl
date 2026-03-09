@@ -8,7 +8,7 @@ from base_env import SO101BaseEnv
 
 # Reward constants
 TIME_PENALTY = -0.05
-JOINT_PASSIVE_COEFF = -0.01
+JOINT_PASSIVE_COEFF = 0.0  # not used currently (was -0.01)
 EE_CUBE_COEFF = -0.5
 XY_PROGRESS_COEFF = 200.0
 HEIGHT_MULT_CEILING = 0.05
