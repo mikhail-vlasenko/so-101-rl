@@ -1,6 +1,6 @@
 defaults:
-  - env: pickplace
   - _self_
+  - env: pickplace
 
 algorithm: ppo
 resume: null
@@ -8,6 +8,7 @@ deterministic: true
 seed: null
 
 train:
+  time_limit_minutes: null
   n_envs: 16
   net_arch: [256, 256, 256, 256]
   input_batchnorm: true

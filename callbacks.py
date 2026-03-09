@@ -1,7 +1,28 @@
 """Training callbacks and metrics logging for SB3."""
 
+import time
+
 import gymnasium
 from stable_baselines3.common.callbacks import BaseCallback
+
+
+class TimeLimitCallback(BaseCallback):
+    """Stop training after a given number of minutes."""
+
+    def __init__(self, time_limit_minutes: float):
+        super().__init__()
+        self.time_limit_seconds = time_limit_minutes * 60
+        self._start_time: float = 0
+
+    def _on_training_start(self) -> None:
+        self._start_time = time.monotonic()
+
+    def _on_step(self) -> bool:
+        elapsed = time.monotonic() - self._start_time
+        if elapsed >= self.time_limit_seconds:
+            print(f"Time limit reached ({self.time_limit_seconds / 60:.0f}m). Stopping training.")
+            return False
+        return True
 
 
 class MaxCubeHeightCallback(BaseCallback):
