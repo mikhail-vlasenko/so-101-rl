@@ -10,10 +10,12 @@ seed: null
 train:
   time_limit_minutes: null
   n_envs: 32
-  net_arch: [256, 256]
+  net_arch: [256, 256, 256]
   input_batchnorm: true
   total_timesteps: 40_000_000
   learning_rate: 1e-3
+  lr_schedule: linear
+  lr_min: 1e-4
   batch_size: 4096
   gamma: 0.95
   log_interval: 1
