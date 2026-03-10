@@ -10,13 +10,22 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from callbacks import (
-    EpisodeCountCallback, EvalStatsCallback, EvalStatsTracker,
-    FloorContactCallback, MaxCubeHeightCallback, MeanReturnCallback,
-    XYProgressCallback,
+    CompletionRateCallback, EpisodeCountCallback, EvalStatsCallback,
+    EvalStatsTracker, FloorContactCallback, MaxCubeHeightCallback,
+    MeanReturnCallback, TimeLimitCallback, XYProgressCallback,
 )
 from networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from lift_env import SO101LiftEnv
 from pickplace_env import SO101PickPlaceEnv
+
+
+def make_lr_schedule(name: str, initial_lr: float, min_lr: float):
+    """Return a learning rate or schedule callable for SB3."""
+    if name == "constant":
+        return initial_lr
+    if name == "linear":
+        return lambda progress_remaining: min_lr + (initial_lr - min_lr) * progress_remaining
+    raise ValueError(f"Unknown lr_schedule: {name!r}")
 
 
 ENV_REGISTRY = {
@@ -123,7 +132,11 @@ def train(cfg: DictConfig):
     callbacks.append(MaxCubeHeightCallback())
     callbacks.append(FloorContactCallback())
     callbacks.append(XYProgressCallback())
+    callbacks.append(CompletionRateCallback())
     callbacks.append(EpisodeCountCallback())
+
+    if cfg.train.time_limit_minutes is not None:
+        callbacks.append(TimeLimitCallback(cfg.train.time_limit_minutes))
 
     callbacks.append(CheckpointCallback(
         save_freq=cfg.train.checkpoint_freq // n_envs,
@@ -155,7 +168,7 @@ def train(cfg: DictConfig):
         model = algo_cls(
             policy_cls,
             env,
-            learning_rate=cfg.train.learning_rate,
+            learning_rate=make_lr_schedule(cfg.train.lr_schedule, cfg.train.learning_rate, cfg.train.lr_min),
             batch_size=cfg.train.batch_size,
             gamma=cfg.train.gamma,
             policy_kwargs={

@@ -10,7 +10,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 
-OBS_DIM = 20
+OBS_DIM = 22
 
 FIXED_JAW_NAMES = [
     "fixed_jaw_box1", "fixed_jaw_box2", "fixed_jaw_box3",

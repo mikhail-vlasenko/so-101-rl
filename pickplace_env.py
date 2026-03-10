@@ -8,10 +8,8 @@ from base_env import SO101BaseEnv
 
 # Reward constants
 TIME_PENALTY = -0.05
-JOINT_PASSIVE_COEFF = 0.0  # not used currently (was -0.01)
 EE_CUBE_COEFF = -0.5
 XY_PROGRESS_COEFF = 200.0
-HEIGHT_MULT_CEILING = 0.05
 GRASP_HOLD_REWARD = 0.05
 PLACE_BONUS = 10.0
 
@@ -29,9 +27,7 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         self.place_target_height = float(cfg["place_target_height"])
         self.ring_center = np.array(cfg["ring_center"])
         self.ring_exclusion_radius = float(cfg["ring_exclusion_radius"])
-        self.passive_pose = np.array(cfg["passive_pose"])
         self.ring_height_max = float(cfg["ring_height_max"])
-        self.height_mult_max = float(cfg["height_mult_max"])
 
         # Ring body ID for randomizing height
         self.ring_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ring")
@@ -40,7 +36,9 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         self.ring_height = self.ring_height_max
 
     def _obs_extra(self):
-        return [self.ring_height, self.TASK_ID]
+        cube_pos = self._get_cube_pos()
+        cube_to_target = cube_pos[:2] - self.place_target[:2]
+        return [cube_to_target[0], cube_to_target[1], self.ring_height, self.TASK_ID]
 
     def _sample_cube_pos(self):
         while True:
@@ -61,8 +59,7 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         self._xy_regress_total = 0.0
 
     def _compute_step(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):
-        joint_pos = self._get_joint_pos()
-        reward = self._compute_reward(ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped, floor_contact)
+        reward = self._compute_reward(ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact)
 
         # Terminate with bonus when cube is placed in the target region
         xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
@@ -83,29 +80,21 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         info["xy_progress"] = self._xy_progress_total
         info["xy_regress"] = self._xy_regress_total
 
-    def _compute_reward(self, ee_pos, cube_pos, joint_pos, ee_cube_dist, grasped, floor_contact):
+    def _compute_reward(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):
         reward = TIME_PENALTY
 
         if floor_contact:
             reward += self.floor_contact_penalty
-
-        joint_dist = np.linalg.norm(joint_pos - self.passive_pose)
-        reward += JOINT_PASSIVE_COEFF * joint_dist
 
         # XY progress reward: positive for moving toward target, penalized for moving away
         xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
         xy_delta = self._prev_xy_dist - xy_dist  # positive = moved closer
         self._prev_xy_dist = xy_dist
 
-        # Height multiplier: 1.0 at ground, height_mult_max at HEIGHT_MULT_CEILING
-        height_frac = np.clip(cube_pos[2] / HEIGHT_MULT_CEILING, 0.0, 1.0)
-        height_mult = 1.0 + (self.height_mult_max - 1.0) * height_frac
-
+        xy_reward = XY_PROGRESS_COEFF * xy_delta
         if xy_delta >= 0:
-            xy_reward = XY_PROGRESS_COEFF * xy_delta * height_mult
             self._xy_progress_total += xy_reward
         else:
-            xy_reward = XY_PROGRESS_COEFF * self.height_mult_max * xy_delta * height_mult
             self._xy_regress_total += xy_reward
 
         if grasped:
