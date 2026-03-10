@@ -10,7 +10,6 @@ from base_env import SO101BaseEnv
 TIME_PENALTY = -0.05
 EE_CUBE_COEFF = -0.5
 XY_PROGRESS_COEFF = 200.0
-HEIGHT_MULT_CEILING = 0.05
 GRASP_HOLD_REWARD = 0.05
 PLACE_BONUS = 10.0
 
@@ -29,7 +28,6 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         self.ring_center = np.array(cfg["ring_center"])
         self.ring_exclusion_radius = float(cfg["ring_exclusion_radius"])
         self.ring_height_max = float(cfg["ring_height_max"])
-        self.height_mult_max = float(cfg["height_mult_max"])
 
         # Ring body ID for randomizing height
         self.ring_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ring")
@@ -93,11 +91,7 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         xy_delta = self._prev_xy_dist - xy_dist  # positive = moved closer
         self._prev_xy_dist = xy_dist
 
-        # Height multiplier: reward XY progress more when cube is lifted
-        height_frac = np.clip(cube_pos[2] / HEIGHT_MULT_CEILING, 0.0, 1.0)
-        height_mult = 1.0 + (self.height_mult_max - 1.0) * height_frac
-
-        xy_reward = XY_PROGRESS_COEFF * xy_delta * height_mult
+        xy_reward = XY_PROGRESS_COEFF * xy_delta
         if xy_delta >= 0:
             self._xy_progress_total += xy_reward
         else:
