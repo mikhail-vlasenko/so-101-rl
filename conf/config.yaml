@@ -9,7 +9,7 @@ seed: null
 
 train:
   time_limit_minutes: null
-  n_envs: 16
+  n_envs: 32
   net_arch: [256, 256]
   input_batchnorm: true
   total_timesteps: 40_000_000
