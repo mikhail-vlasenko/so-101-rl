@@ -33,6 +33,7 @@ conda run -n mujoco_env python fetch_wandb.py
 This prints the average `rollout/pickplace/completion_rate` over the last minute of training — the fraction of episodes where the cube was successfully placed in the target ring.
 
 **What you CAN modify:**
+- `base_env.py` — shared base env (observation space, MuJoCo setup, contact detection)
 - `pickplace_env.py` — reward shaping, observation space, reset logic, success criteria
 - `train.py` — algorithm choice, model construction, callbacks
 - `callbacks.py` — logging, custom callbacks
@@ -41,7 +42,6 @@ This prints the average `rollout/pickplace/completion_rate` over the last minute
 - `conf/env/pickplace.yaml` — pickplace-specific config (action scale, max steps, substeps, cube spawn range, penalties)
 
 **What you CANNOT modify:**
-- `base_env.py` — shared base env (read-only)
 - `fetch_wandb.py` — metrics fetching (read-only)
 - `so101/` — robot model and scene XMLs (read-only)
 

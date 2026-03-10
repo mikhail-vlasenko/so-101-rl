@@ -38,7 +38,7 @@ class SO101PickPlaceEnv(SO101BaseEnv):
     def _obs_extra(self):
         cube_pos = self._get_cube_pos()
         cube_to_target = cube_pos[:2] - self.place_target[:2]
-        return [cube_to_target[0], cube_to_target[1]]
+        return [cube_to_target[0], cube_to_target[1], self.ring_height, self.TASK_ID]
 
     def _sample_cube_pos(self):
         while True:

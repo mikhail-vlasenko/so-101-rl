@@ -27,7 +27,7 @@ class SO101LiftEnv(SO101BaseEnv):
         self.target_height = float(cfg["target_height"])
 
     def _obs_extra(self):
-        return [0.0, self.TASK_ID]
+        return [0.0, 0.0, 0.0, self.TASK_ID]
 
     def _on_reset(self, cube_pos):
         self._prev_cube_z = cube_pos[2]
