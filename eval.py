@@ -65,7 +65,7 @@ def main(cfg: DictConfig):
     print(f"Loading {algo_name.upper()} model: {model_path}")
     model = algo_cls.load(model_path)
 
-    env = make_env(env_cls, env_cfg, xml_path, render_mode="human", slow_factor=2)
+    env = make_env(env_cls, env_cfg, xml_path, render_mode="human", slow_factor=cfg.slow_factor)
 
     try:
         for ep in range(episodes):

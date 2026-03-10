@@ -27,6 +27,7 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         self.place_target_height = float(cfg["place_target_height"])
         self.ring_center = np.array(cfg["ring_center"])
         self.ring_exclusion_radius = float(cfg["ring_exclusion_radius"])
+        self.ring_height_min = float(cfg["ring_height_min"])
         self.ring_height_max = float(cfg["ring_height_max"])
 
         # Ring body ID for randomizing height
@@ -49,7 +50,7 @@ class SO101PickPlaceEnv(SO101BaseEnv):
 
     def _on_reset(self, cube_pos):
         # Random ring height: sink the ring body into the floor
-        self.ring_height = self.np_random.uniform(0.0, self.ring_height_max)
+        self.ring_height = self.np_random.uniform(self.ring_height_min, self.ring_height_max)
         ring_body_pos = self.model.body_pos[self.ring_body_id].copy()
         ring_body_pos[2] = self.ring_height - self.ring_wall_height
         self.model.body_pos[self.ring_body_id] = ring_body_pos

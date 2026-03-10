@@ -6,6 +6,7 @@ algorithm: ppo
 resume: null
 deterministic: true
 seed: null
+slow_factor: 2
 
 train:
   time_limit_minutes: null
