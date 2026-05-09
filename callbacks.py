@@ -51,6 +51,19 @@ class FloorContactCallback(BaseCallback):
         return True
 
 
+class RingContactCallback(BaseCallback):
+    """Log mean per-episode ring (wall) contact ratio across episodes in each log window."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "ring_contact_ratio" in info:
+                val = info["ring_contact_ratio"]
+                self.logger.record_mean("rollout/ring_contact_ratio", val)
+                if "task_name" in info:
+                    self.logger.record_mean(f"rollout/{info['task_name']}/ring_contact_ratio", val)
+        return True
+
+
 class XYProgressCallback(BaseCallback):
     """Log mean episode XY progress and regress rewards."""
 
