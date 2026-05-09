@@ -51,6 +51,19 @@ class FloorContactCallback(BaseCallback):
         return True
 
 
+class CubeDragCallback(BaseCallback):
+    """Log mean per-episode cube-drag ratio (cube near floor + lateral motion)."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "cube_drag_ratio" in info:
+                val = info["cube_drag_ratio"]
+                self.logger.record_mean("rollout/cube_drag_ratio", val)
+                if "task_name" in info:
+                    self.logger.record_mean(f"rollout/{info['task_name']}/cube_drag_ratio", val)
+        return True
+
+
 class RingContactCallback(BaseCallback):
     """Log mean per-episode ring (wall) contact ratio across episodes in each log window."""
 

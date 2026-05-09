@@ -66,12 +66,14 @@ def main(cfg: DictConfig):
     print(f"Loading {algo_name.upper()} model: {model_path}")
     model = algo_cls.load(model_path)
 
-    inner_env = make_env(env_cls, env_cfg, xml_path, render_mode="human", slow_factor=cfg.slow_factor)
+    render_mode = "human" if cfg.render else None
+    inner_env = make_env(env_cls, env_cfg, xml_path, render_mode=render_mode, slow_factor=cfg.slow_factor)
     frame_stack = int(cfg.frame_stack)
     vec_env = DummyVecEnv([lambda: inner_env])
     if frame_stack > 1:
         vec_env = VecFrameStack(vec_env, n_stack=frame_stack)
 
+    drag_ratios = []
     try:
         for ep in range(episodes):
             seed = (base_seed + ep) if base_seed is not None else int(np.random.SeedSequence().entropy % (2**31))
@@ -91,7 +93,12 @@ def main(cfg: DictConfig):
                 extras += f"  placed={info['placed']}"
             if "max_cube_height" in info:
                 extras += f"  max_height={info['max_cube_height']:.3f}"
+            if "cube_drag_ratio" in info:
+                drag_ratios.append(info["cube_drag_ratio"])
+                extras += f"  drag={info['cube_drag_ratio']:.3f}"
             print(f"Episode {ep + 1}/{episodes}: return={total_reward:.2f}{extras}")
+        if drag_ratios:
+            print(f"\nMean cube_drag_ratio over {len(drag_ratios)} episodes: {np.mean(drag_ratios):.3f}")
     except KeyboardInterrupt:
         pass
     finally:

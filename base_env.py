@@ -82,6 +82,7 @@ class SO101BaseEnv(gym.Env):
 
         cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
         self.cube_qpos_idx = self.model.jnt_qposadr[cube_joint_id]
+        self.cube_half_z = float(self.model.geom_size[self.cube_geom_id, 2])
 
         self.joint_low = self.model.jnt_range[self.joint_ids, 0]
         self.joint_high = self.model.jnt_range[self.joint_ids, 1]
@@ -96,6 +97,12 @@ class SO101BaseEnv(gym.Env):
         self.floor_contact_penalty = float(cfg["floor_contact_penalty"])
 
         self.gripper_idx = JOINT_NAMES.index("gripper")
+
+        # Cube-drag metric: cube center within DRAG_HEIGHT_TOL of resting height
+        # AND lateral speed above DRAG_SPEED_THRESH (m/s).
+        self._step_dt = self.model.opt.timestep * self.n_substeps
+        self.DRAG_HEIGHT_TOL = 0.005
+        self.DRAG_SPEED_THRESH = 0.01
 
         self._parse_config(cfg)
 
@@ -239,6 +246,8 @@ class SO101BaseEnv(gym.Env):
         self.step_count = 0
         self._max_cube_height = cube_pos[2]
         self._floor_contact_steps = 0
+        self._cube_drag_steps = 0
+        self._prev_cube_xy = cube_pos[:2].copy()
 
         # Sample obs biases AFTER physics randomization so toggling obs_bias does
         # not change the distribution of cube/arm initial states for a given seed.
@@ -278,6 +287,11 @@ class SO101BaseEnv(gym.Env):
             self._floor_contact_steps += 1
         self._max_cube_height = max(self._max_cube_height, cube_pos[2])
 
+        cube_xy_speed = np.linalg.norm(cube_pos[:2] - self._prev_cube_xy) / self._step_dt
+        self._prev_cube_xy = cube_pos[:2].copy()
+        if cube_pos[2] < self.cube_half_z + self.DRAG_HEIGHT_TOL and cube_xy_speed > self.DRAG_SPEED_THRESH:
+            self._cube_drag_steps += 1
+
         reward, terminated, info = self._compute_step(
             ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact,
         )
@@ -288,6 +302,7 @@ class SO101BaseEnv(gym.Env):
             info["max_cube_height"] = self._max_cube_height
             if self.floor_contact_penalty:
                 info["floor_contact_ratio"] = self._floor_contact_steps / self.step_count
+            info["cube_drag_ratio"] = self._cube_drag_steps / self.step_count
             self._on_episode_end(info)
 
         if self.render_mode == "human":

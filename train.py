@@ -10,7 +10,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecNormalize
 from callbacks import (
-    CompletionRateCallback, EpisodeCountCallback, EvalStatsCallback,
+    CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EvalStatsCallback,
     EvalStatsTracker, FloorContactCallback, MaxCubeHeightCallback,
     MeanReturnCallback, RingContactCallback, TimeLimitCallback, XYProgressCallback,
 )
@@ -151,6 +151,7 @@ def train(cfg: DictConfig):
     callbacks.append(MaxCubeHeightCallback())
     callbacks.append(FloorContactCallback())
     callbacks.append(RingContactCallback())
+    callbacks.append(CubeDragCallback())
     callbacks.append(XYProgressCallback())
     callbacks.append(CompletionRateCallback())
     callbacks.append(EpisodeCountCallback())

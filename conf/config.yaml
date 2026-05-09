@@ -7,6 +7,7 @@ resume: null
 deterministic: true
 seed: null
 slow_factor: 2
+render: true   # eval.py only: false for headless metric collection
 
 # Per-step Gaussian noise added to observations during training (sim2real domain randomization).
 # Noise is applied at the source (qpos, qvel, ee_pos, cube_pos); derived obs (cube_to_target)
