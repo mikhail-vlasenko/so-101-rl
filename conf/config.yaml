@@ -17,6 +17,10 @@ obs_noise:
   ee_sigma: 0.002      # m,     end-effector position
   cube_sigma: 0.003    # m,     cube position from vision pipeline
 
+# Number of frames the agent's observation lags behind the true state (sim2real DR).
+# 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
+obs_latency: 2
+
 train:
   time_limit_minutes: null
   n_envs: 32

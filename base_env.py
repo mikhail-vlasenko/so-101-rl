@@ -4,6 +4,8 @@ Shared MuJoCo setup, contact detection, rendering, and reset/step skeleton.
 Subclasses define task-specific config, reward, termination, and observations.
 """
 
+from collections import deque
+
 import numpy as np
 import mujoco
 import gymnasium as gym
@@ -37,11 +39,14 @@ class SO101BaseEnv(gym.Env):
     TASK_ID: float  # 0.0 = lift, 1.0 = pickplace
     TASK_NAME: str  # "lift" or "pickplace"
 
-    def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None, obs_noise=None):
+    def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
+                 obs_noise=None, obs_latency=0):
         super().__init__()
         self.render_mode = render_mode
         self.slow_factor = slow_factor
         self.obs_noise = obs_noise  # dict with keys qpos_sigma, qvel_sigma, ee_sigma, cube_sigma; or None
+        self.obs_latency = int(obs_latency)  # frames; agent sees obs from N steps ago
+        self._obs_history: deque = deque()
 
         self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
         self.data = mujoco.MjData(self.model)
@@ -118,7 +123,7 @@ class SO101BaseEnv(gym.Env):
         """
         raise NotImplementedError
 
-    def _get_obs(self):
+    def _compute_obs(self):
         qpos = self.data.qpos[self.joint_qposadr].copy()
         qvel = self.data.qvel[self.joint_dofadr].copy()
         ee_pos = self._get_ee_pos()
@@ -132,6 +137,15 @@ class SO101BaseEnv(gym.Env):
             cube_pos = cube_pos + rng.normal(0, self.obs_noise["cube_sigma"], size=cube_pos.shape)
 
         return np.concatenate([qpos, qvel, ee_pos, cube_pos, self._obs_extra(cube_pos)]).astype(np.float32)
+
+    def _get_obs(self):
+        raw = self._compute_obs()
+        if self.obs_latency == 0:
+            return raw
+        self._obs_history.append(raw)
+        while len(self._obs_history) > self.obs_latency + 1:
+            self._obs_history.popleft()
+        return self._obs_history[0]
 
     def _has_gripper_contact(self):
         """Check if cube_geom is in contact with both jaws simultaneously."""
@@ -193,6 +207,7 @@ class SO101BaseEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
+        self._obs_history.clear()
 
         cube_pos = self._sample_cube_pos()
         self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
