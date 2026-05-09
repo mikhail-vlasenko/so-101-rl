@@ -40,13 +40,17 @@ class SO101BaseEnv(gym.Env):
     TASK_NAME: str  # "lift" or "pickplace"
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
-                 obs_noise=None, obs_latency=0):
+                 obs_noise=None, obs_latency=0, obs_bias=None):
         super().__init__()
         self.render_mode = render_mode
         self.slow_factor = slow_factor
         self.obs_noise = obs_noise  # dict with keys qpos_sigma, qvel_sigma, ee_sigma, cube_sigma; or None
         self.obs_latency = int(obs_latency)  # frames; agent sees obs from N steps ago
         self._obs_history: deque = deque()
+        self.obs_bias = obs_bias  # dict with keys qpos_sigma, ee_sigma, cube_sigma; or None
+        self._qpos_bias = np.zeros(len(JOINT_NAMES))
+        self._ee_bias = np.zeros(3)
+        self._cube_bias = np.zeros(3)
 
         self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
         self.data = mujoco.MjData(self.model)
@@ -128,6 +132,11 @@ class SO101BaseEnv(gym.Env):
         qvel = self.data.qvel[self.joint_dofadr].copy()
         ee_pos = self._get_ee_pos()
         cube_pos = self._get_cube_pos()
+
+        if self.obs_bias is not None:
+            qpos = qpos + self._qpos_bias
+            ee_pos = ee_pos + self._ee_bias
+            cube_pos = cube_pos + self._cube_bias
 
         if self.obs_noise is not None:
             rng = self.np_random
@@ -230,6 +239,15 @@ class SO101BaseEnv(gym.Env):
         self.step_count = 0
         self._max_cube_height = cube_pos[2]
         self._floor_contact_steps = 0
+
+        # Sample obs biases AFTER physics randomization so toggling obs_bias does
+        # not change the distribution of cube/arm initial states for a given seed.
+        if self.obs_bias is not None:
+            rng = self.np_random
+            self._qpos_bias = rng.normal(0, self.obs_bias["qpos_sigma"], size=self.n_joints)
+            self._ee_bias = rng.normal(0, self.obs_bias["ee_sigma"], size=3)
+            self._cube_bias = rng.normal(0, self.obs_bias["cube_sigma"], size=3)
+
         return self._get_obs(), {}
 
     def _compute_step(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):

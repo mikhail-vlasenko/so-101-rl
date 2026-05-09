@@ -62,18 +62,19 @@ ALGORITHM_REGISTRY = {
 
 
 def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1,
-             obs_noise=None, obs_latency=0):
+             obs_noise=None, obs_latency=0, obs_bias=None):
     """Create an env instance from class, config, and XML path."""
     return env_cls(render_mode=render_mode, env_cfg=env_cfg,
                    slow_factor=slow_factor, xml_path=xml_path,
-                   obs_noise=obs_noise, obs_latency=obs_latency)
+                   obs_noise=obs_noise, obs_latency=obs_latency, obs_bias=obs_bias)
 
 
-def _make_env_fn(env_cls, env_cfg, xml_path, obs_noise=None, obs_latency=0):
+def _make_env_fn(env_cls, env_cfg, xml_path, obs_noise=None, obs_latency=0, obs_bias=None):
     """Factory closure for SubprocVecEnv."""
     def _init():
         return Monitor(env_cls(env_cfg=env_cfg, xml_path=xml_path,
-                               obs_noise=obs_noise, obs_latency=obs_latency))
+                               obs_noise=obs_noise, obs_latency=obs_latency,
+                               obs_bias=obs_bias))
     return _init
 
 
@@ -96,22 +97,28 @@ def train(cfg: DictConfig):
 
     obs_noise = OmegaConf.to_container(cfg.obs_noise, resolve=True)
     obs_latency = int(cfg.obs_latency)
+    obs_bias = OmegaConf.to_container(cfg.obs_bias, resolve=True)
 
     if cfg.env_name == "multitask":
         lift_cls, lift_cfg, lift_xml = _resolve_env(cfg, orig_dir, "lift")
         pp_cls, pp_cfg, pp_xml = _resolve_env(cfg, orig_dir, "pickplace")
         n_lift = round(n_envs * cfg.lift_ratio)
         env_fns = [
-            _make_env_fn(lift_cls, lift_cfg, lift_xml, obs_noise=obs_noise, obs_latency=obs_latency) if i < n_lift
-            else _make_env_fn(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise, obs_latency=obs_latency)
+            _make_env_fn(lift_cls, lift_cfg, lift_xml, obs_noise=obs_noise,
+                         obs_latency=obs_latency, obs_bias=obs_bias) if i < n_lift
+            else _make_env_fn(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise,
+                              obs_latency=obs_latency, obs_bias=obs_bias)
             for i in range(n_envs)
         ]
         # Eval on pickplace (the harder task)
-        eval_inner = make_env(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise, obs_latency=obs_latency)
+        eval_inner = make_env(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise,
+                              obs_latency=obs_latency, obs_bias=obs_bias)
     else:
         env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, cfg.env_name)
-        env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, obs_noise=obs_noise, obs_latency=obs_latency) for _ in range(n_envs)]
-        eval_inner = make_env(env_cls, env_cfg, xml_path, obs_noise=obs_noise, obs_latency=obs_latency)
+        env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, obs_noise=obs_noise,
+                                obs_latency=obs_latency, obs_bias=obs_bias) for _ in range(n_envs)]
+        eval_inner = make_env(env_cls, env_cfg, xml_path, obs_noise=obs_noise,
+                              obs_latency=obs_latency, obs_bias=obs_bias)
 
     frame_stack = int(cfg.frame_stack)
 
