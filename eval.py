@@ -15,6 +15,7 @@ import hydra
 import numpy as np
 from omegaconf import DictConfig
 from stable_baselines3 import PPO, SAC
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 
 from train import ENV_REGISTRY, _resolve_env, make_env
 
@@ -65,19 +66,26 @@ def main(cfg: DictConfig):
     print(f"Loading {algo_name.upper()} model: {model_path}")
     model = algo_cls.load(model_path)
 
-    env = make_env(env_cls, env_cfg, xml_path, render_mode="human", slow_factor=cfg.slow_factor)
+    inner_env = make_env(env_cls, env_cfg, xml_path, render_mode="human", slow_factor=cfg.slow_factor)
+    frame_stack = int(cfg.frame_stack)
+    vec_env = DummyVecEnv([lambda: inner_env])
+    if frame_stack > 1:
+        vec_env = VecFrameStack(vec_env, n_stack=frame_stack)
 
     try:
         for ep in range(episodes):
             seed = (base_seed + ep) if base_seed is not None else int(np.random.SeedSequence().entropy % (2**31))
-            obs, _ = env.reset(seed=seed)
+            vec_env.seed(seed)
+            obs = vec_env.reset()
             total_reward = 0.0
             done = False
+            info = {}
             while not done:
                 action, _ = model.predict(obs, deterministic=deterministic)
-                obs, reward, terminated, truncated, info = env.step(action)
-                total_reward += reward
-                done = terminated or truncated
+                obs, reward, dones, infos = vec_env.step(action)
+                total_reward += float(reward[0])
+                done = bool(dones[0])
+                info = infos[0]
             extras = f"  seed={seed}"
             if "placed" in info:
                 extras += f"  placed={info['placed']}"
@@ -87,7 +95,7 @@ def main(cfg: DictConfig):
     except KeyboardInterrupt:
         pass
     finally:
-        env.close()
+        vec_env.close()
 
 
 if __name__ == "__main__":

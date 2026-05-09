@@ -21,8 +21,12 @@ obs_noise:
 # 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
 obs_latency: 2
 
+# Number of consecutive observations stacked into the policy input.
+# 1 = no stacking (raw OBS_DIM). N>1 multiplies obs_dim by N via SB3's VecFrameStack.
+frame_stack: 4
+
 train:
-  time_limit_minutes: null
+  time_limit_minutes: 20
   n_envs: 32
   net_arch: [256, 256, 256]
   input_batchnorm: true

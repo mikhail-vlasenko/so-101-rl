@@ -8,7 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecNormalize
 from callbacks import (
     CompletionRateCallback, EpisodeCountCallback, EvalStatsCallback,
     EvalStatsTracker, FloorContactCallback, MaxCubeHeightCallback,
@@ -113,11 +113,17 @@ def train(cfg: DictConfig):
         env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, obs_noise=obs_noise, obs_latency=obs_latency) for _ in range(n_envs)]
         eval_inner = make_env(env_cls, env_cfg, xml_path, obs_noise=obs_noise, obs_latency=obs_latency)
 
+    frame_stack = int(cfg.frame_stack)
+
     vec_env = SubprocVecEnv(env_fns)
+    if frame_stack > 1:
+        vec_env = VecFrameStack(vec_env, n_stack=frame_stack)
     env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, gamma=gamma)
 
     stats_tracker = EvalStatsTracker(eval_inner)
     eval_vec_env = DummyVecEnv([lambda: Monitor(stats_tracker)])
+    if frame_stack > 1:
+        eval_vec_env = VecFrameStack(eval_vec_env, n_stack=frame_stack)
     eval_env = VecNormalize(eval_vec_env, norm_obs=False, training=False, norm_reward=False)
 
     log_dir = os.path.join(orig_dir, "logs", f"{algo_name}_{cfg.env_name}")
