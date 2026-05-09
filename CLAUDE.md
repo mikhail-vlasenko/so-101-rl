@@ -75,3 +75,4 @@ python show_starts.py                        # visualize spawn positions
 - **Explicit over defensive.** Require values instead of falling back to defaults silently (`cfg["key"]` not `cfg.get("key", default)`). If a required value is missing, that's a bug — surface it immediately.
 - **No dead code.** Delete unused variables, imports, and functions. Don't comment things out "for later." Version control exists.
 - **No redundant comments.** Don't restate what the code already says. Comments explain *why*, not *what*.
+- **Verify env behavior with tests, not inline scripts.** When checking that an environment, reward, or observation pipeline behaves as intended, write a pytest under `tests/` (e.g. `tests/test_obs_noise.py`) and run it with `pytest tests/<file>.py -v`. Tests are cheap, reusable, and document the contract; ad-hoc `python -c` snippets disappear after one use.

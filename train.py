@@ -61,16 +61,16 @@ ALGORITHM_REGISTRY = {
 }
 
 
-def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1):
+def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1, obs_noise=None):
     """Create an env instance from class, config, and XML path."""
     return env_cls(render_mode=render_mode, env_cfg=env_cfg,
-                   slow_factor=slow_factor, xml_path=xml_path)
+                   slow_factor=slow_factor, xml_path=xml_path, obs_noise=obs_noise)
 
 
-def _make_env_fn(env_cls, env_cfg, xml_path):
+def _make_env_fn(env_cls, env_cfg, xml_path, obs_noise=None):
     """Factory closure for SubprocVecEnv."""
     def _init():
-        return Monitor(env_cls(env_cfg=env_cfg, xml_path=xml_path))
+        return Monitor(env_cls(env_cfg=env_cfg, xml_path=xml_path, obs_noise=obs_noise))
     return _init
 
 
@@ -91,21 +91,23 @@ def train(cfg: DictConfig):
     gamma = cfg.train.gamma
     n_envs = cfg.train.n_envs
 
+    obs_noise = OmegaConf.to_container(cfg.obs_noise, resolve=True)
+
     if cfg.env_name == "multitask":
         lift_cls, lift_cfg, lift_xml = _resolve_env(cfg, orig_dir, "lift")
         pp_cls, pp_cfg, pp_xml = _resolve_env(cfg, orig_dir, "pickplace")
         n_lift = round(n_envs * cfg.lift_ratio)
         env_fns = [
-            _make_env_fn(lift_cls, lift_cfg, lift_xml) if i < n_lift
-            else _make_env_fn(pp_cls, pp_cfg, pp_xml)
+            _make_env_fn(lift_cls, lift_cfg, lift_xml, obs_noise=obs_noise) if i < n_lift
+            else _make_env_fn(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise)
             for i in range(n_envs)
         ]
         # Eval on pickplace (the harder task)
-        eval_inner = make_env(pp_cls, pp_cfg, pp_xml)
+        eval_inner = make_env(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise)
     else:
         env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, cfg.env_name)
-        env_fns = [_make_env_fn(env_cls, env_cfg, xml_path) for _ in range(n_envs)]
-        eval_inner = make_env(env_cls, env_cfg, xml_path)
+        env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, obs_noise=obs_noise) for _ in range(n_envs)]
+        eval_inner = make_env(env_cls, env_cfg, xml_path, obs_noise=obs_noise)
 
     vec_env = SubprocVecEnv(env_fns)
     env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, gamma=gamma)

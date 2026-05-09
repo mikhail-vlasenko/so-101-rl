@@ -8,6 +8,15 @@ deterministic: true
 seed: null
 slow_factor: 2
 
+# Per-step Gaussian noise added to observations during training (sim2real domain randomization).
+# Noise is applied at the source (qpos, qvel, ee_pos, cube_pos); derived obs (cube_to_target)
+# inherit the noise via the noisy cube_pos. Reward computation always uses the true state.
+obs_noise:
+  qpos_sigma: 0.005    # rad,   joint encoder jitter (~0.3°)
+  qvel_sigma: 0.05     # rad/s, joint velocity noise (numerically differentiated)
+  ee_sigma: 0.002      # m,     end-effector position
+  cube_sigma: 0.003    # m,     cube position from vision pipeline
+
 train:
   time_limit_minutes: null
   n_envs: 32

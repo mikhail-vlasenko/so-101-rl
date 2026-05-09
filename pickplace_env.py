@@ -44,8 +44,7 @@ class SO101PickPlaceEnv(SO101BaseEnv):
             assert gid >= 0, f"Ring wall geom 'ring_wall_{i}' not found in XML"
             self.ring_geom_ids.add(gid)
 
-    def _obs_extra(self):
-        cube_pos = self._get_cube_pos()
+    def _obs_extra(self, cube_pos):
         cube_to_target = cube_pos[:2] - self.place_target[:2]
         return [cube_to_target[0], cube_to_target[1], self.ring_height, self.TASK_ID]
 

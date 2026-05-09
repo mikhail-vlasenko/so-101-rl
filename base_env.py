@@ -37,10 +37,11 @@ class SO101BaseEnv(gym.Env):
     TASK_ID: float  # 0.0 = lift, 1.0 = pickplace
     TASK_NAME: str  # "lift" or "pickplace"
 
-    def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None):
+    def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None, obs_noise=None):
         super().__init__()
         self.render_mode = render_mode
         self.slow_factor = slow_factor
+        self.obs_noise = obs_noise  # dict with keys qpos_sigma, qvel_sigma, ee_sigma, cube_sigma; or None
 
         self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
         self.data = mujoco.MjData(self.model)
@@ -109,8 +110,12 @@ class SO101BaseEnv(gym.Env):
     def _get_joint_pos(self):
         return self.data.qpos[self.joint_qposadr].copy()
 
-    def _obs_extra(self):
-        """Return task-specific obs dimensions appended after [qpos, qvel, ee, cube]."""
+    def _obs_extra(self, cube_pos):
+        """Return task-specific obs dimensions appended after [qpos, qvel, ee, cube].
+
+        Receives the (possibly noisy) cube_pos so derived quantities stay consistent
+        with the cube_pos visible to the agent.
+        """
         raise NotImplementedError
 
     def _get_obs(self):
@@ -118,7 +123,15 @@ class SO101BaseEnv(gym.Env):
         qvel = self.data.qvel[self.joint_dofadr].copy()
         ee_pos = self._get_ee_pos()
         cube_pos = self._get_cube_pos()
-        return np.concatenate([qpos, qvel, ee_pos, cube_pos, self._obs_extra()]).astype(np.float32)
+
+        if self.obs_noise is not None:
+            rng = self.np_random
+            qpos = qpos + rng.normal(0, self.obs_noise["qpos_sigma"], size=qpos.shape)
+            qvel = qvel + rng.normal(0, self.obs_noise["qvel_sigma"], size=qvel.shape)
+            ee_pos = ee_pos + rng.normal(0, self.obs_noise["ee_sigma"], size=ee_pos.shape)
+            cube_pos = cube_pos + rng.normal(0, self.obs_noise["cube_sigma"], size=cube_pos.shape)
+
+        return np.concatenate([qpos, qvel, ee_pos, cube_pos, self._obs_extra(cube_pos)]).astype(np.float32)
 
     def _has_gripper_contact(self):
         """Check if cube_geom is in contact with both jaws simultaneously."""
