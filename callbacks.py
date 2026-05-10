@@ -119,6 +119,21 @@ class CompletionRateCallback(BaseCallback):
         return True
 
 
+class ReachStatsCallback(BaseCallback):
+    """Log reach-task metrics: success rate and EE-below-min ratio."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "reached" in info:
+                task = info["task_name"]
+                self.logger.record_mean(f"rollout/{task}/reached_rate", float(info["reached"]))
+                self.logger.record_mean(f"rollout/{task}/ee_below_ratio", info["ee_below_ratio"])
+                self.logger.record_mean(
+                    f"rollout/{task}/mean_limit_excess_sq", info["mean_limit_excess_sq"],
+                )
+        return True
+
+
 class EpisodeCountCallback(BaseCallback):
     """Log the number of completed episodes per rollout."""
 

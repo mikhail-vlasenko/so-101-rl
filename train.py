@@ -13,11 +13,13 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFram
 from callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EvalStatsCallback,
     EvalStatsTracker, FloorContactCallback, MaxCubeHeightCallback,
-    MeanReturnCallback, RingContactCallback, TimeLimitCallback, XYProgressCallback,
+    MeanReturnCallback, ReachStatsCallback, RingContactCallback, TimeLimitCallback,
+    XYProgressCallback,
 )
 from networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from lift_env import SO101LiftEnv
 from pickplace_env import SO101PickPlaceEnv
+from reach_env import SO101ReachEnv
 
 
 def make_lr_schedule(name: str, initial_lr: float, min_lr: float):
@@ -32,6 +34,7 @@ def make_lr_schedule(name: str, initial_lr: float, min_lr: float):
 ENV_REGISTRY = {
     "pickplace": SO101PickPlaceEnv,
     "lift": SO101LiftEnv,
+    "reach": SO101ReachEnv,
 }
 
 
@@ -163,6 +166,7 @@ def train(cfg: DictConfig):
     callbacks.append(CubeDragCallback())
     callbacks.append(XYProgressCallback())
     callbacks.append(CompletionRateCallback())
+    callbacks.append(ReachStatsCallback())
     callbacks.append(EpisodeCountCallback())
 
     if cfg.train.time_limit_minutes is not None:
