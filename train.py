@@ -8,6 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecNormalize
 from callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EvalStatsCallback,
@@ -92,6 +93,10 @@ def train(cfg: DictConfig):
     algo_name = cfg.algorithm
     algo_cls, algo_kwargs_fn, policy_cls = ALGORITHM_REGISTRY[algo_name]
 
+    seed = cfg.seed if cfg.seed is not None else None
+    if seed is not None:
+        set_random_seed(int(seed))
+
     gamma = cfg.train.gamma
     n_envs = cfg.train.n_envs
 
@@ -125,12 +130,16 @@ def train(cfg: DictConfig):
     vec_env = SubprocVecEnv(env_fns)
     if frame_stack > 1:
         vec_env = VecFrameStack(vec_env, n_stack=frame_stack)
+    if seed is not None:
+        vec_env.seed(int(seed))
     env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, gamma=gamma)
 
     stats_tracker = EvalStatsTracker(eval_inner)
     eval_vec_env = DummyVecEnv([lambda: Monitor(stats_tracker)])
     if frame_stack > 1:
         eval_vec_env = VecFrameStack(eval_vec_env, n_stack=frame_stack)
+    if seed is not None:
+        eval_vec_env.seed(int(seed) + 10_000)
     eval_env = VecNormalize(eval_vec_env, norm_obs=False, training=False, norm_reward=False)
 
     log_dir = os.path.join(orig_dir, "logs", f"{algo_name}_{cfg.env_name}")
@@ -198,6 +207,7 @@ def train(cfg: DictConfig):
             },
             stats_window_size=1,
             verbose=1,
+            seed=int(seed) if seed is not None else None,
             tensorboard_log=os.path.join(orig_dir, "logs"),
             **algo_kwargs_fn(cfg),
         )
