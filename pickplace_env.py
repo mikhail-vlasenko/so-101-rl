@@ -113,18 +113,23 @@ class SO101PickPlaceEnv(SO101BaseEnv):
         if ring_contact:
             reward += self.ring_contact_penalty
 
-        # XY progress reward only counts while grasped — forces "carry, not push"
+        # XY progress reward only counts while grasped AND the cube is above the
+        # current ring height — forces "carry, not push". Gating on ring_height
+        # (rather than a fixed lift threshold) keeps low-ring episodes easy
+        # (cube resting at 1.5cm clears ring_height=0) while forcing the policy
+        # to actually lift over the wall when the ring is tall.
         xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
         xy_delta = self._prev_xy_dist - xy_dist  # positive = moved closer
         self._prev_xy_dist = xy_dist
 
         if grasped:
-            xy_reward = XY_PROGRESS_COEFF * xy_delta
-            if xy_delta >= 0:
-                self._xy_progress_total += xy_reward
-            else:
-                self._xy_regress_total += xy_reward
-            reward += xy_reward
+            if cube_pos[2] > self.ring_height:
+                xy_reward = XY_PROGRESS_COEFF * xy_delta
+                if xy_delta >= 0:
+                    self._xy_progress_total += xy_reward
+                else:
+                    self._xy_regress_total += xy_reward
+                reward += xy_reward
             reward += GRASP_HOLD_REWARD
         else:
             # Approach reward, clipped so the agent isn't rewarded for crashing into the cube
