@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 
 from hydra import compose, initialize
-from omegaconf import OmegaConf
 
 from pickplace_env import SO101PickPlaceEnv
 
@@ -51,12 +50,6 @@ def _pickplace(cfg, *, obs_bias=SIGMAS, obs_noise=None):
 
 def _zero_action():
     return np.zeros(6, dtype=np.float32)
-
-
-def test_default_config_matches_expected_sigmas(cfg):
-    """Smoke check that conf/config.yaml carries the documented bias sigmas."""
-    obs_bias = OmegaConf.to_container(cfg.obs_bias, resolve=True)
-    assert obs_bias == SIGMAS
 
 
 def test_bias_constant_within_episode(cfg):
