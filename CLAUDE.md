@@ -58,6 +58,17 @@ python eval.py model=path/to/model.zip       # eval specific model
 python show_starts.py                        # visualize spawn positions
 ```
 
+When launching training from an agent (no interactive shell), wrap with
+`conda run` and redirect to a log file, e.g.:
+
+```bash
+conda run -n mujoco_env python train.py env=pickplace > run.log 2>&1
+```
+
+`env=pickplace` and any other Hydra overrides are optional / swappable. Run it
+via the agent's background-execution mechanism, not a shell `&` — `&` plus
+`conda run`'s stdout buffering has been flaky in practice.
+
 ### Stack
 
 - **Conda env:** `mujoco_env`

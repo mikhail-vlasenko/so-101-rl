@@ -21,10 +21,12 @@ obs_noise:
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
 # differentiating biased qpos has zero DC offset, so a velocity bias is non-physical.
+# Currently disabled: see calibration_plan.md — we calibrate bias on the real rig with ArUco
+# markers and subtract it pre-policy, rather than asking the policy to absorb it via DR.
 obs_bias:
-  qpos_sigma: 0.01     # rad,  joint encoder zero-offset (~0.6° per joint)
-  ee_sigma:   0.005    # m,    EE-frame mount offset
-  cube_sigma: 0.008    # m,    vision pipeline calibration error
+  qpos_sigma: 0.0
+  ee_sigma:   0.0
+  cube_sigma: 0.0
 
 # Number of frames the agent's observation lags behind the true state (sim2real DR).
 # 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
@@ -32,7 +34,7 @@ obs_latency: 2
 
 # Number of consecutive observations stacked into the policy input.
 # 1 = no stacking (raw OBS_DIM). N>1 multiplies obs_dim by N via SB3's VecFrameStack.
-frame_stack: 4
+frame_stack: 1
 
 train:
   time_limit_minutes: 20
