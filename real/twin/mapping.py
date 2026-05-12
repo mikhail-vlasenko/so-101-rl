@@ -120,3 +120,12 @@ def rad_to_raw(rad: np.ndarray, jm: JointMaps, direction: np.ndarray) -> np.ndar
     bounds_lo = np.minimum(cal_min, cal_max)
     bounds_hi = np.maximum(cal_min, cal_max)
     return np.clip(raw, bounds_lo, bounds_hi).round().astype(np.int64)
+
+
+def compute_ee_pos(model: mujoco.MjModel, data: mujoco.MjData,
+                   qposadr: np.ndarray, qpos: np.ndarray,
+                   ee_site_id: int) -> np.ndarray:
+    """Forward kinematics: set the 6 arm joint angles, run kinematics, return EE site xpos."""
+    data.qpos[qposadr] = qpos
+    mujoco.mj_kinematics(model, data)
+    return data.site_xpos[ee_site_id].copy()

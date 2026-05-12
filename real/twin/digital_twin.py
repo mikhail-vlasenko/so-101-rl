@@ -20,6 +20,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
+from .constants import MAX_RAW_DELTA_PER_STEP, SERVO_ACCEL, SERVO_SPEED
 from .gui import CONTROL, MIRROR, TwinState, run as run_gui
 from .mapping import JointMaps, load_joint_maps, rad_to_raw, raw_to_norm
 from .servo_io import ServoBus
@@ -27,11 +28,6 @@ from .servo_io import ServoBus
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 DEFAULT_CAL = REPO_ROOT.parent / "feetech-servo-sdk" / "calibration.json"
-
-# Safety / control constants
-MAX_RAW_DELTA_PER_STEP = 25
-SERVO_SPEED = 200
-SERVO_ACCEL = 20
 
 READ_HZ = 50.0
 RENDER_HZ = 60.0
