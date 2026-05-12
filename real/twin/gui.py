@@ -22,9 +22,13 @@ from .mapping import JointMaps, raw_to_norm
 MIRROR = "MIRROR"
 CONTROL = "CONTROL"
 
-# Tk on HiDPI / Wayland-via-XWayland doesn't auto-scale; tweak these.
-TK_SCALING = 2.5
-BASE_FONT_SIZE = 14
+# Tk on HiDPI / Wayland-via-XWayland doesn't auto-scale. Use negative font
+# sizes — in Tk, negative means "pixels", which is DPI-independent (positive
+# is points, which depends on `tk scaling` and is finicky).
+# Requires an Xft-enabled tk (e.g. `tk=*=xft_*` from conda-forge); the noxft
+# build only sees the bitmap `fixed` font and won't render at this size.
+FONT_PX = -18
+FONT_PX_HEADER = -19
 
 
 class TwinState:
@@ -42,17 +46,20 @@ class TwinState:
 
 
 def _set_global_fonts(root: tk.Tk) -> tkfont.Font:
-    root.tk.call("tk", "scaling", TK_SCALING)
     for fname in ("TkDefaultFont", "TkTextFont", "TkHeadingFont",
                   "TkMenuFont", "TkFixedFont", "TkTooltipFont", "TkIconFont"):
-        tkfont.nametofont(fname).configure(size=BASE_FONT_SIZE)
+        tkfont.nametofont(fname).configure(size=FONT_PX)
     mono = tkfont.nametofont("TkFixedFont")
     style = ttk.Style()
-    style.configure(".", font=("TkDefaultFont", BASE_FONT_SIZE))
-    style.configure("TButton", font=("TkDefaultFont", BASE_FONT_SIZE))
-    style.configure("Estop.TButton", font=("TkDefaultFont", BASE_FONT_SIZE, "bold"),
+    base = ("TkDefaultFont", FONT_PX)
+    # Some ttk themes ignore the root `.` style for specific widget classes,
+    # so configure each class we use.
+    for cls in (".", "TLabel", "TButton", "TCheckbutton", "TRadiobutton",
+                "TFrame", "TLabelframe", "TSeparator", "TScale"):
+        style.configure(cls, font=base)
+    style.configure("Estop.TButton",
+                    font=("TkDefaultFont", FONT_PX_HEADER, "bold"),
                     foreground="white", background="#c0392b")
-    root.option_add("*Font", f"TkDefaultFont {BASE_FONT_SIZE}")
     return mono
 
 
@@ -131,7 +138,7 @@ def run(
         info = ttk.Frame(jframe)
         info.pack(fill="x")
         ttk.Label(info, text=j.name, width=14, anchor="w",
-                  font=("TkDefaultFont", BASE_FONT_SIZE, "bold")).pack(side="left")
+                  font=("TkDefaultFont", FONT_PX_HEADER, "bold")).pack(side="left")
         dv = tk.BooleanVar(value=False)
         ttk.Checkbutton(info, text="inv", variable=dv,
                         command=make_dir_cb(i, dv)).pack(side="left", padx=8)

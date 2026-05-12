@@ -80,7 +80,7 @@ via the agent's background-execution mechanism, not a shell `&` — `&` plus
 - **Logging:** W&B (entity: `mvlasenko`, project: `robot-arm`)
 - **Algorithm:** SAC or PPO (Stable-Baselines3)
 - **Deps:** gymnasium, stable-baselines3, wandb, hydra-core
-- **Real-arm extras (pip-installed into the conda env):** `pip install -r requirements.txt` → `pyserial`. The twin GUI uses stdlib `tkinter`.
+- **Real-arm extras (pip-installed into the conda env):** `pip install -r requirements.txt` → `pyserial`. The twin GUI uses stdlib `tkinter`, but requires the Xft-enabled tk build from conda-forge (default conda tk is `noxft` and only sees the bitmap `fixed` font, making the UI unreadably small). Fix once per env: `conda install -n mujoco_env -c conda-forge 'tk=8.6.13=xft_*'`.
 
 ## Coding Principles
 
