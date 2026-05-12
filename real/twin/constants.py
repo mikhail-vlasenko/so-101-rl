@@ -10,9 +10,20 @@ Imported by `digital_twin.py` (CONTROL-mode writes) and `rollout_real.py`
 MAX_RAW_DELTA_PER_STEP = 25
 
 # SyncWritePosEx speed argument. Range 0-32767 (BIT15 = direction), units
-# 0.732 RPM. 200 -> ~146 RPM at the servo output.
-SERVO_SPEED = 200
+# 0.732 RPM. 1500 -> ~1100 RPM ceiling; well above what the policy commands,
+# leaves headroom so speed is never the binding limit.
+SERVO_SPEED = 1500
 
 # SyncWritePosEx acceleration argument. Range 0-254, units 8.7 deg/s^2.
-# 20 -> 174 deg/s^2.
-SERVO_ACCEL = 20
+# 150 -> ~1300 deg/s^2 (~23 rad/s^2). Lets the servo finish ramping inside a
+# single 50ms control step at 20Hz; 20 was leaving the servo stuck in the
+# acceleration phase.
+SERVO_ACCEL = 150
+
+# Position-loop P gain (Feetech SMS-STS register addr 21), per joint in
+# JOINT_NAMES order (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
+# wrist_roll, gripper). Factory default is 32 uniformly. Gravity-loaded joints
+# (shoulder_lift, elbow_flex) need higher gain to overcome the static load at
+# small per-step errors; wrist joints oscillate at high Kp so stay closer to
+# default. Range 0..254 per value.
+SERVO_POSITION_KP = (64, 110, 160, 110, 32, 50)

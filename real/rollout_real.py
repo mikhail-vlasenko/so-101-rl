@@ -25,7 +25,12 @@ import numpy as np
 import yaml
 from stable_baselines3 import PPO
 
-from .twin.constants import MAX_RAW_DELTA_PER_STEP, SERVO_ACCEL, SERVO_SPEED
+from .twin.constants import (
+    MAX_RAW_DELTA_PER_STEP,
+    SERVO_ACCEL,
+    SERVO_POSITION_KP,
+    SERVO_SPEED,
+)
 from .twin.mapping import compute_ee_pos, load_joint_maps, rad_to_raw, raw_to_rad
 from .twin.servo_io import ServoBus
 
@@ -125,6 +130,8 @@ def main() -> int:
             return 1
 
         if args.execute:
+            bus.set_position_kp(SERVO_POSITION_KP)
+            print(f"Set position-loop Kp (per joint) = {list(SERVO_POSITION_KP)}")
             bus.enable_torque_all()
 
         dt = 1.0 / CONTROL_HZ
@@ -167,8 +174,12 @@ def main() -> int:
             if step % 5 == 0 or in_target:
                 ee = compute_ee_pos(model, data, qposadr, qpos, ee_site_id)
                 act_str = ",".join(f"{a:+.2f}" for a in action)
+                tgt_err = (target_raw - raw).tolist()
                 print(f"step={step:3d}  dist={dist:.3f}  in_target={in_target}  "
                       f"dwell={dwell_count}  ee_z={ee[2]:+.3f}  act=[{act_str}]")
+                print(f"          raw      ={raw.tolist()}")
+                print(f"          tgt_raw  ={target_raw.tolist()}")
+                print(f"          err(tgt-raw)={tgt_err}")
             step += 1
 
             if dwell_count >= DWELL_STEPS:

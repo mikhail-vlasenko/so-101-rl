@@ -35,11 +35,12 @@
     <default class="sts3215">
       <geom contype="0" conaffinity="0"/>
       <joint damping="0.60" frictionloss="0.052" armature="0.028"/>
-      <!-- These gains are not a 1-to-1 mapping of the servo gains used in
-           Lerobot. These position gains and forces were calculated according to
-           https://github.com/Gregory119/RBE501-RL-arm-project/blob/main/gymnasium_env/README.md,
-           assuming that the servo proportional gain is set to 16. -->
-      <position kp="998.22" kv="2.731" forcerange="-2.94 2.94"/>
+      <!-- kp lowered from 998.22 → 64 to better match the real arm's soft
+           tracking behavior (Feetech position-loop Kp set to 64 on real via
+           real/twin/constants.py). The previous kp=998 saturated the
+           ±2.94 N·m forcerange at any error >0.003 rad, making sim tracking
+           effectively instant and creating a large sim-to-real gap. -->
+      <position kp="64" kv="2.731" forcerange="-2.94 2.94"/>
     </default>
 
     <default class="backlash">

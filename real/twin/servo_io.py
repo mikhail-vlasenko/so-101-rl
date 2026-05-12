@@ -15,6 +15,7 @@ sys.path.insert(0, str(SDK_DIR))
 import scservo_sdk as scs  # noqa: E402
 
 ADDR_TORQUE_ENABLE = 40
+ADDR_POSITION_KP = 21
 ADDR_PRESENT_POSITION = 56
 LEN_PRESENT_POSITION = 2
 BAUDRATE = 1_000_000
@@ -73,6 +74,32 @@ class ServoBus:
 
     def disable_torque_all(self) -> None:
         self._set_torque(0)
+
+    def set_position_kp(self, kp_per_servo) -> None:
+        """Write position-loop proportional gain (addr 21) per servo (in
+        servo_ids order). Factory default is 32; raising it makes the servo
+        apply more torque per unit of position error, helping overcome static
+        friction at small commanded deltas. Range 0..254 per value.
+        Gravity-loaded joints (shoulder_lift, elbow_flex) need higher Kp; wrist
+        joints oscillate at high Kp, so tune per joint."""
+        assert self.packet_handler is not None, "ServoBus not connected"
+        kp_list = list(kp_per_servo)
+        assert len(kp_list) == len(self.servo_ids), (
+            f"expected {len(self.servo_ids)} Kp values, got {len(kp_list)}"
+        )
+        for sid, kp in zip(self.servo_ids, kp_list):
+            assert 0 <= kp <= 254, f"servo {sid} kp out of range: {kp}"
+            result, error = self.packet_handler.write1ByteTxRx(sid, ADDR_POSITION_KP, int(kp))
+            if result != scs.COMM_SUCCESS:
+                raise RuntimeError(
+                    f"servo {sid} Kp write failed: "
+                    f"{self.packet_handler.getTxRxResult(result)}"
+                )
+            if error != 0:
+                raise RuntimeError(
+                    f"servo {sid} Kp write error: "
+                    f"{self.packet_handler.getRxPacketError(error)}"
+                )
 
     def read_all(self) -> np.ndarray:
         """Read present position for every configured servo. Returns int64 array in servo_ids order."""
