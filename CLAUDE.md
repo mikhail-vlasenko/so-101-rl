@@ -33,6 +33,10 @@ Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE 
 - `pickplace_env.py` — Gymnasium env (phase-based reward)
 - `conf/env/pickplace.yaml` — env config
 
+## Real arm
+
+- `real/twin/digital_twin.py` — MuJoCo passive viewer + tkinter side panel that mirrors the real SO-101 arm's encoders into MuJoCo and lets the user verify the rad↔raw mapping (live direction toggles per joint, raw/norm/rad readouts, optional slider control with torque-on). Built from scratch on raw `scservo_sdk`; does not import from other `real/*.py` files. Run with `python -m real.twin.digital_twin` (default port `/dev/ttyACM0`).
+
 ## Training
 
 - `train.py` — Training with Hydra config + W&B logging
@@ -76,6 +80,7 @@ via the agent's background-execution mechanism, not a shell `&` — `&` plus
 - **Logging:** W&B (entity: `mvlasenko`, project: `robot-arm`)
 - **Algorithm:** SAC or PPO (Stable-Baselines3)
 - **Deps:** gymnasium, stable-baselines3, wandb, hydra-core
+- **Real-arm extras (pip-installed into the conda env):** `pip install -r requirements.txt` → `pyserial`. The twin GUI uses stdlib `tkinter`.
 
 ## Coding Principles
 
