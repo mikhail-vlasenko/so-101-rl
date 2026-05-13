@@ -2,9 +2,9 @@
 env_name: pickplace
 
 pickplace_env:
-  action_scale: 0.05
-  max_steps: 300
-  n_substeps: 10
+  action_scale: ${action_scale}   # shared across envs, defined in config.yaml
+  max_steps: 450          # 450 steps / 30 Hz = 15 s episode
+  n_substeps: 10          # 10 * (1/300 s timestep in so101.xml) = exactly 30 Hz
   cube_low: [0.15, -0.15, 0.015]
   cube_high: [0.30, 0.15, 0.015]
   place_target: [0.18, 0.0, 0.02]

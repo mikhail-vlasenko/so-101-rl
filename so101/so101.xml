@@ -1,6 +1,8 @@
 <?xml version="1.0" ?>
 <mujoco model="so101">
-  <option integrator="implicitfast" timestep="0.005" cone="elliptic"
+  <!-- timestep = 1/300 s so that n_substeps=10 in the env configs yields an
+       exact 30 Hz control rate, matching the real-arm camera frame rate. -->
+  <option integrator="implicitfast" timestep="0.0033333333" cone="elliptic"
    iterations="10" ls_iterations="20" impratio="10"/>
 
   <compiler angle="radian" meshdir="assets" autolimits="true"/>

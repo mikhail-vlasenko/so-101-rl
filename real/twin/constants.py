@@ -5,9 +5,11 @@ Imported by `digital_twin.py` (CONTROL-mode writes) and `rollout_real.py`
 """
 
 # Per-step raw-position delta clamp (in servo units, 0-4095). With the SO-101's
-# 0.087 deg/unit, this limits one step to ~2.2° at the joint. Picked so the
-# arm can't lurch even if the policy or slider commands a far target.
-MAX_RAW_DELTA_PER_STEP = 25
+# 0.087°/unit, 35 units ≈ 3.05° per step. At 30 Hz that caps real-side joint
+# speed at ~1.6 rad/s, which sits just above the policy's max commanded step
+# (action_scale=0.05 rad ≈ 33 raw units) — leaving safety headroom without
+# silently truncating in-distribution commands.
+MAX_RAW_DELTA_PER_STEP = 35
 
 # SyncWritePosEx speed argument. Range 0-32767 (BIT15 = direction), units
 # 0.732 RPM. 1500 -> ~1100 RPM ceiling; well above what the policy commands,

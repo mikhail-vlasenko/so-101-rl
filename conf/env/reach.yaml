@@ -2,9 +2,9 @@
 env_name: reach
 
 reach_env:
-  action_scale: 0.02      # rad per joint per step — small for slow, gradual motion
-  max_steps: 400
-  n_substeps: 10
+  action_scale: ${action_scale}   # shared across envs, defined in config.yaml
+  max_steps: 300          # 300 steps / 30 Hz = 10 s episode
+  n_substeps: 10          # 10 * (1/300 s timestep in so101.xml) = exactly 30 Hz
 
   # Safety: episode penalizes any step where the EE site z is below this height.
   # Waypoints are validated against this on env init and reach training rejects
@@ -14,7 +14,8 @@ reach_env:
   # Joint-space distance threshold (rad) for "arm at target".
   tolerance: 0.05
   # Steps the policy must remain within tolerance before terminating successfully.
-  dwell_steps: 10
+  # 15 steps / 30 Hz = 0.5 s dwell.
+  dwell_steps: 15
 
   # Joint-limit penalty: any joint whose normalized distance from the joint's
   # range center exceeds `limit_margin` incurs a quadratic penalty. Waypoints

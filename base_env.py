@@ -12,7 +12,8 @@ import gymnasium as gym
 from gymnasium import spaces
 
 
-OBS_DIM = 22
+PREV_ACTIONS_N = 2  # number of past actions appended to the observation
+OBS_DIM = 22 + PREV_ACTIONS_N * 6
 
 FIXED_JAW_NAMES = [
     "fixed_jaw_box1", "fixed_jaw_box2", "fixed_jaw_box3",
@@ -98,6 +99,8 @@ class SO101BaseEnv(gym.Env):
 
         self.gripper_idx = JOINT_NAMES.index("gripper")
 
+        self._prev_actions = np.zeros((PREV_ACTIONS_N, self.n_joints), dtype=np.float32)
+
         # Cube-drag metric: cube center within DRAG_HEIGHT_TOL of resting height
         # AND lateral speed above DRAG_SPEED_THRESH (m/s).
         self._step_dt = self.model.opt.timestep * self.n_substeps
@@ -152,7 +155,8 @@ class SO101BaseEnv(gym.Env):
             ee_pos = ee_pos + rng.normal(0, self.obs_noise["ee_sigma"], size=ee_pos.shape)
             cube_pos = cube_pos + rng.normal(0, self.obs_noise["cube_sigma"], size=cube_pos.shape)
 
-        return np.concatenate([qpos, qvel, ee_pos, cube_pos, self._obs_extra(cube_pos)]).astype(np.float32)
+        return np.concatenate([qpos, qvel, ee_pos, cube_pos, self._obs_extra(cube_pos),
+                               self._prev_actions.flatten()]).astype(np.float32)
 
     def _get_obs(self):
         raw = self._compute_obs()
@@ -224,6 +228,7 @@ class SO101BaseEnv(gym.Env):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
         self._obs_history.clear()
+        self._prev_actions[:] = 0.0
 
         cube_pos = self._sample_cube_pos()
         self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
@@ -268,7 +273,10 @@ class SO101BaseEnv(gym.Env):
 
     def step(self, action):
         self.step_count += 1
-        action = np.clip(action, -1.0, 1.0)
+        action = np.clip(action, -1.0, 1.0).astype(np.float32)
+
+        self._prev_actions[0] = self._prev_actions[1]
+        self._prev_actions[1] = action
 
         current = self.data.qpos[self.joint_qposadr].copy()
         target = current + action * self.action_scale

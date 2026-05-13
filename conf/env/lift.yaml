@@ -2,9 +2,9 @@
 env_name: lift
 
 lift_env:
-  action_scale: 0.05
-  max_steps: 200
-  n_substeps: 10
+  action_scale: ${action_scale}   # shared across envs, defined in config.yaml
+  max_steps: 300          # 300 steps / 30 Hz = 10 s episode
+  n_substeps: 10          # 10 * (1/300 s timestep in so101.xml) = exactly 30 Hz
   cube_low: [0.15, -0.15, 0.015]
   cube_high: [0.30, 0.15, 0.015]
   floor_contact_penalty: -0.02

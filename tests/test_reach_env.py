@@ -10,6 +10,7 @@ import os
 import mujoco
 import numpy as np
 import pytest
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from reach_env import SO101ReachEnv
@@ -19,7 +20,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _load_reach_cfg():
-    cfg = OmegaConf.load(os.path.join(REPO_ROOT, "conf/env/reach.yaml"))
+    # Compose the full Hydra config so ${action_scale} (and any other top-level
+    # interpolation referenced from env/reach.yaml) resolves correctly.
+    with initialize_config_dir(config_dir=os.path.join(REPO_ROOT, "conf"), version_base=None):
+        cfg = compose(config_name="config", overrides=["env=reach"])
     return OmegaConf.to_container(cfg.reach_env, resolve=True)
 
 
@@ -43,9 +47,13 @@ def test_reset_obs_shape_and_onehot():
     env = _make_env()
     obs, _ = env.reset(seed=0)
     assert obs.shape == env.observation_space.shape
-    onehot = obs[-env.n_waypoints:]
+    onehot_start = 2 * env.n_joints + 3
+    onehot = obs[onehot_start:onehot_start + env.n_waypoints]
     assert onehot.sum() == 1.0
     assert ((onehot == 0.0) | (onehot == 1.0)).all()
+    # Prev actions occupy the tail of the obs and are zero right after reset.
+    prev_n = env.n_joints * 2
+    assert np.array_equal(obs[-prev_n:], np.zeros(prev_n, dtype=np.float32))
 
 
 def test_step_info_keys_and_init_safety():

@@ -13,7 +13,7 @@ import mujoco
 import gymnasium as gym
 from gymnasium import spaces
 
-from base_env import JOINT_NAMES
+from base_env import JOINT_NAMES, PREV_ACTIONS_N
 
 
 class SO101ReachEnv(gym.Env):
@@ -76,10 +76,12 @@ class SO101ReachEnv(gym.Env):
 
         self.action_space = spaces.Box(low=-1.0, high=1.0,
                                        shape=(self.n_joints,), dtype=np.float32)
-        # obs = [qpos(n), qvel(n), ee_pos(3), waypoint_onehot(N)]
-        obs_dim = 2 * self.n_joints + 3 + self.n_waypoints
+        # obs = [qpos(n), qvel(n), ee_pos(3), waypoint_onehot(N), prev_actions(PREV_ACTIONS_N * n)]
+        obs_dim = 2 * self.n_joints + 3 + self.n_waypoints + PREV_ACTIONS_N * self.n_joints
         obs_high = np.full(obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
+
+        self._prev_actions = np.zeros((PREV_ACTIONS_N, self.n_joints), dtype=np.float32)
 
         self.step_count = 0
         self.viewer = None
@@ -141,7 +143,8 @@ class SO101ReachEnv(gym.Env):
         qpos = self.data.qpos[self.joint_qposadr].copy()
         qvel = self.data.qvel[self.joint_dofadr].copy()
         ee_pos = self._get_ee_pos()
-        return np.concatenate([qpos, qvel, ee_pos, self._waypoint_onehot()]).astype(np.float32)
+        return np.concatenate([qpos, qvel, ee_pos, self._waypoint_onehot(),
+                               self._prev_actions.flatten()]).astype(np.float32)
 
     def _sample_safe_init(self):
         """Sample a joint pose with EE z >= ee_z_min and no arm collision."""
@@ -160,6 +163,7 @@ class SO101ReachEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
+        self._prev_actions[:] = 0.0
 
         self.waypoint_idx = int(self.np_random.integers(self.n_waypoints))
         self.target_qpos = self.waypoints[self.waypoint_idx].copy()
@@ -179,7 +183,10 @@ class SO101ReachEnv(gym.Env):
 
     def step(self, action):
         self.step_count += 1
-        action = np.clip(action, -1.0, 1.0)
+        action = np.clip(action, -1.0, 1.0).astype(np.float32)
+
+        self._prev_actions[0] = self._prev_actions[1]
+        self._prev_actions[1] = action
 
         current = self.data.qpos[self.joint_qposadr].copy()
         target = current + action * self.action_scale

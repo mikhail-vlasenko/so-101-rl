@@ -22,7 +22,7 @@ SIGMAS = {
     "cube_sigma": 0.003,
 }
 
-# Obs layout: [qpos(6), qvel(6), ee_pos(3), cube_pos(3), task_extra(4)]
+# Obs layout: [qpos(6), qvel(6), ee_pos(3), cube_pos(3), task_extra(4), prev_actions(2*6)]
 QPOS = slice(0, 6)
 QVEL = slice(6, 12)
 EE = slice(12, 15)
@@ -30,6 +30,8 @@ CUBE = slice(15, 18)
 C2T = slice(18, 20)
 RING_H = 20
 TASK_ID = 21
+PREV_ACTIONS = slice(22, 34)
+OBS_DIM = 34
 
 
 @pytest.fixture(scope="module")
@@ -95,6 +97,8 @@ def test_constant_obs_dims_are_not_noised(cfg):
 
     assert obs_clean[RING_H] == obs_noisy[RING_H]
     assert obs_clean[TASK_ID] == obs_noisy[TASK_ID]
+    # Prev actions are commanded values, not measurements — must not be noised.
+    assert np.array_equal(obs_clean[PREV_ACTIONS], obs_noisy[PREV_ACTIONS])
 
 
 def test_cube_to_target_uses_noisy_cube_pos(cfg):
@@ -115,7 +119,7 @@ def test_per_step_noise_magnitude_matches_sigmas(cfg):
     env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
 
     n_samples = 1000
-    diffs = np.empty((n_samples, 22), dtype=np.float64)
+    diffs = np.empty((n_samples, OBS_DIM), dtype=np.float64)
     for i in range(n_samples):
         env_clean.reset(seed=i)
         env_noisy.reset(seed=i)
@@ -153,7 +157,28 @@ def test_lift_env_compatible_with_noise(lift_cfg):
     env = SO101LiftEnv(env_cfg=lift_cfg.lift_env, xml_path="so101/scene_lift.xml",
                       obs_noise=SIGMAS)
     obs, _ = env.reset(seed=0)
-    assert obs.shape == (22,)
+    assert obs.shape == (OBS_DIM,)
     # Lift's _obs_extra returns zeros + task_id, so [18:21] should be zero, [21]=lift TASK_ID=0.0
     assert np.array_equal(obs[18:21], np.zeros(3, dtype=np.float32))
     assert obs[TASK_ID] == 0.0
+    # Prev actions are zero immediately after reset (no action has been taken yet).
+    assert np.array_equal(obs[PREV_ACTIONS], np.zeros(12, dtype=np.float32))
+
+
+def test_prev_actions_track_last_two_actions(cfg):
+    """After stepping, obs[PREV_ACTIONS] = [a(t-1), a(t)] (12 dims = 2 actions * 6 joints).
+    Disable obs_latency so we see the most-recent buffer state without delay."""
+    env = SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
+                            xml_path="so101/scene_pickplace.xml",
+                            obs_noise=None, obs_latency=0)
+    env.reset(seed=0)
+    a0 = np.array([0.1, -0.2, 0.3, -0.4, 0.5, -0.6], dtype=np.float32)
+    a1 = np.array([-0.7, 0.8, -0.9, 0.4, -0.3, 0.2], dtype=np.float32)
+    obs0, *_ = env.step(a0)
+    # After first step: slot 0 still zero, slot 1 = a0.
+    np.testing.assert_array_equal(obs0[PREV_ACTIONS][:6], np.zeros(6, dtype=np.float32))
+    np.testing.assert_allclose(obs0[PREV_ACTIONS][6:], a0)
+    obs1, *_ = env.step(a1)
+    # After second step: slot 0 = a0, slot 1 = a1.
+    np.testing.assert_allclose(obs1[PREV_ACTIONS][:6], a0)
+    np.testing.assert_allclose(obs1[PREV_ACTIONS][6:], a1)

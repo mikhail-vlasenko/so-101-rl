@@ -71,8 +71,9 @@ def test_lateral_drag_registers(cfg):
     cube_joint_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
     cube_dofadr = env.model.jnt_dofadr[cube_joint_id]
 
-    # 5mm shift / step at step_dt≈0.02s ⇒ ≈0.25 m/s, well above DRAG_SPEED_THRESH.
-    n_drag = 200
+    # 5mm shift / step at step_dt≈0.033s ⇒ ≈0.15 m/s, well above DRAG_SPEED_THRESH.
+    # Drag for ~70% of the episode so the resulting ratio is reliably > 0.5.
+    n_drag = int(env.max_steps * 0.7)
     for _ in range(n_drag):
         env.data.qpos[env.cube_qpos_idx] += 0.005
         env.data.qpos[env.cube_qpos_idx + 2] = env.cube_half_z
