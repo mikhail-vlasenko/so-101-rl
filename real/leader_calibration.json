@@ -1,0 +1,32 @@
+{
+  "base": {
+    "id": 1,
+    "min": 707,
+    "max": 3389
+  },
+  "shoulder": {
+    "id": 2,
+    "min": 865,
+    "max": 3231
+  },
+  "elbow": {
+    "id": 3,
+    "min": 947,
+    "max": 3149
+  },
+  "wrist_pitch": {
+    "id": 4,
+    "min": 889,
+    "max": 3207
+  },
+  "wrist_roll": {
+    "id": 5,
+    "min": 146,
+    "max": 3950
+  },
+  "gripper": {
+    "id": 6,
+    "min": 1707,
+    "max": 2900
+  }
+}
