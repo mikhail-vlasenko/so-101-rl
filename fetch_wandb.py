@@ -1,5 +1,6 @@
 """Fetch W&B metrics for a run, save to CSV, and print recent averages."""
 
+import os
 import sys
 
 import wandb
@@ -8,7 +9,8 @@ import pandas as pd
 
 ENTITY = "mvlasenko"
 PROJECT = "robot-arm"
-METRIC = "rollout/pickplace/completion_rate"
+METRIC = "rollout/lift/mean_max_cube_height"
+CSV_DIR = "wandb"  # written here to keep the repo root clean (already gitignored)
 
 
 def fetch_run(run_path: str) -> pd.DataFrame:
@@ -38,16 +40,17 @@ def main():
     run_path = f"{ENTITY}/{PROJECT}/{run_id}"
     run, df = fetch_run(run_path)
 
-    # Save to CSV
-    out_file = f"wandb_metrics_{run.id}.csv"
+    # Save to CSV under wandb/ so the repo root stays clean.
+    os.makedirs(CSV_DIR, exist_ok=True)
+    out_file = os.path.join(CSV_DIR, f"metrics_{run.id}.csv")
     df.to_csv(out_file, index=False)
     print(f"Saved {len(df)} rows to {out_file}")
 
     if METRIC not in df.columns:
         print(f"\nMetric '{METRIC}' not found in run.")
-        print(f"Available columns containing 'cube' or 'height':")
+        print(f"Available columns containing 'lift', 'cube', or 'height':")
         for c in sorted(df.columns):
-            if "cube" in c.lower() or "height" in c.lower():
+            if any(s in c.lower() for s in ("lift", "cube", "height")):
                 print(f"  {c}")
         sys.exit(1)
 

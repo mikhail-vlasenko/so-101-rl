@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(pip:*)",
+      "Bash(ls:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(python:*)",
+      "Bash(git add:*)",
+      "Read(/tmp/**)",
+      "Bash(echo done:*)",
+      "Bash(/home/mikhail/miniforge3/envs/mujoco_env/bin/python:*)",
+      "Bash(conda run:*)",
+      "Bash(git checkout:*)",
+      "Bash(git:*)",
+      "Bash(WANDB_TAGS=carry-no-walls,run-1,seed-0 conda run -n mujoco_env --no-capture-output python train.py env=pickplace train.time_limit_minutes=20 seed=0)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(conda install *)",
+      "Read(//home/mikhail/omarchy_setup/**)",
+      "WebFetch(domain:docs.claude.com)",
+      "Edit(/home/mikhail/robot_arm/mujoco_training/**)",
+      "Write(/home/mikhail/robot_arm/mujoco_training/**)",
+      "MultiEdit(/home/mikhail/robot_arm/mujoco_training/**)",
+      "NotebookEdit(/home/mikhail/robot_arm/mujoco_training/**)"
+    ]
+  }
+}
