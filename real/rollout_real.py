@@ -55,6 +55,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--execute", action="store_true",
                    help="Actually send servo commands. Default: dry-run (read-only).")
     p.add_argument("--max-steps", type=int, default=MAX_STEPS)
+    p.add_argument("--ema-alpha", type=float, default=1.0,
+                   help="EMA smoothing on policy action: a_t = alpha*a + (1-alpha)*a_{t-1}. "
+                        "1.0 = off (default), lower = smoother but laggier. Try 0.3-0.5 to "
+                        "damp shaking from policy chatter.")
     p.add_argument("--port", default="/dev/ttyACM0")
     p.add_argument("--xml", default=str(DEFAULT_XML))
     p.add_argument("--cal", default=str(DEFAULT_CAL))
@@ -76,6 +80,7 @@ def build_obs(model: mujoco.MjModel, data: mujoco.MjData, qposadr: np.ndarray,
 def main() -> int:
     args = parse_args()
     assert 0 <= args.waypoint < N_WAYPOINTS
+    assert 0.0 < args.ema_alpha <= 1.0, f"--ema-alpha must be in (0, 1], got {args.ema_alpha}"
 
     model = mujoco.MjModel.from_xml_path(args.xml)
     data = mujoco.MjData(model)
@@ -139,11 +144,18 @@ def main() -> int:
         step = 0
         t_loop = time.time()
         prev_raw_target = raw0.copy()
+        action_ema: np.ndarray | None = None
+        print(f"EMA alpha: {args.ema_alpha} ({'off' if args.ema_alpha == 1.0 else 'on'})")
 
         while not stopped["flag"] and step < args.max_steps:
             obs = build_obs(model, data, qposadr, ee_site_id, qpos, qvel, args.waypoint)
             action, _ = policy.predict(obs, deterministic=True)
             action = np.clip(action.astype(np.float64), -1.0, 1.0)
+            if action_ema is None:
+                action_ema = action.copy()
+            else:
+                action_ema = args.ema_alpha * action + (1.0 - args.ema_alpha) * action_ema
+            action = action_ema
 
             target_qpos = np.clip(qpos + action * ACTION_SCALE, xml_low, xml_high)
             target_raw = rad_to_raw(target_qpos, jm, direction)
