@@ -181,6 +181,11 @@ def run(
             read_hz = state.read_hz
             mode = state.mode
             last_error = state.last_error
+        # External mode changes (e.g. from gamepad) need to be reflected in
+        # the radiobuttons and slider enable state.
+        if mode != mode_var.get():
+            mode_var.set(mode)
+            apply_mode_state()
         norm = raw_to_norm(raw, jm.cal_min(), jm.cal_max(), direction)
         rad = jm.xml_low() + norm * (jm.xml_high() - jm.xml_low())
         for i in range(n):
@@ -189,6 +194,8 @@ def run(
             rad_labels[i]["text"] = f"rad={rad[i]:+0.3f}"
         if mode == MIRROR:
             # Slider callback no-ops when mode != CONTROL, so this is safe.
+            # Skipped in CONTROL: programmatic .set() fires the slider callback
+            # and would race the gamepad integrator's writes to targets_rad.
             for i in range(n):
                 slider_vars[i].set(float(rad[i]))
         err = f"  |  err: {last_error}" if last_error else ""

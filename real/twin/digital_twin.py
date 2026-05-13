@@ -21,6 +21,7 @@ import mujoco.viewer
 import numpy as np
 
 from .constants import MAX_RAW_DELTA_PER_STEP, SERVO_ACCEL, SERVO_SPEED
+from .gamepad import gamepad_worker
 from .gui import CONTROL, MIRROR, TwinState, run as run_gui
 from .mapping import JointMaps, load_joint_maps, rad_to_raw, raw_to_norm
 from .servo_io import ServoBus
@@ -171,6 +172,14 @@ def main() -> int:
     enter_mirror = make_enter_mirror(state, bus)
     estop = make_estop(state, bus)
 
+    def gamepad_mode_toggle() -> None:
+        with state.lock:
+            cur = state.mode
+        if cur == CONTROL:
+            enter_mirror()
+        else:
+            enter_control()
+
     def viewer_loop() -> None:
         period = 1.0 / RENDER_HZ
         with mujoco.viewer.launch_passive(model, data) as viewer:
@@ -189,9 +198,14 @@ def main() -> int:
     worker = threading.Thread(target=servo_worker, args=(state, bus, jm),
                               name="servo-worker", daemon=True)
     viewer_thread = threading.Thread(target=viewer_loop, name="mj-viewer", daemon=True)
+    gamepad_thread = threading.Thread(
+        target=gamepad_worker, args=(state, jm, gamepad_mode_toggle, estop),
+        name="gamepad", daemon=True,
+    )
 
     worker.start()
     viewer_thread.start()
+    gamepad_thread.start()
 
     try:
         # Tk MUST run on the main thread.
