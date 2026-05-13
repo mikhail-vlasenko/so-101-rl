@@ -4,6 +4,10 @@
 
 Train RL policies in MuJoCo to make the SO-101 arm perform basic manipulation tasks.
 
+## TODO
+
+Long-term tasks and ideas live in `TODO.md` at the repo root. Check it for known sim-to-real gaps and other backlog items; add to it when surfacing follow-ups that shouldn't be inlined into the current change.
+
 ## Model
 
 - Scene: `so101/scene.xml` (includes `so101.xml` + floor/lighting)
