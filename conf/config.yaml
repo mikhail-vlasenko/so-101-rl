@@ -36,7 +36,8 @@ obs_bias:
 
 # Number of frames the agent's observation lags behind the true state (sim2real DR).
 # 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
-obs_latency: 2
+# At 15 Hz control, 2 frames = 133 ms, more lag than the real bus exhibits — 1 frame fits.
+obs_latency: 1
 
 # Number of past actions appended to the observation. 0 = disabled; N=2 lets the
 # policy infer velocity / action smoothness from its own recent commands.
