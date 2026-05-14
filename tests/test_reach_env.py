@@ -70,10 +70,15 @@ def test_step_info_keys_and_init_safety():
 def test_terminates_after_dwell_when_snapped_to_target():
     env = _make_env()
     env.reset(seed=0)
-    # Snap arm exactly onto the target waypoint and zero velocity.
+    # Snap arm exactly onto the target waypoint and zero velocity. Also snap
+    # the actuator filter state (data.act) — position actuators with a
+    # timeconst drive toward act, not ctrl, so leaving act at the reset pose
+    # would pull the arm back to HOME on the first step.
     env.data.qpos[env.joint_qposadr] = env.target_qpos
     env.data.qvel[env.joint_dofadr] = 0.0
     env.data.ctrl[:env.n_joints] = env.target_qpos
+    if env.model.na > 0:
+        env.data.act[:] = env.target_qpos
     mujoco.mj_forward(env.model, env.data)
     env._prev_dist = 0.0
 
