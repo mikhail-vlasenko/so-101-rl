@@ -13,7 +13,7 @@ import mujoco
 import gymnasium as gym
 from gymnasium import spaces
 
-from base_env import JOINT_NAMES
+from base_env import JOINT_NAMES, action_to_target
 
 
 class SO101ReachEnv(gym.Env):
@@ -192,8 +192,8 @@ class SO101ReachEnv(gym.Env):
             self._prev_actions[-1] = action
 
         current = self.data.qpos[self.joint_qposadr].copy()
-        target = current + action * self.action_scale
-        target = np.clip(target, self.joint_low, self.joint_high)
+        target = action_to_target(current, action, self.action_scale,
+                                  self.joint_low, self.joint_high)
         self.data.ctrl[:self.n_joints] = target
 
         for _ in range(self.n_substeps):

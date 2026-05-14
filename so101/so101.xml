@@ -37,7 +37,7 @@
 
     <default class="sts3215">
       <geom contype="0" conaffinity="0"/>
-      <joint damping="0.60" frictionloss="0.052" armature="0.028"/>
+      <joint damping="0.60" frictionloss="0.15" armature="0.028"/>
       <position kp="64" kv="2.731" forcerange="-2.94 2.94"/>
     </default>
 

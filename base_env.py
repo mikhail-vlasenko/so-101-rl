@@ -31,6 +31,28 @@ JOINT_NAMES = [
     "wrist_flex", "wrist_roll", "gripper",
 ]
 
+# Feetech SMS-STS quantization. 12-bit absolute encoder over 360° → 4096 raw
+# units → ~0.001534 rad/unit. Used to model the real arm's discrete command
+# resolution in sim so the policy learns it can't request sub-unit motion.
+SERVO_RAW_UNIT_RAD = 2.0 * np.pi / 4096
+# Commanded position-target deltas below this many raw units get zeroed. Models
+# the motor's stiction / min-PWM deadzone: small target errors yield
+# below-bring-up current and the joint stalls. Observed on the real arm at
+# action ≈ 0.2 (action_scale=0.035 → ~5 raw units commanded) under gravity load.
+SERVO_DEADZONE_RAW = 4.0
+
+
+def action_to_target(current: np.ndarray, action: np.ndarray, action_scale: float,
+                     joint_low: np.ndarray, joint_high: np.ndarray) -> np.ndarray:
+    """Translate a policy action ∈ [-1, 1]^n into the next position target,
+    mimicking the real servo's raw-unit quantization + stiction deadzone.
+    Without this, the sim policy learns to ease in with tiny actions that the
+    real arm cannot execute."""
+    raw_delta = action * action_scale / SERVO_RAW_UNIT_RAD
+    raw_delta = np.where(np.abs(raw_delta) < SERVO_DEADZONE_RAW, 0.0, np.round(raw_delta))
+    target = current + raw_delta * SERVO_RAW_UNIT_RAD
+    return np.clip(target, joint_low, joint_high)
+
 
 class SO101BaseEnv(gym.Env):
     """Base class for SO-101 arm tasks with shared MuJoCo setup."""
@@ -284,8 +306,8 @@ class SO101BaseEnv(gym.Env):
             self._prev_actions[-1] = action
 
         current = self.data.qpos[self.joint_qposadr].copy()
-        target = current + action * self.action_scale
-        target = np.clip(target, self.joint_low, self.joint_high)
+        target = action_to_target(current, action, self.action_scale,
+                                  self.joint_low, self.joint_high)
         self.data.ctrl[:self.n_joints] = target
 
         for _ in range(self.n_substeps):
