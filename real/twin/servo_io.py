@@ -22,12 +22,17 @@ BAUDRATE = 1_000_000
 
 
 class ServoBus:
-    def __init__(self, port: str, servo_ids: list[int]):
+    def __init__(self, port: str, servo_ids: list[int], allow_missing: bool = False):
         self.port = port
         self.servo_ids = list(servo_ids)
+        self.allow_missing = allow_missing
+        self.present_mask: np.ndarray = np.ones(len(self.servo_ids), dtype=bool)
         self.port_handler: scs.PortHandler | None = None
         self.packet_handler: scs.sms_sts | None = None
         self.sync_read: scs.GroupSyncRead | None = None
+        # Last-known raw read per servo; missing slots stay at 2048 so the
+        # viewer renders them at their mechanical midpoint.
+        self._last_read: np.ndarray = np.full(len(self.servo_ids), 2048, dtype=np.int64)
 
     def connect(self) -> None:
         ph = scs.PortHandler(self.port)
@@ -38,10 +43,34 @@ class ServoBus:
             raise RuntimeError(f"failed to set baudrate {BAUDRATE} on {self.port}")
         self.port_handler = ph
         self.packet_handler = scs.sms_sts(ph)
+
+        # Ping each servo to discover which are physically present. Without
+        # --allow-missing this is just an early sanity check (one clear error
+        # per missing ID instead of a cryptic sync-read failure later).
+        present = np.zeros(len(self.servo_ids), dtype=bool)
+        for i, sid in enumerate(self.servo_ids):
+            _, result, _ = self.packet_handler.ping(sid)
+            present[i] = (result == scs.COMM_SUCCESS)
+        missing = [sid for sid, ok in zip(self.servo_ids, present) if not ok]
+        if missing and not self.allow_missing:
+            ph.closePort()
+            self.port_handler = None
+            self.packet_handler = None
+            raise RuntimeError(
+                f"servos not responding to ping: {missing}. "
+                f"Re-run with --allow-missing to continue without them."
+            )
+        self.present_mask = present
+        if missing:
+            print(f"[ServoBus] allow_missing: skipping servos {missing}; "
+                  f"active set = {[s for s, ok in zip(self.servo_ids, present) if ok]}")
+
         self.sync_read = scs.GroupSyncRead(
             self.packet_handler, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION
         )
-        for sid in self.servo_ids:
+        for sid, ok in zip(self.servo_ids, self.present_mask):
+            if not ok:
+                continue
             if not self.sync_read.addParam(sid):
                 raise RuntimeError(f"failed to add servo {sid} to sync read")
 
@@ -56,7 +85,9 @@ class ServoBus:
 
     def _set_torque(self, value: int) -> None:
         assert self.packet_handler is not None, "ServoBus not connected"
-        for sid in self.servo_ids:
+        for sid, ok in zip(self.servo_ids, self.present_mask):
+            if not ok:
+                continue
             result, error = self.packet_handler.write1ByteTxRx(sid, ADDR_TORQUE_ENABLE, value)
             if result != scs.COMM_SUCCESS:
                 raise RuntimeError(
@@ -87,7 +118,9 @@ class ServoBus:
         assert len(kp_list) == len(self.servo_ids), (
             f"expected {len(self.servo_ids)} Kp values, got {len(kp_list)}"
         )
-        for sid, kp in zip(self.servo_ids, kp_list):
+        for sid, kp, ok in zip(self.servo_ids, kp_list, self.present_mask):
+            if not ok:
+                continue
             assert 0 <= kp <= 254, f"servo {sid} kp out of range: {kp}"
             result, error = self.packet_handler.write1ByteTxRx(sid, ADDR_POSITION_KP, int(kp))
             if result != scs.COMM_SUCCESS:
@@ -102,31 +135,41 @@ class ServoBus:
                 )
 
     def read_all(self) -> np.ndarray:
-        """Read present position for every configured servo. Returns int64 array in servo_ids order."""
+        """Read present position for every connected servo. Returns int64 array
+        in servo_ids order; entries for missing servos hold the placeholder
+        2048 (mechanical midpoint) so downstream consumers don't need to know."""
         assert self.sync_read is not None and self.packet_handler is not None, "ServoBus not connected"
+        if not self.present_mask.any():
+            return self._last_read.copy()
         result = self.sync_read.txRxPacket()
         if result != scs.COMM_SUCCESS:
             raise RuntimeError(
                 f"sync read failed: {self.packet_handler.getTxRxResult(result)}"
             )
-        out = np.zeros(len(self.servo_ids), dtype=np.int64)
-        for i, sid in enumerate(self.servo_ids):
+        for i, (sid, ok) in enumerate(zip(self.servo_ids, self.present_mask)):
+            if not ok:
+                continue
             available, _ = self.sync_read.isAvailable(
                 sid, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION
             )
             if not available:
                 raise RuntimeError(f"servo {sid} not available in sync read response")
             raw = self.sync_read.getData(sid, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION)
-            out[i] = self.packet_handler.scs_tohost(raw, 15)
-        return out
+            self._last_read[i] = self.packet_handler.scs_tohost(raw, 15)
+        return self._last_read.copy()
 
     def write_all(self, raw: np.ndarray, speed: int, accel: int) -> None:
-        """Sync-write goal positions to every servo (in servo_ids order)."""
+        """Sync-write goal positions to every connected servo (in servo_ids
+        order). Entries for missing servos are skipped."""
         assert self.packet_handler is not None, "ServoBus not connected"
         assert raw.shape == (len(self.servo_ids),), f"raw shape {raw.shape}"
+        if not self.present_mask.any():
+            return
         gsw = self.packet_handler.groupSyncWrite
         gsw.clearParam()
-        for sid, pos in zip(self.servo_ids, raw.tolist()):
+        for sid, pos, ok in zip(self.servo_ids, raw.tolist(), self.present_mask):
+            if not ok:
+                continue
             if not self.packet_handler.SyncWritePosEx(sid, int(pos), speed, accel):
                 gsw.clearParam()
                 raise RuntimeError(f"servo {sid} addParam failed in sync write")

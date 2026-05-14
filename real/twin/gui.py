@@ -40,6 +40,10 @@ class TwinState:
         self.latest_raw_read: np.ndarray = np.full(n, 2048, dtype=np.int64)
         self.targets_rad: np.ndarray = np.zeros(n, dtype=np.float64)
         self.prev_raw_target: np.ndarray = np.full(n, 2048, dtype=np.int64)
+        # True for joints whose servo responded to ping at startup. Set by
+        # the entry point after ServoBus.connect(); GUI/control logic disable
+        # interactions for joints where this is False.
+        self.present_mask: np.ndarray = np.ones(n, dtype=bool)
         self.read_hz: float = 0.0
         self.last_error: str = ""
         self.stop: bool = False
@@ -84,8 +88,10 @@ def run(
     slider_vars: list[tk.DoubleVar] = []
 
     def apply_mode_state() -> None:
-        for sld in slider_widgets:
-            sld.configure(state=("normal" if mode_var.get() == CONTROL else "disabled"))
+        in_control = mode_var.get() == CONTROL
+        for idx, sld in enumerate(slider_widgets):
+            enable = in_control and bool(state.present_mask[idx])
+            sld.configure(state=("normal" if enable else "disabled"))
 
     def on_mode_change() -> None:
         if mode_var.get() == CONTROL:
@@ -131,17 +137,25 @@ def run(
                     state.targets_rad[idx] = float(var.get())
         return cb
 
+    present_mask = state.present_mask.copy()
     for i, j in enumerate(jm.items):
+        present = bool(present_mask[i])
         jframe = ttk.Frame(root, padding=(10, 6))
         jframe.pack(fill="x")
 
         info = ttk.Frame(jframe)
         info.pack(fill="x")
-        ttk.Label(info, text=j.name, width=14, anchor="w",
-                  font=("TkDefaultFont", FONT_PX_HEADER, "bold")).pack(side="left")
+        name_text = j.name if present else f"{j.name} (missing)"
+        name_color = "black" if present else "#c0392b"
+        ttk.Label(info, text=name_text, width=22, anchor="w",
+                  font=("TkDefaultFont", FONT_PX_HEADER, "bold"),
+                  foreground=name_color).pack(side="left")
         dv = tk.BooleanVar(value=False)
-        ttk.Checkbutton(info, text="inv", variable=dv,
-                        command=make_dir_cb(i, dv)).pack(side="left", padx=8)
+        inv_cb = ttk.Checkbutton(info, text="inv", variable=dv,
+                                 command=make_dir_cb(i, dv))
+        inv_cb.pack(side="left", padx=8)
+        if not present:
+            inv_cb.state(["disabled"])
         lbl_raw = ttk.Label(info, text="raw=----", width=12, font=mono)
         lbl_raw.pack(side="left", padx=4); raw_labels.append(lbl_raw)
         lbl_nrm = ttk.Label(info, text="norm=----", width=14, font=mono)

@@ -39,6 +39,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", default="/dev/ttyACM0")
     p.add_argument("--xml", default=str(DEFAULT_XML))
     p.add_argument("--cal", default=str(DEFAULT_CAL))
+    p.add_argument(
+        "--allow-missing", action="store_true",
+        help="Boot even if some servos don't ping. Missing joints render at "
+             "midpoint and ignore reads/writes; present servos work normally. "
+             "Intended for setup and per-servo calibration.",
+    )
     return p.parse_args()
 
 
@@ -151,11 +157,15 @@ def main() -> int:
     jm = load_joint_maps(model, Path(args.cal))
     print_mapping_header(jm)
 
-    bus = ServoBus(args.port, jm.servo_ids())
+    bus = ServoBus(args.port, jm.servo_ids(), allow_missing=args.allow_missing)
     bus.connect()
 
     state = TwinState(n=len(jm.items))
+    state.present_mask = bus.present_mask.copy()
     qposadr = jm.qposadr()
+    if not bus.present_mask.all():
+        missing_names = [jm.items[i].name for i, ok in enumerate(bus.present_mask) if not ok]
+        print(f"[twin] missing joints (no servo response): {missing_names}")
 
     # Worker thread populates state.latest_raw_read; do one synchronous read
     # first so the viewer opens at the right pose.
