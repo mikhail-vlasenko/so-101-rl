@@ -1,6 +1,9 @@
 <?xml version="1.0" ?>
 <mujoco model="so101">
-  <option integrator="implicitfast" timestep="0.005" cone="elliptic"
+  <!-- timestep = 1/150 s so that n_substeps=10 in the env configs yields an
+       exact 15 Hz control rate. The 67 ms step exceeds the actuator
+       time-constant (~kv/kp = 43 ms) so the PD settles between commands. -->
+  <option integrator="implicitfast" timestep="0.0066666667" cone="elliptic"
    iterations="10" ls_iterations="20" impratio="10"/>
 
   <compiler angle="radian" meshdir="assets" autolimits="true"/>

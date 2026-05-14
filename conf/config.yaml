@@ -11,8 +11,8 @@ render: true   # eval.py only: false for headless metric collection
 
 # Per-step joint-space delta (rad) when |action|=1. Shared across all envs so
 # the policy's notion of "one step" is uniform — env yamls reference this as
-# ${action_scale}. At 30 Hz this caps joint velocity at action_scale*30 rad/s
-# (0.04 → ~1.2 rad/s ≈ 69°/s).
+# ${action_scale}. 0.05 matches the per-step delta the trained policy expects;
+# at 15 Hz that caps joint velocity at 0.75 rad/s ≈ 43°/s.
 action_scale: 0.05
 
 # Per-step Gaussian noise added to observations during training (sim2real domain randomization).
