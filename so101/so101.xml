@@ -1,8 +1,9 @@
 <?xml version="1.0" ?>
 <mujoco model="so101">
-  <!-- timestep = 1/300 s so that n_substeps=10 in the env configs yields an
-       exact 30 Hz control rate, matching the real-arm camera frame rate. -->
-  <option integrator="implicitfast" timestep="0.0033333333" cone="elliptic"
+  <!-- timestep = 1/150 s so that n_substeps=10 in the env configs yields an
+       exact 15 Hz control rate. The 67 ms step exceeds the actuator
+       time-constant (~kv/kp = 43 ms) so the PD settles between commands. -->
+  <option integrator="implicitfast" timestep="0.0066666667" cone="elliptic"
    iterations="10" ls_iterations="20" impratio="10"/>
 
   <compiler angle="radian" meshdir="assets" autolimits="true"/>
@@ -25,11 +26,11 @@
         <geom group="3" condim="3"/>
       </default>
       <default class="collision_gripper">
-        <geom group="3" condim="6" friction="1 5e-3 5e-4" solref="0.01 1" priority="1"
+        <geom group="3" condim="6" friction="0.6 0.02 0.002" solref="0.01 1" priority="1"
          rgba="1.0 0 0 1.0" mass="0"/>
       </default>
       <default class="collision_gripper_mesh">
-        <geom group="4" condim="6" friction="1 5e-3 5e-4" solref="0.01 1" priority="1"
+        <geom group="4" condim="6" friction="0.6 0.02 0.002" solref="0.01 1" priority="1"
          rgba="1.0 0 0 1.0" mass="0"/>
       </default>
     </default>
@@ -37,11 +38,6 @@
     <default class="sts3215">
       <geom contype="0" conaffinity="0"/>
       <joint damping="0.60" frictionloss="0.052" armature="0.028"/>
-      <!-- kp lowered from 998.22 → 64 to better match the real arm's soft
-           tracking behavior (Feetech position-loop Kp set to 64 on real via
-           real/twin/constants.py). The previous kp=998 saturated the
-           ±2.94 N·m forcerange at any error >0.003 rad, making sim tracking
-           effectively instant and creating a large sim-to-real gap. -->
       <position kp="64" kv="2.731" forcerange="-2.94 2.94"/>
     </default>
 

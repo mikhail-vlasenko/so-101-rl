@@ -11,9 +11,9 @@ render: true   # eval.py only: false for headless metric collection
 
 # Per-step joint-space delta (rad) when |action|=1. Shared across all envs so
 # the policy's notion of "one step" is uniform — env yamls reference this as
-# ${action_scale}. At 30 Hz this caps joint velocity at action_scale*30 rad/s
-# (0.04 → ~1.2 rad/s ≈ 69°/s).
-action_scale: 0.04
+# ${action_scale}. At 15 Hz this caps joint velocity at action_scale*15 rad/s
+# (0.035 → ~0.52 rad/s ≈ 30°/s, deliberately slow for tabletop manipulation).
+action_scale: 0.035
 
 # Per-step Gaussian noise added to observations during training (sim2real domain randomization).
 # Noise is applied at the source (qpos, qvel, ee_pos, cube_pos); derived obs (cube_to_target)
@@ -38,19 +38,23 @@ obs_bias:
 # 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
 obs_latency: 2
 
+# Number of past actions appended to the observation. 0 = disabled; N=2 lets the
+# policy infer velocity / action smoothness from its own recent commands.
+prev_actions_n: 1
+
 # Number of consecutive observations stacked into the policy input.
 # 1 = no stacking (raw OBS_DIM). N>1 multiplies obs_dim by N via SB3's VecFrameStack.
 frame_stack: 1
 
 train:
-  time_limit_minutes: 20
-  n_envs: 32
-  net_arch: [256, 256, 256]
+  time_limit_minutes: 40
+  n_envs: 16
+  net_arch: [256, 256, 256, 256]
   input_batchnorm: true
   total_timesteps: 40_000_000
-  learning_rate: 1e-3
-  lr_schedule: linear
-  lr_min: 1e-4
+  learning_rate: 3e-4
+  lr_schedule: constant
+  lr_min: 3e-4
   batch_size: 4096
   gamma: 0.95
   log_interval: 1

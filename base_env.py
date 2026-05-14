@@ -12,8 +12,9 @@ import gymnasium as gym
 from gymnasium import spaces
 
 
-PREV_ACTIONS_N = 2  # number of past actions appended to the observation
-OBS_DIM = 22 + PREV_ACTIONS_N * 6
+def _obs_dim_for(prev_actions_n: int) -> int:
+    """OBS_DIM = qpos(6) + qvel(6) + ee_pos(3) + cube_pos(3) + extra(4) + prev_actions(N*6)."""
+    return 22 + prev_actions_n * 6
 
 FIXED_JAW_NAMES = [
     "fixed_jaw_box1", "fixed_jaw_box2", "fixed_jaw_box3",
@@ -41,7 +42,7 @@ class SO101BaseEnv(gym.Env):
     TASK_NAME: str  # "lift" or "pickplace"
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
-                 obs_noise=None, obs_latency=0, obs_bias=None):
+                 obs_noise=None, obs_latency=0, obs_bias=None, prev_actions_n=2):
         super().__init__()
         self.render_mode = render_mode
         self.slow_factor = slow_factor
@@ -52,6 +53,8 @@ class SO101BaseEnv(gym.Env):
         self._qpos_bias = np.zeros(len(JOINT_NAMES))
         self._ee_bias = np.zeros(3)
         self._cube_bias = np.zeros(3)
+        self.prev_actions_n = int(prev_actions_n)
+        self.obs_dim = _obs_dim_for(self.prev_actions_n)
 
         self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
         self.data = mujoco.MjData(self.model)
@@ -99,7 +102,7 @@ class SO101BaseEnv(gym.Env):
 
         self.gripper_idx = JOINT_NAMES.index("gripper")
 
-        self._prev_actions = np.zeros((PREV_ACTIONS_N, self.n_joints), dtype=np.float32)
+        self._prev_actions = np.zeros((self.prev_actions_n, self.n_joints), dtype=np.float32)
 
         # Cube-drag metric: cube center within DRAG_HEIGHT_TOL of resting height
         # AND lateral speed above DRAG_SPEED_THRESH (m/s).
@@ -111,7 +114,7 @@ class SO101BaseEnv(gym.Env):
 
         self.action_space = spaces.Box(low=-1.0, high=1.0,
                                        shape=(self.n_joints,), dtype=np.float32)
-        obs_high = np.full(OBS_DIM, np.inf, dtype=np.float32)
+        obs_high = np.full(self.obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
         self.step_count = 0
@@ -275,8 +278,10 @@ class SO101BaseEnv(gym.Env):
         self.step_count += 1
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
 
-        self._prev_actions[0] = self._prev_actions[1]
-        self._prev_actions[1] = action
+        if self.prev_actions_n > 0:
+            if self.prev_actions_n > 1:
+                self._prev_actions[:-1] = self._prev_actions[1:]
+            self._prev_actions[-1] = action
 
         current = self.data.qpos[self.joint_qposadr].copy()
         target = current + action * self.action_scale

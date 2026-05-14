@@ -13,3 +13,14 @@ Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/li
 - **Joint friction / damping.** Check `<joint frictionloss damping>` values in `so101.xml`. Real servos have stiction and gearbox friction that's commonly modeled at zero. Add a reasonable fixed value or domain randomize.
 
 - **Internal servo dynamics.** Real Feetech has internal PID + current loop + comms latency; sim's `<position>` actuator is instantaneous torque ∝ err. Affects transients more than holding ability — lower priority than the three above.
+
+## Verify on real servos before first policy rollout
+
+Nothing in the rollout layer notices "I've been pushing the same wall for 5 seconds"; the Feetech firmware's overload trip is what saves the hardware. Verify before running:
+
+- **`Maximum Temperature Limit` register (addr 14).** Confirm it's at the factory default 70 °C (or lower) on every joint. Triggers torque-off when the servo overheats.
+- **`Overload Protection` register / flag.** Confirm enabled — auto-shuts torque if output stays at max for the configured time. Without this, sustained stall cooks the windings or the H-bridge MOSFETs.
+- **`Maximum Torque` register.** Check it's not at the absolute max — capping it firmware-side limits stall current and gives a margin before thermal trip.
+- **Per-joint `SERVO_POSITION_KP`.** Currently 64 across the board (`real/twin/constants.py`). For first rollouts consider dropping to the factory default 32 to reduce push-into-obstacle force; raise back per joint if holding is the bottleneck.
+- **Power-supply / bus current headroom.** All six joints stalling at once can pop a fuse or trip the bench PSU. Know the supply's trip current and have a hand on the power switch for the first rollouts.
+- **Gear-strip risk.** Hobby-grade Feetech servos most commonly fail by stripping the second-to-last plastic gear on hard impact. Slow-and-firm pushing is far less risky than fast contact — start rollouts with the arm well away from the table edge / fixtures.

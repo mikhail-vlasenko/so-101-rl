@@ -26,7 +26,6 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from stable_baselines3 import PPO
 
-from base_env import PREV_ACTIONS_N
 
 from .twin.constants import (
     MAX_RAW_DELTA_PER_STEP,
@@ -41,12 +40,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 DEFAULT_CAL = REPO_ROOT.parent / "feetech-servo-sdk" / "calibration.json"
 
-def _load_reach_cfg() -> dict:
+def _load_reach_cfg() -> tuple[dict, int]:
     """Compose the full Hydra config with env=reach so ${action_scale} (and any
-    other interpolations) resolves to its top-level value in config.yaml."""
+    other interpolations) resolves to its top-level value in config.yaml.
+
+    Returns (reach_env_cfg, prev_actions_n) — prev_actions_n is a top-level
+    config field, must match what the trained policy expects."""
     with initialize_config_dir(config_dir=str(REPO_ROOT / "conf"), version_base=None):
         cfg = compose(config_name="config", overrides=["env=reach"])
-    return OmegaConf.to_container(cfg.reach_env, resolve=True)
+    return OmegaConf.to_container(cfg.reach_env, resolve=True), int(cfg.prev_actions_n)
 
 
 def parse_args(reach_cfg: dict) -> argparse.Namespace:
@@ -83,7 +85,7 @@ def build_obs(model: mujoco.MjModel, data: mujoco.MjData, qposadr: np.ndarray,
 
 
 def main() -> int:
-    reach_cfg = _load_reach_cfg()
+    reach_cfg, prev_actions_n = _load_reach_cfg()
     waypoints = np.array(reach_cfg["waypoints"], dtype=np.float64)
     n_waypoints, n_joints_cfg = waypoints.shape
     assert n_joints_cfg == 6, f"waypoints must have 6 joints, got {n_joints_cfg}"
@@ -113,7 +115,7 @@ def main() -> int:
 
     print(f"Loading model: {args.model}")
     policy = PPO.load(args.model)
-    expected_obs = 2 * 6 + 3 + n_waypoints + PREV_ACTIONS_N * 6
+    expected_obs = 2 * 6 + 3 + n_waypoints + prev_actions_n * 6
     assert policy.observation_space.shape[0] == expected_obs, (
         f"Obs dim mismatch: model expects {policy.observation_space.shape}, "
         f"reach env produces {expected_obs}-dim."
@@ -158,7 +160,7 @@ def main() -> int:
         step = 0
         t_loop = time.time()
         prev_raw_target = raw0.copy()
-        prev_actions = np.zeros((PREV_ACTIONS_N, 6), dtype=np.float32)
+        prev_actions = np.zeros((prev_actions_n, 6), dtype=np.float32)
         action_ema: np.ndarray | None = None
         print(f"EMA alpha: {args.ema_alpha} ({'off' if args.ema_alpha == 1.0 else 'on'})")
 
