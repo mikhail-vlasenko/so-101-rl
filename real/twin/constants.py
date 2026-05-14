@@ -24,8 +24,8 @@ SERVO_ACCEL = 150
 
 # Position-loop P gain (Feetech SMS-STS register addr 21), per joint in
 # JOINT_NAMES order (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
-# wrist_roll, gripper). Factory default is 32 uniformly. Gravity-loaded joints
-# (shoulder_lift, elbow_flex) need higher gain to overcome the static load at
-# small per-step errors; wrist joints oscillate at high Kp so stay closer to
-# default. Range 0..254 per value.
-SERVO_POSITION_KP = (64, 64, 64, 64, 64, 64)
+# wrist_roll, gripper). Factory default is 32 uniformly. Lower Kp = softer
+# push into obstacles (stall torque ≈ Kp · action_scale), at the cost of
+# worse static-hold on gravity-loaded joints (shoulder_lift, elbow_flex) —
+# revisit per-joint if they sag. Range 0..254 per value.
+SERVO_POSITION_KP = (32, 32, 32, 32, 32, 32)
