@@ -13,7 +13,7 @@ import mujoco
 import gymnasium as gym
 from gymnasium import spaces
 
-from base_env import JOINT_NAMES, PREV_ACTIONS_N
+from base_env import JOINT_NAMES
 
 
 class SO101ReachEnv(gym.Env):
@@ -25,11 +25,12 @@ class SO101ReachEnv(gym.Env):
     TASK_NAME = "reach"
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
-                 obs_noise=None, obs_latency=0, obs_bias=None):
+                 obs_noise=None, obs_latency=0, obs_bias=None, prev_actions_n=2):
         super().__init__()
         del obs_noise, obs_latency, obs_bias  # not used by reach env (kept for train.py signature)
         self.render_mode = render_mode
         self.slow_factor = slow_factor
+        self.prev_actions_n = int(prev_actions_n)
 
         self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
         self.data = mujoco.MjData(self.model)
@@ -76,12 +77,12 @@ class SO101ReachEnv(gym.Env):
 
         self.action_space = spaces.Box(low=-1.0, high=1.0,
                                        shape=(self.n_joints,), dtype=np.float32)
-        # obs = [qpos(n), qvel(n), ee_pos(3), waypoint_onehot(N), prev_actions(PREV_ACTIONS_N * n)]
-        obs_dim = 2 * self.n_joints + 3 + self.n_waypoints + PREV_ACTIONS_N * self.n_joints
+        # obs = [qpos(n), qvel(n), ee_pos(3), waypoint_onehot(N), prev_actions(prev_actions_n * n)]
+        obs_dim = 2 * self.n_joints + 3 + self.n_waypoints + self.prev_actions_n * self.n_joints
         obs_high = np.full(obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
-        self._prev_actions = np.zeros((PREV_ACTIONS_N, self.n_joints), dtype=np.float32)
+        self._prev_actions = np.zeros((self.prev_actions_n, self.n_joints), dtype=np.float32)
 
         self.step_count = 0
         self.viewer = None
@@ -185,8 +186,10 @@ class SO101ReachEnv(gym.Env):
         self.step_count += 1
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
 
-        self._prev_actions[0] = self._prev_actions[1]
-        self._prev_actions[1] = action
+        if self.prev_actions_n > 0:
+            if self.prev_actions_n > 1:
+                self._prev_actions[:-1] = self._prev_actions[1:]
+            self._prev_actions[-1] = action
 
         current = self.data.qpos[self.joint_qposadr].copy()
         target = current + action * self.action_scale

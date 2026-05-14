@@ -23,11 +23,11 @@
         <geom group="3" condim="3"/>
       </default>
       <default class="collision_gripper">
-        <geom group="3" condim="6" friction="0.6 0.02 0.002" solref="0.01 1" priority="1"
+        <geom group="3" condim="6" friction="1 5e-3 5e-4" solref="0.01 1" priority="1"
          rgba="1.0 0 0 1.0" mass="0"/>
       </default>
       <default class="collision_gripper_mesh">
-        <geom group="4" condim="6" friction="0.6 0.02 0.002" solref="0.01 1" priority="1"
+        <geom group="4" condim="6" friction="1 5e-3 5e-4" solref="0.01 1" priority="1"
          rgba="1.0 0 0 1.0" mass="0"/>
       </default>
     </default>
