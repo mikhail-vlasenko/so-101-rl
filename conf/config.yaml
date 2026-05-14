@@ -13,16 +13,16 @@ render: true   # eval.py only: false for headless metric collection
 # the policy's notion of "one step" is uniform — env yamls reference this as
 # ${action_scale}. At 30 Hz this caps joint velocity at action_scale*30 rad/s
 # (0.04 → ~1.2 rad/s ≈ 69°/s).
-action_scale: 0.04
+action_scale: 0.05
 
 # Per-step Gaussian noise added to observations during training (sim2real domain randomization).
 # Noise is applied at the source (qpos, qvel, ee_pos, cube_pos); derived obs (cube_to_target)
 # inherit the noise via the noisy cube_pos. Reward computation always uses the true state.
 obs_noise:
-  qpos_sigma: 0.005    # rad,   joint encoder jitter (~0.3°)
-  qvel_sigma: 0.05     # rad/s, joint velocity noise (numerically differentiated)
-  ee_sigma: 0.002      # m,     end-effector position
-  cube_sigma: 0.003    # m,     cube position from vision pipeline
+  qpos_sigma: 0.0
+  qvel_sigma: 0.0
+  ee_sigma: 0.0
+  cube_sigma: 0.0
 
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
@@ -36,21 +36,21 @@ obs_bias:
 
 # Number of frames the agent's observation lags behind the true state (sim2real DR).
 # 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
-obs_latency: 2
+obs_latency: 0
 
 # Number of consecutive observations stacked into the policy input.
 # 1 = no stacking (raw OBS_DIM). N>1 multiplies obs_dim by N via SB3's VecFrameStack.
-frame_stack: 4
+frame_stack: 1
 
 train:
-  time_limit_minutes: 20
-  n_envs: 32
-  net_arch: [256, 256, 256]
+  time_limit_minutes: 10
+  n_envs: 16
+  net_arch: [256, 256, 256, 256]
   input_batchnorm: true
   total_timesteps: 40_000_000
-  learning_rate: 1e-3
-  lr_schedule: linear
-  lr_min: 1e-4
+  learning_rate: 3e-4
+  lr_schedule: constant
+  lr_min: 3e-4
   batch_size: 4096
   gamma: 0.95
   log_interval: 1
@@ -70,7 +70,7 @@ ppo:
   n_epochs: 5
   clip_range: 0.2
   ent_coef: 0.001
-  gae_lambda: 0.97
+  gae_lambda: 0.95
   vf_coef: 1.0
 
 wandb:
