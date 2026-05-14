@@ -67,7 +67,9 @@ def main(cfg: DictConfig):
     model = algo_cls.load(model_path)
 
     render_mode = "human" if cfg.render else None
-    inner_env = make_env(env_cls, env_cfg, xml_path, render_mode=render_mode, slow_factor=cfg.slow_factor)
+    inner_env = make_env(env_cls, env_cfg, xml_path, render_mode=render_mode,
+                         slow_factor=cfg.slow_factor,
+                         prev_actions_n=int(cfg.prev_actions_n))
     frame_stack = int(cfg.frame_stack)
     vec_env = DummyVecEnv([lambda: inner_env])
     if frame_stack > 1:

@@ -19,10 +19,10 @@ action_scale: 0.05
 # Noise is applied at the source (qpos, qvel, ee_pos, cube_pos); derived obs (cube_to_target)
 # inherit the noise via the noisy cube_pos. Reward computation always uses the true state.
 obs_noise:
-  qpos_sigma: 0.0
-  qvel_sigma: 0.0
-  ee_sigma: 0.0
-  cube_sigma: 0.0
+  qpos_sigma: 0.005    # rad,   joint encoder jitter (~0.3°)
+  qvel_sigma: 0.05     # rad/s, joint velocity noise (numerically differentiated)
+  ee_sigma: 0.002      # m,     end-effector position
+  cube_sigma: 0.003    # m,     cube position from vision pipeline
 
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
@@ -36,18 +36,18 @@ obs_bias:
 
 # Number of frames the agent's observation lags behind the true state (sim2real DR).
 # 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
-obs_latency: 0
+obs_latency: 2
 
 # Number of past actions appended to the observation. 0 = disabled; N=2 lets the
 # policy infer velocity / action smoothness from its own recent commands.
-prev_actions_n: 0
+prev_actions_n: 1
 
 # Number of consecutive observations stacked into the policy input.
 # 1 = no stacking (raw OBS_DIM). N>1 multiplies obs_dim by N via SB3's VecFrameStack.
 frame_stack: 1
 
 train:
-  time_limit_minutes: 10
+  time_limit_minutes: 20
   n_envs: 16
   net_arch: [256, 256, 256, 256]
   input_batchnorm: true
