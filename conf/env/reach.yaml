@@ -1,10 +1,14 @@
 # @package _global_
 env_name: reach
 
+# Reach converges well inside 20 min on this hardware — override the global 40 min default.
+train:
+  time_limit_minutes: 20
+
 reach_env:
   action_scale: ${action_scale}   # shared across envs, defined in config.yaml
-  max_steps: 300          # 300 steps / 30 Hz = 10 s episode
-  n_substeps: 10          # 10 * (1/300 s timestep in so101.xml) = exactly 30 Hz
+  max_steps: 300          # 300 steps / 15 Hz = 20 s episode
+  n_substeps: 10          # 10 * (1/150 s timestep in so101.xml) = exactly 15 Hz
 
   # Safety: episode penalizes any step where the EE site z is below this height.
   # Waypoints are validated against this on env init and reach training rejects
@@ -14,7 +18,7 @@ reach_env:
   # Joint-space distance threshold (rad) for "arm at target".
   tolerance: 0.05
   # Steps the policy must remain within tolerance before terminating successfully.
-  # 15 steps / 30 Hz = 0.5 s dwell.
+  # 15 steps / 15 Hz = 1.0 s dwell.
   dwell_steps: 15
 
   # Joint-limit penalty: any joint whose normalized distance from the joint's
