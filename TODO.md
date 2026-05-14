@@ -12,7 +12,7 @@ Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/li
 
 - **Joint friction / damping.** Check `<joint frictionloss damping>` values in `so101.xml`. Real servos have stiction and gearbox friction that's commonly modeled at zero. Add a reasonable fixed value or domain randomize.
 
-- **Internal servo dynamics.** Real Feetech has internal PID + current loop + comms latency; sim's `<position>` actuator is instantaneous torque ∝ err. Affects transients more than holding ability — lower priority than the three above.
+- **Internal servo dynamics — confirmed gap.** Real Feetech has internal PID + current loop + comms latency; sim's `<position>` actuator is instantaneous torque ∝ err. The sysid fit (`sysid_logs/fit.json`) drove damping/armature/frictionloss to the upper bound of its search range, which is the optimizer using joint-side losses as a proxy for the servo's internal speed/accel ramp. Best concrete fix: rate-limit `data.ctrl` in `replay_sim.py` (and the policy env) using `SERVO_SPEED`/`SERVO_ACCEL` from `real/twin/constants.py`, then refit. Until that's in, fast/wide-amplitude motions (e.g. `sweep_wrist_roll`) are visibly over-damped in sim.
 
 ## Verify on real servos before first policy rollout
 

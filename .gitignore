@@ -4,3 +4,6 @@ outputs/
 wandb/
 *.zip
 MUJOCO_LOG.TXT
+sysid_logs/sim/
+sysid_logs/plots/
+sysid_logs/report.tsv

@@ -37,8 +37,10 @@
 
     <default class="sts3215">
       <geom contype="0" conaffinity="0"/>
-      <joint damping="0.60" frictionloss="0.15" armature="0.028"/>
-      <position kp="64" kv="2.731" forcerange="-2.94 2.94"/>
+      <!-- damping/armature/frictionloss/kp fit by sysid against real-arm CSVs;
+           see sysid_logs/fit.json (scales applied uniformly across joints). -->
+      <joint damping="2.997" frictionloss="0.683" armature="0.140"/>
+      <position kp="68.23" kv="2.731" forcerange="-2.94 2.94"/>
     </default>
 
     <default class="backlash">
