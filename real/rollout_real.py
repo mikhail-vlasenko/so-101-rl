@@ -16,10 +16,12 @@ Safety:
 from __future__ import annotations
 
 import argparse
+import csv
 import signal
 import time
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import mujoco
 import numpy as np
 from hydra import compose, initialize_config_dir
@@ -33,7 +35,7 @@ from .twin.constants import (
     SERVO_POSITION_KP,
     SERVO_SPEED,
 )
-from .twin.mapping import compute_ee_pos, load_joint_maps, rad_to_raw, raw_to_rad
+from .twin.mapping import JOINT_NAMES, compute_ee_pos, load_joint_maps, rad_to_raw, raw_to_rad
 from .twin.servo_io import ServoBus
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +70,81 @@ def parse_args(reach_cfg: dict) -> argparse.Namespace:
     p.add_argument("--xml", default=str(DEFAULT_XML))
     p.add_argument("--cal", default=str(DEFAULT_CAL))
     return p.parse_args()
+
+
+def write_csv(out_path: Path, steps: np.ndarray, actions: np.ndarray,
+              qpos: np.ndarray, ee: np.ndarray, dist: np.ndarray,
+              tolerance: float, control_hz: float) -> None:
+    header = (["step", "t_s"]
+              + [f"action_{n}" for n in JOINT_NAMES]
+              + [f"qpos_{n}" for n in JOINT_NAMES]
+              + ["ee_x", "ee_y", "ee_z", "dist", "in_target"])
+    with out_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        for i, s in enumerate(steps):
+            w.writerow([int(s), f"{s / control_hz:.4f}",
+                        *(f"{a:.6f}" for a in actions[i]),
+                        *(f"{q:.6f}" for q in qpos[i]),
+                        f"{ee[i, 0]:.6f}", f"{ee[i, 1]:.6f}", f"{ee[i, 2]:.6f}",
+                        f"{dist[i]:.6f}", int(dist[i] < tolerance)])
+
+
+def plot_rollout(steps: np.ndarray, actions: np.ndarray, qpos: np.ndarray,
+                 ee: np.ndarray, dist: np.ndarray, target_qpos: np.ndarray,
+                 target_ee: np.ndarray, tolerance: float, waypoint_idx: int,
+                 control_hz: float, out_path: Path) -> None:
+    t = steps / control_hz  # seconds
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    fig.suptitle(f"Rollout — waypoint {waypoint_idx} ({control_hz:.1f} Hz, "
+                 f"{len(steps)} steps)")
+
+    ax = axes[0, 0]
+    for j, name in enumerate(JOINT_NAMES):
+        ax.plot(t, actions[:, j], label=name)
+    ax.set_title("Action per joint (clipped, smoothed)")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("action ∈ [-1, 1]")
+    ax.axhline(0.0, color="k", lw=0.5, alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 1]
+    cmap = plt.get_cmap("tab10")
+    for j, name in enumerate(JOINT_NAMES):
+        color = cmap(j)
+        ax.plot(t, qpos[:, j], color=color, label=name)
+        ax.axhline(target_qpos[j], color=color, ls="--", lw=1.0, alpha=0.6)
+    ax.set_title("qpos per joint (dashed = target)")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("rad")
+    ax.legend(fontsize=8, loc="best")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    for k, name in enumerate("xyz"):
+        color = cmap(k)
+        ax.plot(t, ee[:, k], color=color, label=f"ee_{name}")
+        ax.axhline(target_ee[k], color=color, ls="--", lw=1.0, alpha=0.6)
+    ax.set_title("End-effector position (dashed = target)")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("m")
+    ax.legend(fontsize=9, loc="best")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 1]
+    ax.plot(t, dist, color="C3")
+    ax.axhline(tolerance, color="k", ls="--", lw=1.0, alpha=0.6,
+               label=f"tolerance={tolerance}")
+    ax.set_title("‖qpos − target_qpos‖")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("rad")
+    ax.legend(fontsize=9, loc="best")
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
 
 
 def build_obs(model: mujoco.MjModel, data: mujoco.MjData, qposadr: np.ndarray,
@@ -111,9 +188,8 @@ def main() -> int:
     assert ee_site_id >= 0, "site 'gripperframe' not found in model"
 
     target_qpos_goal = waypoints[args.waypoint]
-    print(f"Waypoint {args.waypoint} target qpos: {np.round(target_qpos_goal, 3).tolist()}")
+    target_ee_goal = compute_ee_pos(model, data, qposadr, target_qpos_goal, ee_site_id)
 
-    print(f"Loading model: {args.model}")
     policy = PPO.load(args.model)
     expected_obs = 2 * 6 + 3 + n_waypoints + prev_actions_n * 6
     assert policy.observation_space.shape[0] == expected_obs, (
@@ -121,17 +197,14 @@ def main() -> int:
         f"reach env produces {expected_obs}-dim."
     )
 
-    print(f"Waypoint index: {args.waypoint}")
-    print(f"Execute: {args.execute}  (dry-run does NOT send servo commands)")
-    print(f"Control rate: {control_hz:.2f} Hz, action_scale: {action_scale}, "
-          f"max steps: {args.max_steps}")
+    print(f"waypoint={args.waypoint} execute={args.execute} "
+          f"{control_hz:.1f}Hz action_scale={action_scale} ema={args.ema_alpha}")
 
     bus = ServoBus(args.port, jm.servo_ids())
     bus.connect()
 
     stopped = {"flag": False}
     def stop(_sig, _frame) -> None:
-        print("\nStopping...")
         stopped["flag"] = True
     signal.signal(signal.SIGINT, stop)
 
@@ -139,20 +212,14 @@ def main() -> int:
         raw0 = bus.read_all()
         qpos = raw_to_rad(raw0, jm, direction)
         qvel = np.zeros(6, dtype=np.float64)
-        print(f"Initial raw:  {raw0.tolist()}")
-        print(f"Initial qpos: {np.round(qpos, 3).tolist()}")
-        ee0 = compute_ee_pos(model, data, qposadr, qpos, ee_site_id)
-        print(f"Initial EE:   {np.round(ee0, 3).tolist()}")
 
         slack = 0.05
         if not (np.all(qpos >= xml_low - slack) and np.all(qpos <= xml_high + slack)):
-            print("WARNING: initial qpos is outside MuJoCo joint range. "
-                  "Calibration may need adjusting. Aborting.")
+            print("ABORT: initial qpos outside MuJoCo joint range; check calibration.")
             return 1
 
         if args.execute:
             bus.set_position_kp(SERVO_POSITION_KP)
-            print(f"Set position-loop Kp (per joint) = {list(SERVO_POSITION_KP)}")
             bus.enable_torque_all()
 
         dt = control_dt
@@ -162,7 +229,12 @@ def main() -> int:
         prev_raw_target = raw0.copy()
         prev_actions = np.zeros((prev_actions_n, 6), dtype=np.float32)
         action_ema: np.ndarray | None = None
-        print(f"EMA alpha: {args.ema_alpha} ({'off' if args.ema_alpha == 1.0 else 'on'})")
+
+        log_steps: list[int] = []
+        log_actions: list[np.ndarray] = []
+        log_qpos: list[np.ndarray] = []
+        log_ee: list[np.ndarray] = []
+        log_dist: list[float] = []
 
         while not stopped["flag"] and step < args.max_steps:
             obs = build_obs(model, data, qposadr, ee_site_id, qpos, qvel,
@@ -176,8 +248,10 @@ def main() -> int:
             action = action_ema
             # Mirror sim: the (clipped, smoothed) action becomes the most recent
             # entry in the prev-actions buffer used for the NEXT obs.
-            prev_actions[0] = prev_actions[1]
-            prev_actions[1] = action.astype(np.float32)
+            if prev_actions_n > 0:
+                if prev_actions_n > 1:
+                    prev_actions[:-1] = prev_actions[1:]
+                prev_actions[-1] = action.astype(np.float32)
 
             target_qpos = np.clip(qpos + action * action_scale, xml_low, xml_high)
             target_raw = rad_to_raw(target_qpos, jm, direction)
@@ -205,23 +279,54 @@ def main() -> int:
             dist = float(np.linalg.norm(qpos - target_qpos_goal))
             in_target = dist < tolerance
             dwell_count = dwell_count + 1 if in_target else 0
-            if step % 5 == 0 or in_target:
-                ee = compute_ee_pos(model, data, qposadr, qpos, ee_site_id)
-                act_str = ",".join(f"{a:+.2f}" for a in action)
-                tgt_err = (target_raw - raw).tolist()
-                print(f"step={step:3d}  dist={dist:.3f}  in_target={in_target}  "
-                      f"dwell={dwell_count}  ee_z={ee[2]:+.3f}  act=[{act_str}]")
-                print(f"          raw      ={raw.tolist()}")
-                print(f"          tgt_raw  ={target_raw.tolist()}")
-                print(f"          err(tgt-raw)={tgt_err}")
+            ee = compute_ee_pos(model, data, qposadr, qpos, ee_site_id)
+
+            log_steps.append(step)
+            log_actions.append(action.copy())
+            log_qpos.append(qpos.copy())
+            log_ee.append(ee.copy())
+            log_dist.append(dist)
+
+            if step % 20 == 0:
+                print(f"step={step:3d}  dist={dist:.3f}")
             step += 1
 
             if dwell_count >= dwell_steps:
-                print(f"\nREACHED waypoint {args.waypoint} after {step} steps.")
+                print(f"REACHED waypoint {args.waypoint} at step {step} (dist={dist:.3f})")
                 break
+        else:
+            if not stopped["flag"]:
+                print(f"TIMEOUT at step {step} (dist={dist:.3f})")
     finally:
-        print("Disabling torque.")
         bus.close()
+
+    if log_steps:
+        out_dir = REPO_ROOT / "rollouts"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"rollout_w{args.waypoint}_{int(time.time())}"
+        csv_path = out_dir / f"{stem}.csv"
+        plot_path = out_dir / f"{stem}.png"
+        steps_arr = np.array(log_steps)
+        actions_arr = np.stack(log_actions)
+        qpos_arr = np.stack(log_qpos)
+        ee_arr = np.stack(log_ee)
+        dist_arr = np.array(log_dist)
+        write_csv(csv_path, steps_arr, actions_arr, qpos_arr, ee_arr,
+                  dist_arr, tolerance, control_hz)
+        plot_rollout(
+            steps=steps_arr,
+            actions=actions_arr,
+            qpos=qpos_arr,
+            ee=ee_arr,
+            dist=dist_arr,
+            target_qpos=target_qpos_goal,
+            target_ee=target_ee_goal,
+            tolerance=tolerance,
+            waypoint_idx=args.waypoint,
+            control_hz=control_hz,
+            out_path=plot_path,
+        )
+        print(f"saved {csv_path.relative_to(REPO_ROOT)} {plot_path.relative_to(REPO_ROOT)}")
     return 0
 
 
