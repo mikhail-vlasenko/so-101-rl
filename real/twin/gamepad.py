@@ -12,6 +12,7 @@ Mapping (JOINT_NAMES order):
     R1/R2 -> wrist_flex       (R2 up, R1 down, R2 analog)
     RX  -> wrist_roll
     L1/L2 -> gripper          (L1 open, L2 close, L2 analog)
+    D-pad up/down  -> cycle through SLOW/MED/FAST speed presets
 
 Run as a daemon thread; if no DualSense is present the worker logs and exits
 without affecting the rest of the twin.
@@ -27,7 +28,7 @@ from typing import Callable
 import numpy as np
 from evdev import InputDevice, ecodes, list_devices
 
-from .gui import CONTROL, TwinState
+from .gui import CONTROL, SPEED_MULTIPLIERS, TwinState
 from .mapping import JointMaps
 
 # DualSense via hid-playstation reports sticks as unsigned bytes 0..255
@@ -74,6 +75,8 @@ class GamepadState:
     r1: bool = False
     mode_toggle_pending: bool = False
     estop_pending: bool = False
+    speed_up_pending: bool = False
+    speed_down_pending: bool = False
 
 
 def _reader_loop(dev: InputDevice, gp: GamepadState, lock: threading.Lock,
@@ -114,6 +117,14 @@ def _reader_loop(dev: InputDevice, gp: GamepadState, lock: threading.Lock,
             elif event.code == ecodes.ABS_RZ:
                 with lock:
                     gp.r2 = _deadzone(max(0.0, v / TRIG_FULL), TRIG_DEADZONE)
+            elif event.code == ecodes.ABS_HAT0Y:
+                # D-pad: -1 = up (faster), +1 = down (slower); 0 = released.
+                if v < 0:
+                    with lock:
+                        gp.speed_up_pending = True
+                elif v > 0:
+                    with lock:
+                        gp.speed_down_pending = True
 
 
 def gamepad_worker(state: TwinState, jm: JointMaps,
@@ -151,8 +162,12 @@ def gamepad_worker(state: TwinState, jm: JointMaps,
             l1, r1 = gp.l1, gp.r1
             toggle = gp.mode_toggle_pending
             estop = gp.estop_pending
+            speed_up = gp.speed_up_pending
+            speed_down = gp.speed_down_pending
             gp.mode_toggle_pending = False
             gp.estop_pending = False
+            gp.speed_up_pending = False
+            gp.speed_down_pending = False
 
         if estop:
             on_estop()
@@ -160,8 +175,13 @@ def gamepad_worker(state: TwinState, jm: JointMaps,
             on_mode_toggle()
 
         with state.lock:
+            if speed_up:
+                state.speed_idx = min(len(SPEED_MULTIPLIERS) - 1, state.speed_idx + 1)
+            if speed_down:
+                state.speed_idx = max(0, state.speed_idx - 1)
             mode = state.mode
             tgt = state.targets_rad.copy()
+            speed_mult = SPEED_MULTIPLIERS[state.speed_idx]
 
         if mode == CONTROL:
             vel = np.zeros(6, dtype=np.float64)
@@ -171,7 +191,7 @@ def gamepad_worker(state: TwinState, jm: JointMaps,
             vel[WRIST_FLEX] = r2 - (1.0 if r1 else 0.0)
             vel[WRIST_ROLL] = rx
             vel[GRIPPER]    = (1.0 if l1 else 0.0) - l2
-            tgt = tgt + vel * MAX_SPEED_RAD_S * dt
+            tgt = tgt + vel * MAX_SPEED_RAD_S * speed_mult * dt
             tgt = np.clip(tgt, xml_low, xml_high)
             with state.lock:
                 if state.mode == CONTROL:

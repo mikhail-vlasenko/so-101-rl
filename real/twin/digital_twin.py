@@ -28,9 +28,9 @@ from .servo_io import ServoBus
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
-DEFAULT_CAL = REPO_ROOT / "real" / "leader_calibration.json"
+DEFAULT_CAL = REPO_ROOT / "real" / "follower_calibration.json"
 
-READ_HZ = 50.0
+READ_HZ = 15.0
 RENDER_HZ = 60.0
 
 

@@ -22,6 +22,12 @@ from .mapping import JointMaps, raw_to_norm
 MIRROR = "MIRROR"
 CONTROL = "CONTROL"
 
+# Control-speed presets. The gamepad integrator scales its per-joint velocity
+# by SPEED_MULTIPLIERS[state.speed_idx]; D-pad up/down (or Tk Up/Down keys)
+# step through the presets.
+SPEED_LABELS = ("SLOW", "MED", "FAST")
+SPEED_MULTIPLIERS = (0.3, 1.0, 2.5)
+
 # Tk on HiDPI / Wayland-via-XWayland doesn't auto-scale. Use negative font
 # sizes — in Tk, negative means "pixels", which is DPI-independent (positive
 # is points, which depends on `tk scaling` and is finicky).
@@ -47,6 +53,9 @@ class TwinState:
         self.read_hz: float = 0.0
         self.last_error: str = ""
         self.stop: bool = False
+        # Index into SPEED_MULTIPLIERS / SPEED_LABELS; bumped by D-pad or Tk
+        # Up/Down keys. Default MED (1).
+        self.speed_idx: int = 1
 
 
 def _set_global_fonts(root: tk.Tk) -> tkfont.Font:
@@ -185,6 +194,14 @@ def run(
     qpos_lbl = ttk.Label(root, text="", padding=(10, 0), font=mono)
     qpos_lbl.pack(fill="x", pady=(0, 8))
 
+    def bump_speed(delta: int) -> None:
+        with state.lock:
+            state.speed_idx = max(0, min(len(SPEED_MULTIPLIERS) - 1,
+                                         state.speed_idx + delta))
+
+    root.bind("<Up>", lambda _e: bump_speed(+1))
+    root.bind("<Down>", lambda _e: bump_speed(-1))
+
     def refresh() -> None:
         if state.stop:
             root.quit()
@@ -195,6 +212,7 @@ def run(
             read_hz = state.read_hz
             mode = state.mode
             last_error = state.last_error
+            speed_idx = state.speed_idx
         # External mode changes (e.g. from gamepad) need to be reflected in
         # the radiobuttons and slider enable state.
         if mode != mode_var.get():
@@ -213,7 +231,9 @@ def run(
             for i in range(n):
                 slider_vars[i].set(float(rad[i]))
         err = f"  |  err: {last_error}" if last_error else ""
-        status_lbl["text"] = f"mode={mode}   read={read_hz:5.1f} Hz{err}"
+        speed_str = f"{SPEED_LABELS[speed_idx]} ({SPEED_MULTIPLIERS[speed_idx]:.2f}x)"
+        status_lbl["text"] = (f"mode={mode}   speed={speed_str}   "
+                              f"read={read_hz:5.1f} Hz{err}")
         qpos_lbl["text"] = "qpos: [" + ", ".join(f"{x:+0.3f}" for x in rad) + "]"
         root.after(33, refresh)
 

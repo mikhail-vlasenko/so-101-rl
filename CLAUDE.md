@@ -39,7 +39,7 @@ Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE 
 
 ## Real arm
 
-- `real/twin/digital_twin.py` — MuJoCo passive viewer + tkinter side panel that mirrors the real SO-101 arm's encoders into MuJoCo and lets the user verify the rad↔raw mapping (live direction toggles per joint, raw/norm/rad readouts, optional slider control with torque-on). Built from scratch on raw `scservo_sdk`; does not import from other `real/*.py` files. Run with `python -m real.twin.digital_twin` (default port `/dev/ttyACM0`). Optional DualSense control (`real/twin/gamepad.py`): if a controller is connected, sticks/triggers drive `targets_rad` in CONTROL mode (LX=pan, LY=lift, RY=elbow, R1/R2=wrist_flex, RX=wrist_roll, L1/L2=gripper); Create toggles MIRROR↔CONTROL, PS is e-stop. Requires `evdev` (in `requirements.txt`); the user must be in the `input` group.
+- `real/twin/digital_twin.py` — MuJoCo passive viewer + tkinter side panel that mirrors the real SO-101 arm's encoders into MuJoCo and lets the user verify the rad↔raw mapping (live direction toggles per joint, raw/norm/rad readouts, optional slider control with torque-on). Built from scratch on raw `scservo_sdk`; does not import from other `real/*.py` files. Run with `python -m real.twin.digital_twin` (default port `/dev/ttyACM0`). Optional DualSense control (`real/twin/gamepad.py`): if a controller is connected, sticks/triggers drive `targets_rad` in CONTROL mode (LX=pan, LY=lift, RY=elbow, R1/R2=wrist_flex, RX=wrist_roll, L1/L2=gripper); D-pad up/down cycles SLOW/MED/FAST speed presets (Tk Up/Down keys do the same); Create toggles MIRROR↔CONTROL, PS is e-stop. Requires `evdev` (in `requirements.txt`); the user must be in the `input` group.
 
 ## Training
 
