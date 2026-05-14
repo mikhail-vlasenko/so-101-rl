@@ -12,7 +12,7 @@ from base_env import SO101BaseEnv
 # Reward constants
 TIME_PENALTY = -0.05
 EE_CUBE_COEFF = -0.5
-GRASP_HOLD_REWARD = 0.05
+GRASP_HOLD_REWARD = 0.5
 HEIGHT_PROGRESS_COEFF = 200.0
 
 
