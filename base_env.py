@@ -267,6 +267,11 @@ class SO101BaseEnv(gym.Env):
             joint_pos = self.np_random.uniform(self.joint_low, self.joint_high)
             self.data.qpos[self.joint_qposadr] = joint_pos
             self.data.ctrl[:self.n_joints] = joint_pos
+            # If actuators carry activation state (e.g. dyntype="filter"),
+            # initialize it at the joint position so the controller doesn't
+            # snap the arm from 0 toward joint_pos on the first step.
+            if self.model.na > 0:
+                self.data.act[:] = joint_pos
             mujoco.mj_forward(self.model, self.data)
             if not self._has_arm_collision():
                 break

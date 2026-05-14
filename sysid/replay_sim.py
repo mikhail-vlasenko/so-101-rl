@@ -40,6 +40,9 @@ def run_one(model: mujoco.MjModel, data: mujoco.MjData, traj: np.ndarray,
     mujoco.mj_resetData(model, data)
     data.qpos[qposadr] = traj[0]
     data.ctrl[:n_joints] = traj[0]
+    if model.na > 0:
+        assert model.na == n_joints, f"na={model.na} but n_joints={n_joints}"
+        data.act[:] = traj[0]
     mujoco.mj_forward(model, data)
 
     pos = np.empty_like(traj)

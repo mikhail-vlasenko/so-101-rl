@@ -37,10 +37,12 @@
 
     <default class="sts3215">
       <geom contype="0" conaffinity="0"/>
-      <!-- damping/armature/frictionloss/kp fit by sysid against real-arm CSVs;
-           see sysid_logs/fit.json (scales applied uniformly across joints). -->
-      <joint damping="2.997" frictionloss="0.683" armature="0.140"/>
-      <position kp="68.23" kv="2.731" forcerange="-2.94 2.94"/>
+      <!-- Fit by sysid against real-arm CSVs (sysid_logs/fit.json). With the
+           timeconst filter modeling the servo's bandwidth, friction collapsed
+           to ~0 — earlier fits had used it as a stand-in for the missing lag.
+           timeconst is shared (same Feetech hardware on every joint). -->
+      <joint damping="3.86" frictionloss="0.0" armature="0.242"/>
+      <position kp="77.5" kv="2.731" forcerange="-2.94 2.94" timeconst="0.025"/>
     </default>
 
     <default class="backlash">
@@ -205,11 +207,11 @@
   </worldbody>
 
   <actuator>
-    <position class="sts3215" name="shoulder_pan" joint="shoulder_pan" ctrlrange="-1.91986 1.91986"/>
+    <position class="sts3215" name="shoulder_pan"  joint="shoulder_pan"  ctrlrange="-1.91986 1.91986"/>
     <position class="sts3215" name="shoulder_lift" joint="shoulder_lift" ctrlrange="-1.74533 1.74533"/>
-    <position class="sts3215" name="elbow_flex" joint="elbow_flex" ctrlrange="-1.69 1.69"/>
-    <position class="sts3215" name="wrist_flex" joint="wrist_flex" ctrlrange="-1.65806 1.65806"/>
-    <position class="sts3215" name="wrist_roll" joint="wrist_roll" ctrlrange="-2.74385 2.84121"/>
-    <position class="sts3215" name="gripper" joint="gripper" ctrlrange="-0.17453 1.74533"/>
+    <position class="sts3215" name="elbow_flex"    joint="elbow_flex"    ctrlrange="-1.69 1.69"/>
+    <position class="sts3215" name="wrist_flex"    joint="wrist_flex"    ctrlrange="-1.65806 1.65806"/>
+    <position class="sts3215" name="wrist_roll"    joint="wrist_roll"    ctrlrange="-2.74385 2.84121"/>
+    <position class="sts3215" name="gripper"       joint="gripper"       ctrlrange="-0.17453 1.74533"/>
   </actuator>
 </mujoco>
