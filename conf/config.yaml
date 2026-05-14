@@ -70,7 +70,7 @@ ppo:
   n_epochs: 5
   clip_range: 0.2
   ent_coef: 0.001
-  gae_lambda: 0.95
+  gae_lambda: 0.97
   vf_coef: 1.0
 
 wandb:
