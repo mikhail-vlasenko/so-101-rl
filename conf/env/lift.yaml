@@ -3,9 +3,11 @@ env_name: lift
 
 lift_env:
   action_scale: ${action_scale}   # shared across envs, defined in config.yaml
-  max_steps: 150          # 150 steps / 15 Hz = 10 s episode
+  max_steps: 300          # 300 steps / 15 Hz = 20 s episode
   n_substeps: 10          # 10 * (1/150 s timestep in so101.xml) = exactly 15 Hz
   cube_low: [0.15, -0.15, 0.015]
   cube_high: [0.30, 0.15, 0.015]
-  floor_contact_penalty: -0.02
+  floor_contact_penalty: -0.10
+  floor_proximity_thresh: 0.003   # m; penalize arm geoms closer than this to floor
+  floor_proximity_penalty: -0.05  # per-step, applied when min arm↔floor dist < thresh
   target_height: 0.10

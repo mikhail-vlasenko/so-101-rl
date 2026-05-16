@@ -232,6 +232,18 @@ class SO101BaseEnv(gym.Env):
                 return True
         return False
 
+    def _min_arm_floor_dist(self, distmax: float) -> float:
+        """Min signed distance (m) between any arm geom and the floor, capped at distmax.
+        Negative values mean penetration. distmax bounds the broadphase work — pairs
+        further apart than distmax return distmax without doing exact collision math."""
+        min_dist = distmax
+        for gid in self.arm_geom_ids:
+            d = mujoco.mj_geomDistance(self.model, self.data, gid,
+                                       self.floor_geom_id, distmax, None)
+            if d < min_dist:
+                min_dist = d
+        return min_dist
+
     def _detect_grasp(self):
         """Grasp = cube close to EE + gripper closing + contact."""
         ee_pos = self._get_ee_pos()
