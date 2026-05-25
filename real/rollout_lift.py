@@ -41,6 +41,7 @@ from base_env import JOINT_NAMES, action_to_target
 from .twin.constants import (
     MAX_RAW_DELTA_PER_STEP,
     SERVO_ACCEL,
+    SERVO_POSITION_DEADZONE,
     SERVO_POSITION_KP,
     SERVO_SPEED,
 )
@@ -77,6 +78,14 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
     p.add_argument("--cal", default=str(DEFAULT_CAL))
     p.add_argument("--no-view", action="store_true",
                    help="Disable the MuJoCo passive viewer.")
+    p.add_argument("--interp-hz", type=float, default=100.0,
+                   help="Rate at which interpolated sub-targets are written to "
+                        "the bus between policy ticks. Linearly slides from the "
+                        "previous commanded target to the new one across each "
+                        "control period, so the servo's trapezoidal trajectory "
+                        "tracks a moving setpoint instead of restarting from "
+                        "rest every tick. Set to the control rate (15) to "
+                        "disable.")
     return p.parse_args()
 
 
@@ -249,10 +258,15 @@ def main() -> int:
 
         if args.execute:
             bus.set_position_kp(SERVO_POSITION_KP)
+            bus.set_position_deadzone(SERVO_POSITION_DEADZONE)
             bus.enable_torque_all()
 
         dwell_count = 0
         dt = control_dt
+        n_interp = max(1, int(round(args.interp_hz / control_hz)))
+        sub_dt = dt / n_interp
+        print(f"interpolation: {n_interp} sub-targets/tick "
+              f"({1.0 / sub_dt:.1f} Hz write rate)")
         step = 0
         t_loop = time.time()
         prev_raw_target = raw0.copy()
@@ -287,14 +301,21 @@ def main() -> int:
                             -MAX_RAW_DELTA_PER_STEP, MAX_RAW_DELTA_PER_STEP)
             target_raw = (prev_raw_target + delta).astype(np.int64)
 
-            if args.execute:
-                bus.write_all(target_raw, SERVO_SPEED, SERVO_ACCEL)
+            # Interpolated sub-target stream: slide the commanded raw target
+            # from prev_raw_target to target_raw across the control period so
+            # the servo's trapezoid never restarts from rest.
+            start_raw = prev_raw_target.astype(np.float64)
+            end_raw = target_raw.astype(np.float64)
+            for sub in range(n_interp):
+                alpha = (sub + 1) / n_interp
+                interp_raw = (start_raw + alpha * (end_raw - start_raw)).round().astype(np.int64)
+                if args.execute:
+                    bus.write_all(interp_raw, SERVO_SPEED, SERVO_ACCEL)
+                sub_t_next = t_loop + (sub + 1) * sub_dt
+                sleep_for = sub_t_next - time.time()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
             prev_raw_target = target_raw
-
-            t_next = t_loop + dt
-            sleep_for = t_next - time.time()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
             t_loop = time.time()
 
             # Read the real arm, write the new state into the sim, and step the

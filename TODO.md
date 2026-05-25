@@ -14,6 +14,17 @@ Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/li
 
 - **Internal servo dynamics — confirmed gap.** Real Feetech has internal PID + current loop + comms latency; sim's `<position>` actuator is instantaneous torque ∝ err. The sysid fit (`sysid_logs/fit.json`) drove damping/armature/frictionloss to the upper bound of its search range, which is the optimizer using joint-side losses as a proxy for the servo's internal speed/accel ramp. Best concrete fix: rate-limit `data.ctrl` in `replay_sim.py` (and the policy env) using `SERVO_SPEED`/`SERVO_ACCEL` from `real/twin/constants.py`, then refit. Until that's in, fast/wide-amplitude motions (e.g. `sweep_wrist_roll`) are visibly over-damped in sim.
 
+## Train a policy in PWM / torque-ish mode
+
+STS3215 servos expose a PWM / "current" mode via register writes. Bypassing the internal position PID lets the policy command motor effort directly — no trapezoidal-profile reset every tick (see `SERVO_ACCEL` comment), no 15 Hz lower bound, and a control interface much closer to what most MuJoCo-trained policies use.
+
+Setup work:
+- Swap `<position>` actuators in `so101.xml` for `<motor>`, re-run sysid against PWM step responses (current fit is position-regime only).
+- Measure per-joint PWM deadband and add to the sim (analog of `SERVO_DEADZONE_RAW`, in the PWM domain).
+- Bump control rate to ≥50 Hz both sides; confirm the Feetech bus sustains it (currently ~33 Hz ceiling without pipelining).
+- Add joint-limit clamping in the rollout loop — PWM has no inherent "go to X" semantic.
+- Calibrate PWM→torque per joint by hanging known masses and recording the motion-onset PWM.
+
 ## Verify on real servos before first policy rollout
 
 Nothing in the rollout layer notices "I've been pushing the same wall for 5 seconds"; the Feetech firmware's overload trip is what saves the hardware. Verify before running:

@@ -16,6 +16,8 @@ import scservo_sdk as scs  # noqa: E402
 
 ADDR_TORQUE_ENABLE = 40
 ADDR_POSITION_KP = 21
+ADDR_CW_DEADZONE = 26
+ADDR_CCW_DEADZONE = 27
 ADDR_PRESENT_POSITION = 56
 LEN_PRESENT_POSITION = 2
 BAUDRATE = 1_000_000
@@ -133,6 +135,37 @@ class ServoBus:
                     f"servo {sid} Kp write error: "
                     f"{self.packet_handler.getRxPacketError(error)}"
                 )
+
+    def set_position_deadzone(self, deadzone_per_servo) -> None:
+        """Write the symmetric position-correction deadzone (registers 26 / 27,
+        CW / CCW) per servo. Units: 0.087°/unit, range 0..16, factory default 1.
+        The servo's position loop will NOT try to correct when |error| is within
+        ±deadzone, letting the joint settle anywhere inside a backlash gap
+        without the PID hunting across it. Mitigates load-dependent chatter on
+        gravity- or moment-loaded joints (shoulder_pan in particular).
+        Registers are EEPROM and persist across power cycles, so this value
+        outlives the running program until something else writes them."""
+        assert self.packet_handler is not None, "ServoBus not connected"
+        dz_list = list(deadzone_per_servo)
+        assert len(dz_list) == len(self.servo_ids), (
+            f"expected {len(self.servo_ids)} deadzone values, got {len(dz_list)}"
+        )
+        for sid, dz, ok in zip(self.servo_ids, dz_list, self.present_mask):
+            if not ok:
+                continue
+            assert 0 <= dz <= 16, f"servo {sid} deadzone out of range: {dz}"
+            for addr in (ADDR_CW_DEADZONE, ADDR_CCW_DEADZONE):
+                result, error = self.packet_handler.write1ByteTxRx(sid, addr, int(dz))
+                if result != scs.COMM_SUCCESS:
+                    raise RuntimeError(
+                        f"servo {sid} deadzone write (addr {addr}) failed: "
+                        f"{self.packet_handler.getTxRxResult(result)}"
+                    )
+                if error != 0:
+                    raise RuntimeError(
+                        f"servo {sid} deadzone write (addr {addr}) error: "
+                        f"{self.packet_handler.getRxPacketError(error)}"
+                    )
 
     def read_all(self) -> np.ndarray:
         """Read present position for every connected servo. Returns int64 array

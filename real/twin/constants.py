@@ -17,10 +17,15 @@ MAX_RAW_DELTA_PER_STEP = 35
 SERVO_SPEED = 1500
 
 # SyncWritePosEx acceleration argument. Range 0-254, units 8.7 deg/s^2.
-# 150 -> ~1300 deg/s^2 (~23 rad/s^2). Lets the servo finish ramping inside a
-# single 50ms control step at 20Hz; 20 was leaving the servo stuck in the
-# acceleration phase.
-SERVO_ACCEL = 150
+# 5 -> ~44 deg/s^2 (~0.76 rad/s^2). Deliberately too low to let the servo
+# finish its trapezoidal ramp inside one 67ms (15Hz) control period — so the
+# joint stays in the acceleration phase and never hits the decel-and-settle
+# cusp before the next target arrives. Without this, position control at low
+# Hz produces a 15Hz square-wave velocity excitation that visibly shakes the
+# arm (accel→cruise→decel→park→repeat) even when the commanded targets are
+# perfectly smooth. 15 was empirically still too snappy; 5 is in the
+# "always-ramping" regime.
+SERVO_ACCEL = 5
 
 # Position-loop P gain (Feetech SMS-STS register addr 21), per joint in
 # JOINT_NAMES order (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
@@ -29,3 +34,13 @@ SERVO_ACCEL = 150
 # worse static-hold on gravity-loaded joints (shoulder_lift, elbow_flex) —
 # revisit per-joint if they sag. Range 0..254 per value.
 SERVO_POSITION_KP = (32, 32, 32, 32, 32, 32)
+
+# Position-correction deadzone (Feetech SMS-STS registers 26/27, CW/CCW),
+# per joint in JOINT_NAMES order. Units 0.087°/unit, range 0..16, factory
+# default 1. Inside ±deadzone the servo's position loop does not correct,
+# so the joint can sit anywhere in a backlash gap without the PID hunting
+# across it. Shoulder_pan sees the largest reaction load when the arm is
+# extended and visibly chatters at the factory default; bumped to 8 (~0.7°
+# of allowed slop). Other joints left at the default — bump per joint if
+# they show similar load-dependent jitter.
+SERVO_POSITION_DEADZONE = (8, 1, 1, 1, 1, 1)
