@@ -151,7 +151,11 @@
               <!-- Link gripper -->
               <body name="gripper" pos="5.55112e-17 -0.0611 0.0181" quat="0.0172091 -0.0172091 0.706897 0.706897">
                 <!-- Joint from wrist to gripper -->
-                <joint axis="0 0 1" name="wrist_roll" type="hinge" range="-2.7438473 2.7438473" class="sts3215"/>
+                <!-- Upper limit is asymmetric (+2.841 vs -2.744): the real servo's
+                     calibrated range is offset from the mechanical midpoint, so the
+                     reachable roll is ~5.6 deg wider in the positive direction. Matches
+                     the actuator ctrlrange below. -->
+                <joint axis="0 0 1" name="wrist_roll" type="hinge" range="-2.7438473 2.8412063" class="sts3215"/>
                 <inertial pos="0.000214 0.000245 -0.025187" mass="0.087" fullinertia="2.75087e-05 4.33657e-05 3.45059e-05 -3.35241e-07 -5.7352e-06 -5.17847e-08"/>
                 <!-- Part sts3215_03a_v1_5 -->
                 <geom type="mesh" class="visual" pos="0.0077 0.0001 -0.0234" quat="1 -1 0 0" mesh="sts3215_03a_v1" material="sts3215_03a_v1_material"/>
