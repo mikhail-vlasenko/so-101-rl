@@ -18,7 +18,7 @@ The trajectory set is designed to surface sim-vs-real mismatch:
 
 import numpy as np
 
-from base_env import JOINT_NAMES
+from src.base_env import JOINT_NAMES
 
 SYSID_HZ = 15.0
 SYSID_DT = 1.0 / SYSID_HZ

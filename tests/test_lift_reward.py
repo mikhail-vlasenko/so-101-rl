@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from lift_env import (
+from src.lift_env import (
     SO101LiftEnv, CONTACT_FORCE_COEFF, CUBE_MOTION_COEFF,
     HEIGHT_PROGRESS_COEFF, GRASP_HOLD_REWARD,
 )

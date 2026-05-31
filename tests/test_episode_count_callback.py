@@ -15,7 +15,7 @@ from stable_baselines3.common.logger import KVWriter, Logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from callbacks import EpisodeCountCallback
+from src.callbacks import EpisodeCountCallback
 
 
 class _FixedLenEnv(gym.Env):

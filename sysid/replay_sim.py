@@ -14,7 +14,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from base_env import JOINT_NAMES
+from src.base_env import JOINT_NAMES
 from sysid.io import OUT_DIR_SIM, REPO_ROOT, write_log
 from sysid.trajectories import SYSID_DT, SYSID_HZ, TRAJECTORIES
 

@@ -13,7 +13,7 @@ import pytest
 import mujoco
 from hydra import compose, initialize
 
-from pickplace_env import SO101PickPlaceEnv
+from src.pickplace_env import SO101PickPlaceEnv
 
 
 @pytest.fixture(scope="module")

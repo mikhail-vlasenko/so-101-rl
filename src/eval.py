@@ -17,7 +17,7 @@ from omegaconf import DictConfig
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 
-from train import ENV_REGISTRY, _resolve_env, make_env
+from src.train import ENV_REGISTRY, _resolve_env, make_env
 
 ALGORITHM_CLASSES = {
     "sac": SAC,
@@ -44,7 +44,7 @@ def _resolve_model_path(model_arg: str, log_dir: str) -> str:
     return model_arg
 
 
-@hydra.main(config_path="conf", config_name="config", version_base=None)
+@hydra.main(config_path="../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     orig_dir = hydra.utils.get_original_cwd()
     os.chdir(orig_dir)

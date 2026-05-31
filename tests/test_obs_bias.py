@@ -11,7 +11,7 @@ import pytest
 
 from hydra import compose, initialize
 
-from pickplace_env import SO101PickPlaceEnv
+from src.pickplace_env import SO101PickPlaceEnv
 
 
 SIGMAS = {

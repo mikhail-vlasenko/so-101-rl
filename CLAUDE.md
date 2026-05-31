@@ -19,14 +19,14 @@ Long-term tasks and ideas live in `TODO.md` at the repo root. Check it for known
 
 ### Shared
 
-- `base_env.py` — Base Gymnasium env with MuJoCo setup, contact detection, rendering, reset/step skeleton (20-dim obs, 6-dim action)
+- `src/base_env.py` — Base Gymnasium env with MuJoCo setup, contact detection, rendering, reset/step skeleton (20-dim obs, 6-dim action)
 
 ### Lift
 
 Grasp a cube and lift it to 10cm. Simpler grasping prerequisite for pick-and-place.
 
 - `so101/scene_lift.xml` — scene with cube only
-- `lift_env.py` — Gymnasium env (height-progress reward)
+- `src/lift_env.py` — Gymnasium env (height-progress reward)
 - `conf/env/lift.yaml` — env config
 
 ### Pick and Place
@@ -34,7 +34,7 @@ Grasp a cube and lift it to 10cm. Simpler grasping prerequisite for pick-and-pla
 Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE → RETURN.
 
 - `so101/scene_pickplace.xml` — scene with free-body cube, place target, and ring
-- `pickplace_env.py` — Gymnasium env (phase-based reward)
+- `src/pickplace_env.py` — Gymnasium env (phase-based reward)
 - `conf/env/pickplace.yaml` — env config
 
 ## Real arm
@@ -43,7 +43,7 @@ Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE 
 
 ## Training
 
-- `train.py` — Training with Hydra config + W&B logging
+- `src/train.py` — Training with Hydra config + W&B logging
 - `conf/config.yaml` — shared hyperparameters (train, algorithm, wandb), default env: pickplace
 - `conf/env/` — per-env config group (selected via `env=lift`, `env=pickplace`, or `env=multitask`)
 
@@ -54,23 +54,23 @@ All commands must run in the `mujoco_env` conda environment:
 ```bash
 conda activate mujoco_env
 
-python train.py env=lift                     # train lift
-python train.py env=pickplace                # train pick-and-place (default)
-python train.py env=multitask                # train on both lift + pickplace (50/50)
-python train.py env=lift wandb.enabled=false # without W&B
-python train.py train.total_timesteps=200000 # override params
-python eval.py env=lift                      # eval lift checkpoint
-python eval.py env=pickplace                 # eval pickplace checkpoint
-python eval.py model=best                    # eval best model
-python eval.py model=path/to/model.zip       # eval specific model
-python show_starts.py                        # visualize spawn positions
+python -m src.train env=lift                     # train lift
+python -m src.train env=pickplace                # train pick-and-place (default)
+python -m src.train env=multitask                # train on both lift + pickplace (50/50)
+python -m src.train env=lift wandb.enabled=false # without W&B
+python -m src.train train.total_timesteps=200000 # override params
+python -m src.eval env=lift                      # eval lift checkpoint
+python -m src.eval env=pickplace                 # eval pickplace checkpoint
+python -m src.eval model=best                    # eval best model
+python -m src.eval model=path/to/model.zip       # eval specific model
+python -m src.show_starts                        # visualize spawn positions
 ```
 
 When launching training from an agent (no interactive shell), wrap with
 `conda run` and redirect to a log file, e.g.:
 
 ```bash
-conda run -n mujoco_env python train.py env=pickplace > run.log 2>&1
+conda run -n mujoco_env python -m src.train env=pickplace > run.log 2>&1
 ```
 
 `env=pickplace` and any other Hydra overrides are optional / swappable. Run it

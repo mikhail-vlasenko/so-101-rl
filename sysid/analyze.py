@@ -16,7 +16,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from base_env import JOINT_NAMES
+from src.base_env import JOINT_NAMES
 from sysid.io import (
     OUT_DIR,
     OUT_DIR_PLOTS,

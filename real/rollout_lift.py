@@ -36,7 +36,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from stable_baselines3 import PPO
 
-from base_env import JOINT_NAMES, action_to_target
+from src.base_env import JOINT_NAMES, action_to_target
 
 from .twin.constants import (
     MAX_RAW_DELTA_PER_STEP,

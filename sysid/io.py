@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from base_env import JOINT_NAMES
+from src.base_env import JOINT_NAMES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "sysid_logs"

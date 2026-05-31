@@ -13,7 +13,7 @@ import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from reach_env import SO101ReachEnv
+from src.reach_env import SO101ReachEnv
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

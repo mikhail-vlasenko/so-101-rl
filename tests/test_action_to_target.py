@@ -5,7 +5,7 @@ bridges sim→real by zeroing sub-deadzone commands and rounding to raw units.
 import numpy as np
 import pytest
 
-from base_env import SERVO_DEADZONE_RAW, SERVO_RAW_UNIT_RAD, action_to_target
+from src.base_env import SERVO_DEADZONE_RAW, SERVO_RAW_UNIT_RAD, action_to_target
 
 
 JOINT_LOW = np.full(6, -2.0)

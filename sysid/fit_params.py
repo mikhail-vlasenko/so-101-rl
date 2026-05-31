@@ -25,7 +25,7 @@ import mujoco
 import numpy as np
 from scipy.optimize import differential_evolution
 
-from base_env import JOINT_NAMES
+from src.base_env import JOINT_NAMES
 from sysid.io import OUT_DIR, OUT_DIR_REAL, REPO_ROOT, read_log
 from sysid.replay_sim import n_substeps_for, run_one
 

@@ -10,16 +10,16 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecNormalize
-from callbacks import (
+from src.callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EvalStatsCallback,
     EvalStatsTracker, FloorContactCallback, MaxCubeHeightCallback,
     MeanReturnCallback, ReachStatsCallback, RingContactCallback, TimeLimitCallback,
     XYProgressCallback,
 )
-from networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
-from lift_env import SO101LiftEnv
-from pickplace_env import SO101PickPlaceEnv
-from reach_env import SO101ReachEnv
+from src.networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
+from src.lift_env import SO101LiftEnv
+from src.pickplace_env import SO101PickPlaceEnv
+from src.reach_env import SO101ReachEnv
 
 
 def make_lr_schedule(name: str, initial_lr: float, min_lr: float):
@@ -236,7 +236,7 @@ def train(cfg: DictConfig):
     eval_env.close()
 
 
-@hydra.main(config_path="conf", config_name="config", version_base=None)
+@hydra.main(config_path="../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     train(cfg)
 

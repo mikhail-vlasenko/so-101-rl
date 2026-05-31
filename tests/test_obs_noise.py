@@ -11,8 +11,8 @@ import pytest
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
-from lift_env import SO101LiftEnv
-from pickplace_env import SO101PickPlaceEnv
+from src.lift_env import SO101LiftEnv
+from src.pickplace_env import SO101PickPlaceEnv
 
 
 SIGMAS = {

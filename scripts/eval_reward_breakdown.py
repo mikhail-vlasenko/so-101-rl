@@ -9,7 +9,7 @@ import numpy as np
 import yaml
 from stable_baselines3 import PPO
 
-from pickplace_env import (
+from src.pickplace_env import (
     SO101PickPlaceEnv,
     TIME_PENALTY, JOINT_PASSIVE_COEFF,
     XY_PROGRESS_COEFF, EE_CUBE_COEFF,

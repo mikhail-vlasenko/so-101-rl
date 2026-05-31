@@ -3,7 +3,7 @@
 import numpy as np
 import mujoco
 
-from base_env import SO101BaseEnv
+from src.base_env import SO101BaseEnv
 
 
 # Reward constants

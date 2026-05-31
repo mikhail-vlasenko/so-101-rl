@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from hydra import compose, initialize
 
-from pickplace_env import SO101PickPlaceEnv, XY_PROGRESS_COEFF, GRASP_HOLD_REWARD
+from src.pickplace_env import SO101PickPlaceEnv, XY_PROGRESS_COEFF, GRASP_HOLD_REWARD
 
 
 @pytest.fixture(scope="module")

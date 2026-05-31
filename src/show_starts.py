@@ -8,10 +8,10 @@ import time
 import hydra
 from omegaconf import DictConfig
 
-from pickplace_env import SO101PickPlaceEnv
+from src.pickplace_env import SO101PickPlaceEnv
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
 def main(cfg: DictConfig):
     env = SO101PickPlaceEnv(render_mode="human", env_cfg=cfg["pickplace_env"])
     try:

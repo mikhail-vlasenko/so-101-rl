@@ -14,7 +14,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from base_env import JOINT_NAMES
+from src.base_env import JOINT_NAMES
 from sysid.trajectories import HOME, TRAJECTORIES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
