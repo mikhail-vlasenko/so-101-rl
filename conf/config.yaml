@@ -11,9 +11,10 @@ render: true   # eval.py only: false for headless metric collection
 
 # Per-step joint-space delta (rad) when |action|=1. Shared across all envs so
 # the policy's notion of "one step" is uniform — env yamls reference this as
-# ${action_scale}. At 15 Hz this caps joint velocity at action_scale*15 rad/s
-# (0.035 → ~0.52 rad/s ≈ 30°/s, deliberately slow for tabletop manipulation).
-action_scale: 0.035
+# ${action_scale}, and the twin reuses it as the manual-control target leash.
+# At 15 Hz this caps joint velocity at action_scale*15 rad/s
+# (0.07 → ~1.05 rad/s ≈ 60°/s).
+action_scale: 0.07
 
 # Per-step Gaussian noise added to observations during training (sim2real domain randomization).
 # Noise is applied at the source (qpos, qvel, ee_pos, cube_pos); derived obs (cube_to_target)
