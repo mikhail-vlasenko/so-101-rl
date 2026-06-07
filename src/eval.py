@@ -17,31 +17,13 @@ from omegaconf import DictConfig
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 
+from src.checkpoints import resolve_model_path
 from src.train import ENV_REGISTRY, _resolve_env, make_env
 
 ALGORITHM_CLASSES = {
     "sac": SAC,
     "ppo": PPO,
 }
-
-
-def _find_latest_checkpoint(checkpoint_dir: str) -> str:
-    """Find the most recently created checkpoint file."""
-    zips = [f for f in os.listdir(checkpoint_dir) if f.endswith(".zip")]
-    if not zips:
-        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
-    return max(
-        (os.path.join(checkpoint_dir, f) for f in zips),
-        key=os.path.getmtime,
-    )
-
-
-def _resolve_model_path(model_arg: str, log_dir: str) -> str:
-    if model_arg == "latest":
-        return _find_latest_checkpoint(os.path.join(log_dir, "checkpoints"))
-    if model_arg == "best":
-        return os.path.join(log_dir, "best_model.zip")
-    return model_arg
 
 
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
@@ -57,7 +39,7 @@ def main(cfg: DictConfig):
 
     log_dir = os.path.join(orig_dir, "logs", f"{algo_name}_{cfg.env_name}")
     model_arg = cfg.get("model", "latest")
-    model_path = _resolve_model_path(model_arg, log_dir)
+    model_path = resolve_model_path(model_arg, log_dir)
 
     episodes = int(cfg.get("episodes", 10))
     deterministic = bool(cfg.get("deterministic", True))

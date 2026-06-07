@@ -1,9 +1,10 @@
 """Roll out the trained reach policy on the real SO-101 arm.
 
 Usage:
-    python -m real.rollout_real                       # default: waypoint 0, dry-run
+    python -m real.rollout_real                       # default: waypoint 0, dry-run, latest checkpoint
     python -m real.rollout_real --execute             # actually send commands
     python -m real.rollout_real --waypoint 2 --execute
+    python -m real.rollout_real --model best --execute        # best_model.zip
     python -m real.rollout_real --model logs/ppo_reach/best_model.zip --execute
 
 Safety:
@@ -35,12 +36,15 @@ from .twin.constants import (
     SERVO_POSITION_KP,
     SERVO_SPEED,
 )
+from src.checkpoints import resolve_model_path
+
 from .twin.mapping import JOINT_NAMES, compute_ee_pos, load_joint_maps, rad_to_raw, raw_to_rad
 from .twin.servo_io import ServoBus
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 DEFAULT_CAL = REPO_ROOT.parent / "feetech-servo-sdk" / "calibration.json"
+LOG_DIR = REPO_ROOT / "logs" / "ppo_reach"
 
 def _load_reach_cfg() -> tuple[dict, int]:
     """Compose the full Hydra config with env=reach so ${action_scale} (and any
@@ -56,7 +60,8 @@ def _load_reach_cfg() -> tuple[dict, int]:
 def parse_args(reach_cfg: dict) -> argparse.Namespace:
     n_waypoints = len(reach_cfg["waypoints"])
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="logs/ppo_reach/final_model.zip")
+    p.add_argument("--model", default="latest",
+                   help="'latest' (newest checkpoint), 'best', or a path to a .zip")
     p.add_argument("--waypoint", type=int, default=0,
                    help=f"Which of the {n_waypoints} fixed waypoints to target (0-indexed)")
     p.add_argument("--execute", action="store_true",
@@ -190,7 +195,9 @@ def main() -> int:
     target_qpos_goal = waypoints[args.waypoint]
     target_ee_goal = compute_ee_pos(model, data, qposadr, target_qpos_goal, ee_site_id)
 
-    policy = PPO.load(args.model)
+    model_path = resolve_model_path(args.model, str(LOG_DIR))
+    print(f"loading model: {model_path}")
+    policy = PPO.load(model_path)
     expected_obs = 2 * 6 + 3 + n_waypoints + prev_actions_n * 6
     assert policy.observation_space.shape[0] == expected_obs, (
         f"Obs dim mismatch: model expects {policy.observation_space.shape}, "

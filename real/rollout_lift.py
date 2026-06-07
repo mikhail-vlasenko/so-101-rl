@@ -11,8 +11,9 @@ sim cube and any physical object. It is a "what does the policy do on the real
 hardware when it thinks there is a cube there" tool.
 
 Usage:
-    python -m real.rollout_lift                         # dry-run, default checkpoint
+    python -m real.rollout_lift                         # dry-run, latest checkpoint
     python -m real.rollout_lift --execute               # actually drive the servos
+    python -m real.rollout_lift --model best --execute  # best_model.zip
     python -m real.rollout_lift --model logs/ppo_lift/checkpoints/ppo_4000000_steps.zip --execute
     python -m real.rollout_lift --seed 0 --execute      # reproducible cube spawn
 
@@ -37,21 +38,23 @@ from omegaconf import OmegaConf
 from stable_baselines3 import PPO
 
 from src.base_env import JOINT_NAMES, action_to_target
+from src.checkpoints import resolve_model_path
 
 from .twin.constants import (
-    MAX_RAW_DELTA_PER_STEP,
+    INTERP_HZ,
     SERVO_ACCEL,
     SERVO_POSITION_DEADZONE,
     SERVO_POSITION_KP,
     SERVO_SPEED,
 )
+from .twin.control import clamp_raw_delta, stream_sub_targets
 from .twin.mapping import load_joint_maps, rad_to_raw, raw_to_rad
 from .twin.servo_io import ServoBus
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene_lift.xml"
 DEFAULT_CAL = REPO_ROOT / "real" / "follower_calibration.json"
-DEFAULT_MODEL = REPO_ROOT / "logs" / "ppo_lift" / "checkpoints" / "ppo_4000000_steps.zip"
+LOG_DIR = REPO_ROOT / "logs" / "ppo_lift"
 
 LIFT_TASK_ID = 0.0
 
@@ -65,7 +68,8 @@ def _load_lift_cfg() -> tuple[dict, int]:
 
 def parse_args(lift_cfg: dict) -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default=str(DEFAULT_MODEL))
+    p.add_argument("--model", default="latest",
+                   help="'latest' (newest checkpoint), 'best', or a path to a .zip")
     p.add_argument("--execute", action="store_true",
                    help="Actually send servo commands. Default: dry-run.")
     p.add_argument("--max-steps", type=int, default=int(lift_cfg["max_steps"]))
@@ -78,7 +82,7 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
     p.add_argument("--cal", default=str(DEFAULT_CAL))
     p.add_argument("--no-view", action="store_true",
                    help="Disable the MuJoCo passive viewer.")
-    p.add_argument("--interp-hz", type=float, default=100.0,
+    p.add_argument("--interp-hz", type=float, default=INTERP_HZ,
                    help="Rate at which interpolated sub-targets are written to "
                         "the bus between policy ticks. Linearly slides from the "
                         "previous commanded target to the new one across each "
@@ -212,7 +216,9 @@ def main() -> int:
     cube_qposadr = int(model.jnt_qposadr[cube_joint_id])
 
     expected_obs = 22 + prev_actions_n * 6
-    policy = PPO.load(args.model)
+    model_path = resolve_model_path(args.model, str(LOG_DIR))
+    print(f"loading model: {model_path}")
+    policy = PPO.load(model_path)
     assert policy.observation_space.shape[0] == expected_obs, (
         f"Obs dim mismatch: model expects {policy.observation_space.shape}, "
         f"lift env produces {expected_obs}-dim."
@@ -268,10 +274,13 @@ def main() -> int:
         print(f"interpolation: {n_interp} sub-targets/tick "
               f"({1.0 / sub_dt:.1f} Hz write rate)")
         step = 0
-        t_loop = time.time()
         prev_raw_target = raw0.copy()
         prev_actions = np.zeros((prev_actions_n, 6), dtype=np.float32)
         action_ema: np.ndarray | None = None
+
+        def write_raw(raw: np.ndarray) -> None:
+            if args.execute:
+                bus.write_all(raw, SERVO_SPEED, SERVO_ACCEL)
 
         log_rows: list[dict] = []
 
@@ -297,26 +306,9 @@ def main() -> int:
             target_qpos = action_to_target(qpos, action, action_scale, xml_low, xml_high)
             target_raw = rad_to_raw(target_qpos, jm, direction)
 
-            delta = np.clip(target_raw - prev_raw_target,
-                            -MAX_RAW_DELTA_PER_STEP, MAX_RAW_DELTA_PER_STEP)
-            target_raw = (prev_raw_target + delta).astype(np.int64)
-
-            # Interpolated sub-target stream: slide the commanded raw target
-            # from prev_raw_target to target_raw across the control period so
-            # the servo's trapezoid never restarts from rest.
-            start_raw = prev_raw_target.astype(np.float64)
-            end_raw = target_raw.astype(np.float64)
-            for sub in range(n_interp):
-                alpha = (sub + 1) / n_interp
-                interp_raw = (start_raw + alpha * (end_raw - start_raw)).round().astype(np.int64)
-                if args.execute:
-                    bus.write_all(interp_raw, SERVO_SPEED, SERVO_ACCEL)
-                sub_t_next = t_loop + (sub + 1) * sub_dt
-                sleep_for = sub_t_next - time.time()
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
+            target_raw = clamp_raw_delta(prev_raw_target, target_raw)
+            stream_sub_targets(prev_raw_target, target_raw, n_interp, sub_dt, write_raw)
             prev_raw_target = target_raw
-            t_loop = time.time()
 
             # Read the real arm, write the new state into the sim, and step the
             # sim so the cube responds to gripper/floor contacts.
