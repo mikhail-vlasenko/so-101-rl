@@ -19,8 +19,10 @@ from pathlib import Path
 import mujoco
 import mujoco.viewer
 import numpy as np
+from omegaconf import OmegaConf
 
-from .constants import MAX_RAW_DELTA_PER_STEP, SERVO_ACCEL, SERVO_SPEED
+from .constants import INTERP_HZ, SERVO_ACCEL, SERVO_SPEED
+from .control import clamp_raw_delta, stream_sub_targets
 from .gamepad import gamepad_worker
 from .gui import CONTROL, MIRROR, TwinState, run as run_gui
 from .mapping import JointMaps, load_joint_maps, rad_to_raw, raw_to_norm
@@ -29,6 +31,7 @@ from .servo_io import ServoBus
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 DEFAULT_CAL = REPO_ROOT / "real" / "follower_calibration.json"
+CONFIG_YAML = REPO_ROOT / "conf" / "config.yaml"
 
 READ_HZ = 15.0
 RENDER_HZ = 60.0
@@ -63,6 +66,13 @@ def print_mapping_header(jm: JointMaps) -> None:
 
 def servo_worker(state: TwinState, bus: ServoBus, jm: JointMaps) -> None:
     period = 1.0 / READ_HZ
+    n_interp = max(1, round(INTERP_HZ / READ_HZ))
+    sub_dt = period / n_interp
+
+    def write_raw(raw: np.ndarray) -> None:
+        with state.bus_lock:
+            bus.write_all(raw, SERVO_SPEED, SERVO_ACCEL)
+
     next_t = time.monotonic()
     last_log_t = time.monotonic()
     reads_since_log = 0
@@ -74,17 +84,22 @@ def servo_worker(state: TwinState, bus: ServoBus, jm: JointMaps) -> None:
             mode = state.mode
             targets_rad = state.targets_rad.copy()
             prev = state.prev_raw_target.copy()
+            direction = state.direction.copy()
 
         if mode == CONTROL:
-            with state.lock:
-                direction = state.direction.copy()
-            target_raw = rad_to_raw(targets_rad, jm, direction)
-            delta = np.clip(target_raw - prev, -MAX_RAW_DELTA_PER_STEP, MAX_RAW_DELTA_PER_STEP)
-            target_raw = (prev + delta).astype(np.int64)
-            with state.bus_lock:
-                bus.write_all(target_raw, SERVO_SPEED, SERVO_ACCEL)
+            target_raw = clamp_raw_delta(prev, rad_to_raw(targets_rad, jm, direction))
+            # Streaming sub-targets across the period is what paces this tick.
+            stream_sub_targets(prev, target_raw, n_interp, sub_dt, write_raw)
             with state.lock:
                 state.prev_raw_target = target_raw
+            next_t = time.monotonic()
+        else:
+            next_t += period
+            sleep = next_t - time.monotonic()
+            if sleep > 0:
+                time.sleep(sleep)
+            else:
+                next_t = time.monotonic()
 
         reads_since_log += 1
         now = time.monotonic()
@@ -93,13 +108,6 @@ def servo_worker(state: TwinState, bus: ServoBus, jm: JointMaps) -> None:
                 state.read_hz = reads_since_log / (now - last_log_t)
             last_log_t = now
             reads_since_log = 0
-
-        next_t += period
-        sleep = next_t - time.monotonic()
-        if sleep > 0:
-            time.sleep(sleep)
-        else:
-            next_t = time.monotonic()
 
 
 def make_enter_control(state: TwinState, bus: ServoBus, jm: JointMaps):
@@ -208,8 +216,12 @@ def main() -> int:
     worker = threading.Thread(target=servo_worker, args=(state, bus, jm),
                               name="servo-worker", daemon=True)
     viewer_thread = threading.Thread(target=viewer_loop, name="mj-viewer", daemon=True)
+    # action_scale is the policy's per-step joint delta; reuse it as the manual
+    # target leash so the gamepad moves at the same scale the policy would.
+    action_scale = float(OmegaConf.load(CONFIG_YAML)["action_scale"])
     gamepad_thread = threading.Thread(
-        target=gamepad_worker, args=(state, jm, gamepad_mode_toggle, estop),
+        target=gamepad_worker,
+        args=(state, jm, gamepad_mode_toggle, estop, action_scale),
         name="gamepad", daemon=True,
     )
 

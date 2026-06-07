@@ -16,16 +16,24 @@ MAX_RAW_DELTA_PER_STEP = 35
 # leaves headroom so speed is never the binding limit.
 SERVO_SPEED = 1500
 
+# Sub-target interpolation rate (Hz). Between consecutive control ticks the
+# clamped raw target is resampled into waypoints at this rate and streamed to
+# the bus, so the (deliberately slow) SERVO_ACCEL ramp stays in its
+# always-ramping regime instead of restarting from rest each tick. 100 Hz over
+# a 15 Hz control rate gives ~7 waypoints/tick. Shared by the twin's CONTROL
+# mode and the policy rollout.
+INTERP_HZ = 100.0
+
 # SyncWritePosEx acceleration argument. Range 0-254, units 8.7 deg/s^2.
-# 5 -> ~44 deg/s^2 (~0.76 rad/s^2). Deliberately too low to let the servo
-# finish its trapezoidal ramp inside one 67ms (15Hz) control period — so the
-# joint stays in the acceleration phase and never hits the decel-and-settle
-# cusp before the next target arrives. Without this, position control at low
-# Hz produces a 15Hz square-wave velocity excitation that visibly shakes the
-# arm (accel→cruise→decel→park→repeat) even when the commanded targets are
-# perfectly smooth. 15 was empirically still too snappy; 5 is in the
-# "always-ramping" regime.
-SERVO_ACCEL = 5
+# 10 -> ~87 deg/s^2 (~1.5 rad/s^2). Earlier this was held at 5 to keep the
+# servo permanently ramping so the 15Hz square-wave velocity excitation
+# (accel→cruise→decel→park→repeat) couldn't shake the arm — but that made
+# manual control feel laggy, since each coarse target arrived faster than the
+# servo could crawl into it. Now that both the twin and the rollout stream
+# interpolated sub-targets at INTERP_HZ, the servo always has a fresh point a
+# few ms ahead and never reaches the decel cusp, so the accel can be raised for
+# responsiveness without reintroducing the shake.
+SERVO_ACCEL = 10
 
 # Position-loop P gain (Feetech SMS-STS register addr 21), per joint in
 # JOINT_NAMES order (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,

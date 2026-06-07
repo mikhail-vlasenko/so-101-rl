@@ -29,7 +29,7 @@ import numpy as np
 from evdev import InputDevice, ecodes, list_devices
 
 from .gui import CONTROL, SPEED_MULTIPLIERS, TwinState
-from .mapping import JointMaps
+from .mapping import JointMaps, raw_to_rad
 
 # DualSense via hid-playstation reports sticks as unsigned bytes 0..255
 # centered at ~128, NOT signed shorts. Normalize as (v - center) / half.
@@ -129,8 +129,15 @@ def _reader_loop(dev: InputDevice, gp: GamepadState, lock: threading.Lock,
 
 def gamepad_worker(state: TwinState, jm: JointMaps,
                    on_mode_toggle: Callable[[], None],
-                   on_estop: Callable[[], None]) -> None:
-    """Run the gamepad reader + integrator. Daemon-thread entry point."""
+                   on_estop: Callable[[], None],
+                   max_target_lead_rad: float) -> None:
+    """Run the gamepad reader + integrator. Daemon-thread entry point.
+
+    `max_target_lead_rad` is the policy's per-step action_scale: it caps how far
+    the integrated target may lead the measured arm, so manual control moves at
+    the same peak joint velocity (action_scale·control_hz) the policy uses and
+    the target can't wind up ahead of what the servo can follow.
+    """
     dev = find_dualsense()
     if dev is None:
         print("[gamepad] no DualSense found; controller input disabled")
@@ -182,6 +189,8 @@ def gamepad_worker(state: TwinState, jm: JointMaps,
             mode = state.mode
             tgt = state.targets_rad.copy()
             speed_mult = SPEED_MULTIPLIERS[state.speed_idx]
+            cur_raw = state.latest_raw_read.copy()
+            direction = state.direction.copy()
 
         if mode == CONTROL:
             vel = np.zeros(6, dtype=np.float64)
@@ -193,6 +202,11 @@ def gamepad_worker(state: TwinState, jm: JointMaps,
             vel[GRIPPER]    = (1.0 if l1 else 0.0) - l2
             tgt = tgt + vel * MAX_SPEED_RAD_S * speed_mult * dt
             tgt = np.clip(tgt, xml_low, xml_high)
+            # Leash the target to the live arm at one policy step (action_scale)
+            # so it can't wind up ahead of what the servo can follow; releasing
+            # the stick then stops promptly.
+            cur = raw_to_rad(cur_raw, jm, direction)
+            tgt = np.clip(tgt, cur - max_target_lead_rad, cur + max_target_lead_rad)
             with state.lock:
                 if state.mode == CONTROL:
                     state.targets_rad = tgt
