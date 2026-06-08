@@ -35,3 +35,11 @@ ROLES = {
     0: "wrist", 1: "finger", 2: "base",
     10: "table", 11: "table", 12: "table",
 }
+
+# Camera capture settings tuned for marker detection on this rig (shared by the
+# viewer, the pose step, and deployment). Manual exposure kills motion blur.
+# 100 = 10 ms, which also spans one full 50 Hz-mains flicker cycle so the lighting
+# banding cancels; shorter exposures showed rolling horizontal bands. Gain is
+# maxed to keep that short exposure bright enough.
+MARKER_EXPOSURE = 100        # exposure_time_absolute, 100 us units (-> 10 ms)
+MARKER_GAIN = 255            # sensor gain 0-255

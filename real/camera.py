@@ -30,8 +30,23 @@ def v4l2_set(ctrl, value, device=DEVICE):
                    check=True)
 
 
+def set_exposure(value, device=DEVICE):
+    """Switch to manual exposure and set exposure_time_absolute (100 us units).
+
+    Also pins the framerate so the camera can't lengthen exposure by dropping FPS.
+    Lower value = less motion blur but darker; raise gain to compensate.
+    """
+    v4l2_set("auto_exposure", 1, device)               # 1 = manual exposure mode
+    v4l2_set("exposure_dynamic_framerate", 0, device)
+    v4l2_set("exposure_time_absolute", int(value), device)
+
+
+def set_auto_exposure(device=DEVICE):
+    v4l2_set("auto_exposure", 3, device)               # 3 = aperture priority (auto)
+
+
 def open_camera(device=DEVICE, width=WIDTH, height=HEIGHT, warmup=WARMUP_FRAMES,
-                focus=None):
+                focus=None, exposure=None, gain=None):
     """Open the C922 in MJPG at the configured resolution and warm it up.
 
     Warmup discards the first few frames so auto-exposure/white-balance settle.
@@ -41,6 +56,12 @@ def open_camera(device=DEVICE, width=WIDTH, height=HEIGHT, warmup=WARMUP_FRAMES,
                   (step 5; 0=far, 250=near). Required for intrinsic calibration
                   and for any rig that consumes those intrinsics — calibration and
                   deployment MUST use the same value, or the focal length differs.
+    `exposure` controls motion blur:
+      - None      leave auto-exposure on (long exposure indoors -> blur on motion).
+      - int 3-2047 switch to manual exposure and set `exposure_time_absolute` (units
+                  of 100 us; lower = sharper but darker). Also pins the framerate so
+                  the camera can't lengthen exposure by dropping FPS.
+    `gain` (0-255) brightens the manual-exposure image without lengthening it.
     Raises RuntimeError if the device can't be opened — fail loud, no silent None.
     """
     cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
@@ -54,6 +75,10 @@ def open_camera(device=DEVICE, width=WIDTH, height=HEIGHT, warmup=WARMUP_FRAMES,
         # this camera, so the lens would stay at the wrong position otherwise.
         v4l2_set("focus_automatic_continuous", 0, device)
         v4l2_set("focus_absolute", focus, device)
+    if exposure is not None:
+        set_exposure(exposure, device)
+    if gain is not None:
+        v4l2_set("gain", gain, device)
     for _ in range(warmup):
         cap.read()
     return cap
