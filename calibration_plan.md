@@ -13,19 +13,98 @@ policy code is identical sim→real; only a thin wrapper applies the calibration
 EE bias is *not* measured separately: EE position is computed via forward
 kinematics from calibrated qpos, so once qpos is right, EE is right.
 
-## Procedure (ArUco-based)
+(Optional, beyond this plan: the wrist tag below can also feed the EE
+observation *live* instead of via FK, turning open-loop encoder trust into
+closed-loop visual feedback that self-corrects residual calibration error. This
+plan covers the offline-bias approach; live EE is an extension.)
+
+## Fiducial markers
+
+We print both ArUco and AprilTag families and choose later — the pipeline is
+marker-agnostic. Notes for the choice:
+- AprilTag (`tag36h11`) is more robust to motion blur and small apparent size,
+  but needs its native detector (`pupil-apriltags`) for that robustness;
+  OpenCV's `aruco` module can *decode* AprilTag dictionaries yet still detects
+  them with the ArUco pipeline, so it doesn't buy the blur robustness.
+- ArUco is simpler and native to OpenCV, and its **ChArUco** board is the
+  better target for the camera-intrinsics pass.
+
+Tags serve two distinct jobs — world frame vs. end-effector:
+
+| Tag | Frame | Role |
+|-----|-------|------|
+| table (≥1, known layout) | world / base | camera extrinsics; re-localize if the camera is moved |
+| arm base | robot base | ties the base frame into the world without trusting the bolt position |
+| wrist (rigid gripper body) | EE | primary end-effector pose source / Step-1 marker |
+| static finger | EE | bonus EE detection; expect occlusion during grasp and peel risk |
+
+Mounting rules:
+- **Unique ID per tag, recorded** (e.g. 0=wrist, 1=finger, 2=base, 10–13=table).
+  The detector tells tags apart only by ID.
+- **Per-ID physical size in config**: table/base tags large (far-range
+  accuracy), EE tags small to fit. The solver needs the true printed size per ID.
+- **Flat and rigid.** Double-sided tape is fine, but on the *moving* tags it can
+  creep — re-verify the EE tags after collisions. A tag taped to a curved finger
+  won't be planar and will bias the pose.
+- **Table tags need a known layout** to localize against: either a
+  known-geometry board (ChArUco / AprilGrid) or measure scattered singles into
+  the table frame once (pick one tag as the origin).
+
+## Procedure (fiducial-based)
 
 Hardware:
-- Calibrated camera (intrinsics from a checkerboard pass).
-- Two ArUco markers: one rigidly mounted on the gripper, one on the cube
-  (or its placeholder for cube-channel calibration).
-- The arm bolted to a known frame (define base frame from a fixed fiducial on
-  the table).
+- Calibrated camera (intrinsics from a ChArUco or checkerboard pass). **Done — see
+  Step 0.**
+- The fiducials above: wrist tag (qpos / EE), a cube tag or marker block (cube
+  channel), table tags (base frame), arm-base tag (base cross-check).
+- The arm bolted to a known frame; base frame defined by the table tags and
+  cross-checked by the arm-base tag.
+
+### Step 0 — camera intrinsics (DONE)
+
+Calibrated the Logitech C922 from a plain checkerboard (8×10 squares = 7×9 inner
+corners, 20 mm). Result: **RMS ~0.21 px** over ~29 views, stable across repeat
+runs (`fx≈fy≈968`, `cx≈648`, `cy≈335`). Saved to `real/camera_intrinsics.yaml`
+(camera_matrix, dist_coeffs, focus_absolute, pattern, square size).
+
+Tools (all in `real/`):
+- `calibrate_camera.py` — live checkerboard capture + `cv2.calibrateCamera`.
+  Auto-detects the inner-corner count, captures only when the board is *still*
+  (no motion blur), and auto-prunes outlier views before the final fit.
+- `focus_picker.py` — sharpness sweep (variance of Laplacian) to choose a focus.
+- `camera.py` — `open_camera` / `v4l2_set`, the single source of camera settings.
+
+What we learned (C922 / UVC quirks — don't relitigate):
+- **What actually fixed the high RMS (1.67 px → ~0.2):** two script changes that
+  landed together — capturing only when the board is *still* (kills motion blur)
+  and freezing focus (no autofocus drift between views). They changed in the same
+  run, so we can't attribute the gain to one over the other; both matter. The
+  sheet was unchanged between those runs, so board flatness was *not* the cause
+  here — though a rigid flat backing is still good practice (a bowed sheet biases
+  pose) and worth doing for the pose steps below.
+- **Hold the board, don't lay it flat.** Intrinsics need many *tilted* views at
+  varied distance with corners pushed into the frame edges. A single coplanar
+  shot is degenerate.
+- **Focus must be pinned and recorded.** Focus is locked at `focus_absolute=30`
+  (`FOCUS_ABSOLUTE` in `calibrate_camera.py`, also written to the YAML). The
+  intrinsics are valid *only* at that focus — **the rig must open the camera with
+  `focus=30`** or the focal length differs and the calibration is void.
+- **C922 `focus_absolute` is a manual target only.** With continuous autofocus
+  on, firmware drives the lens internally and never reports the position back (it
+  reads 0), so you can't "let AF settle and read the value" — pick focus by
+  sharpness sweep instead.
+- **OpenCV `CAP_PROP_FOCUS` silently no-ops** on this camera; set focus via
+  `v4l2-ctl` (`focus_automatic_continuous=0` then `focus_absolute=N`), which is
+  what `open_camera(focus=N)` now does.
+- Autofocus drifting between views was a real error source (`fx`/`fy` split apart
+  until we froze focus); blur from capturing mid-motion was another.
 
 ### Step 1 — qpos offsets
 
-1. Mount marker rigidly on the gripper; record its pose in the gripper frame
-   (mechanical CAD or a one-time hand-eye solve).
+1. Mount the wrist tag rigidly on the gripper body and fix its pose in the
+   gripper frame, `T_marker_in_gripper`. With a printed bracket this is known
+   from CAD; with double-sided tape it is unknown, so add it as free variables
+   in the Step-3 optimization (a joint hand-eye + encoder-bias solve).
 2. Drive the arm to ~10 well-spread poses (cover the workspace, avoid
    singularities). At each pose, record:
    - Encoder reading `θ_enc[6]`.
