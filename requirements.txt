@@ -1,3 +1,4 @@
 pyserial
 evdev
 scipy
+pupil-apriltags

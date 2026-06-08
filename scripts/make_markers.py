@@ -11,7 +11,7 @@ each family (ArUco id N and AprilTag id N are different markers in different
 dictionaries).
 
 Run:
-    conda run -n mujoco_env python scripts/make_markers.py
+    conda run -n mujoco_env python -m scripts.make_markers
 """
 import os
 
@@ -24,6 +24,8 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from matplotlib.backends.backend_pdf import PdfPages
 
+from real.marker_spec import FAMILIES, TAG_SIZE_MM
+
 PAGE_W_MM, PAGE_H_MM = 210.0, 297.0   # A4
 MARGIN_MM = 12.0
 GAP_MM = 8.0                          # spacing between printed cells
@@ -31,19 +33,17 @@ QUIET_MODULES = 1.0                   # white border baked around each tag, in m
 MARKER_PX = 400
 MM_PER_IN = 25.4
 
-FAMILIES = [("aruco", aruco.DICT_5X5_50), ("apriltag", aruco.DICT_APRILTAG_36h11)]
 OUT_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "markers", "markers.pdf"))
 
 
 def build_tags():
     """Flat list of (family, dict_id, tag_id, edge_mm), grouped 4 cm then 2 cm."""
     tags = []
-    for fam, dict_id in FAMILIES:          # 4 cm: 3 per family
-        for tid in (10, 11, 12):
-            tags.append((fam, dict_id, tid, 40.0))
-    for fam, dict_id in FAMILIES:          # 2 cm: 5 per family
-        for tid in (0, 1, 2, 3, 4):
-            tags.append((fam, dict_id, tid, 20.0))
+    for size_mm in (40.0, 20.0):
+        ids = sorted(tid for tid, s in TAG_SIZE_MM.items() if s == size_mm)
+        for fam, dict_id in FAMILIES.items():
+            for tid in ids:
+                tags.append((fam, dict_id, tid, size_mm))
     return tags
 
 

@@ -3,9 +3,20 @@
 Single source of truth for the capture device and the MJPG/resolution settings,
 so the calibration and frame-grab scripts don't each hard-code them.
 """
+import os
 import subprocess
 
 import cv2
+
+# cv2's pip-wheel Qt5 highgui sets QT_QPA_FONTDIR / the platform plugin path to
+# its own bundled dirs (the fonts dir doesn't exist), the session exports
+# "wayland;xcb" (its Qt5 has no Wayland plugin), and the Kvantum style override
+# can't load — so cv2.imshow spams qt.qpa warnings on this Hyprland session.
+# Override the bad values here: after cv2's import (which sets them) and before
+# the first highgui call. All GUI scripts import this module, so it's the one place.
+os.environ["QT_QPA_PLATFORM"] = "xcb"               # force XWayland; no Wayland plugin in cv2's Qt5
+os.environ["QT_QPA_FONTDIR"] = "/usr/share/fonts"   # cv2's bundled fonts dir is missing
+os.environ.pop("QT_STYLE_OVERRIDE", None)           # cv2's Qt can't load the system Kvantum style
 
 DEVICE = 0
 WIDTH = 1280
