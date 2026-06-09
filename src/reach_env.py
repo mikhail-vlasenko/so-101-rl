@@ -13,7 +13,8 @@ import mujoco
 import gymnasium as gym
 from gymnasium import spaces
 
-from src.base_env import JOINT_NAMES, action_to_target
+from src.base_env import JOINT_NAMES
+from src.units import action_to_target
 
 
 class SO101ReachEnv(gym.Env):

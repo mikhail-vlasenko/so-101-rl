@@ -6,74 +6,47 @@ Usage:
     python -m real.rollout_real --waypoint 2 --execute
     python -m real.rollout_real --model best --execute        # best_model.zip
     python -m real.rollout_real --model logs/ppo_reach/best_model.zip --execute
+    python -m real.rollout_real --slow 3 --execute    # 1/3 physical speed, no retraining
 
-Safety:
-  - --execute is OFF by default (dry-run prints intended targets, no servo writes)
-  - per-step raw-delta is clamped (constants.MAX_RAW_DELTA_PER_STEP)
-  - servos use low speed/accel from twin.constants
-  - Ctrl-C disables torque cleanly
+Setup, safety gating, and per-tick command shaping (training-matched
+quantization, raw clamp, sub-target streaming, --slow time dilation) all live
+in real.rollout_common — this script owns only the reach-specific observation,
+termination, and plots. --execute is OFF by default; Ctrl-C disables torque.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import signal
 import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import mujoco
 import numpy as np
-from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
-from stable_baselines3 import PPO
 
-
-from .twin.constants import (
-    MAX_RAW_DELTA_PER_STEP,
-    SERVO_ACCEL,
-    SERVO_POSITION_KP,
-    SERVO_SPEED,
+from .rollout_common import (
+    ArmLoop,
+    add_common_args,
+    install_sigint_flag,
+    load_env_cfg,
+    load_policy,
 )
-from src.checkpoints import resolve_model_path
-
-from .twin.mapping import JOINT_NAMES, compute_ee_pos, load_joint_maps, rad_to_raw, raw_to_rad
+from .twin.mapping import JOINT_NAMES, compute_ee_pos, load_joint_maps
 from .twin.servo_io import ServoBus
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
-DEFAULT_CAL = REPO_ROOT.parent / "feetech-servo-sdk" / "calibration.json"
 LOG_DIR = REPO_ROOT / "logs" / "ppo_reach"
-
-def _load_reach_cfg() -> tuple[dict, int]:
-    """Compose the full Hydra config with env=reach so ${action_scale} (and any
-    other interpolations) resolves to its top-level value in config.yaml.
-
-    Returns (reach_env_cfg, prev_actions_n) — prev_actions_n is a top-level
-    config field, must match what the trained policy expects."""
-    with initialize_config_dir(config_dir=str(REPO_ROOT / "conf"), version_base=None):
-        cfg = compose(config_name="config", overrides=["env=reach"])
-    return OmegaConf.to_container(cfg.reach_env, resolve=True), int(cfg.prev_actions_n)
 
 
 def parse_args(reach_cfg: dict) -> argparse.Namespace:
     n_waypoints = len(reach_cfg["waypoints"])
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="latest",
-                   help="'latest' (newest checkpoint), 'best', or a path to a .zip")
     p.add_argument("--waypoint", type=int, default=0,
                    help=f"Which of the {n_waypoints} fixed waypoints to target (0-indexed)")
-    p.add_argument("--execute", action="store_true",
-                   help="Actually send servo commands. Default: dry-run (read-only).")
-    p.add_argument("--max-steps", type=int, default=int(reach_cfg["max_steps"]))
-    p.add_argument("--ema-alpha", type=float, default=1.0,
-                   help="EMA smoothing on policy action: a_t = alpha*a + (1-alpha)*a_{t-1}. "
-                        "1.0 = off (default), lower = smoother but laggier. Try 0.3-0.5 to "
-                        "damp shaking from policy chatter.")
-    p.add_argument("--port", default="/dev/ttyACM0")
-    p.add_argument("--xml", default=str(DEFAULT_XML))
-    p.add_argument("--cal", default=str(DEFAULT_CAL))
+    add_common_args(p, default_xml=DEFAULT_XML,
+                    default_max_steps=int(reach_cfg["max_steps"]))
     return p.parse_args()
 
 
@@ -167,7 +140,7 @@ def build_obs(model: mujoco.MjModel, data: mujoco.MjData, qposadr: np.ndarray,
 
 
 def main() -> int:
-    reach_cfg, prev_actions_n = _load_reach_cfg()
+    reach_cfg, prev_actions_n = load_env_cfg("reach")
     waypoints = np.array(reach_cfg["waypoints"], dtype=np.float64)
     n_waypoints, n_joints_cfg = waypoints.shape
     assert n_joints_cfg == 6, f"waypoints must have 6 joints, got {n_joints_cfg}"
@@ -178,119 +151,55 @@ def main() -> int:
 
     args = parse_args(reach_cfg)
     assert 0 <= args.waypoint < n_waypoints
-    assert 0.0 < args.ema_alpha <= 1.0, f"--ema-alpha must be in (0, 1], got {args.ema_alpha}"
 
     model = mujoco.MjModel.from_xml_path(args.xml)
     data = mujoco.MjData(model)
-    # Control period is (timestep * n_substeps) — same definition the sim env uses.
-    control_dt = float(model.opt.timestep) * n_substeps
-    control_hz = 1.0 / control_dt
     jm = load_joint_maps(model, Path(args.cal))
     qposadr = jm.qposadr()
-    xml_low, xml_high = jm.xml_low(), jm.xml_high()
-    direction = np.ones(len(jm.items), dtype=np.int8)  # verified via twin: no inversions needed
     ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
     assert ee_site_id >= 0, "site 'gripperframe' not found in model"
 
     target_qpos_goal = waypoints[args.waypoint]
     target_ee_goal = compute_ee_pos(model, data, qposadr, target_qpos_goal, ee_site_id)
 
-    model_path = resolve_model_path(args.model, str(LOG_DIR))
-    print(f"loading model: {model_path}")
-    policy = PPO.load(model_path)
     expected_obs = 2 * 6 + 3 + n_waypoints + prev_actions_n * 6
-    assert policy.observation_space.shape[0] == expected_obs, (
-        f"Obs dim mismatch: model expects {policy.observation_space.shape}, "
-        f"reach env produces {expected_obs}-dim."
-    )
-
-    print(f"waypoint={args.waypoint} execute={args.execute} "
-          f"{control_hz:.1f}Hz action_scale={action_scale} ema={args.ema_alpha}")
+    policy = load_policy(args.model, LOG_DIR, expected_obs)
 
     bus = ServoBus(args.port, jm.servo_ids())
-    bus.connect()
+    loop = ArmLoop(model=model, n_substeps=n_substeps, jm=jm, bus=bus,
+                   action_scale=action_scale, prev_actions_n=prev_actions_n,
+                   execute=args.execute, ema_alpha=args.ema_alpha,
+                   slow=args.slow, interp_hz=args.interp_hz)
+    print(f"waypoint={args.waypoint} {loop.describe()}")
 
-    stopped = {"flag": False}
-    def stop(_sig, _frame) -> None:
-        stopped["flag"] = True
-    signal.signal(signal.SIGINT, stop)
+    bus.connect()
+    stopped = install_sigint_flag()
+
+    dwell_count = 0
+    step = 0
+    dist = float("nan")
+    log_steps: list[int] = []
+    log_actions: list[np.ndarray] = []
+    log_qpos: list[np.ndarray] = []
+    log_ee: list[np.ndarray] = []
+    log_dist: list[float] = []
 
     try:
-        raw0 = bus.read_all()
-        qpos = raw_to_rad(raw0, jm, direction)
-        qvel = np.zeros(6, dtype=np.float64)
-
-        slack = 0.05
-        if not (np.all(qpos >= xml_low - slack) and np.all(qpos <= xml_high + slack)):
-            print("ABORT: initial qpos outside MuJoCo joint range; check calibration.")
-            return 1
-
-        if args.execute:
-            bus.set_position_kp(SERVO_POSITION_KP)
-            bus.enable_torque_all()
-
-        dt = control_dt
-        dwell_count = 0
-        step = 0
-        t_loop = time.time()
-        prev_raw_target = raw0.copy()
-        prev_actions = np.zeros((prev_actions_n, 6), dtype=np.float32)
-        action_ema: np.ndarray | None = None
-
-        log_steps: list[int] = []
-        log_actions: list[np.ndarray] = []
-        log_qpos: list[np.ndarray] = []
-        log_ee: list[np.ndarray] = []
-        log_dist: list[float] = []
-
+        loop.boot()
         while not stopped["flag"] and step < args.max_steps:
-            obs = build_obs(model, data, qposadr, ee_site_id, qpos, qvel,
-                            args.waypoint, n_waypoints, prev_actions)
-            action, _ = policy.predict(obs, deterministic=True)
-            action = np.clip(action.astype(np.float64), -1.0, 1.0)
-            if action_ema is None:
-                action_ema = action.copy()
-            else:
-                action_ema = args.ema_alpha * action + (1.0 - args.ema_alpha) * action_ema
-            action = action_ema
-            # Mirror sim: the (clipped, smoothed) action becomes the most recent
-            # entry in the prev-actions buffer used for the NEXT obs.
-            if prev_actions_n > 0:
-                if prev_actions_n > 1:
-                    prev_actions[:-1] = prev_actions[1:]
-                prev_actions[-1] = action.astype(np.float32)
+            obs = build_obs(model, data, qposadr, ee_site_id, loop.qpos, loop.qvel,
+                            args.waypoint, n_waypoints, loop.prev_actions)
+            raw_action, _ = policy.predict(obs, deterministic=True)
+            action = loop.tick(raw_action)
 
-            target_qpos = np.clip(qpos + action * action_scale, xml_low, xml_high)
-            target_raw = rad_to_raw(target_qpos, jm, direction)
-
-            # Safety: clamp per-step raw delta vs. last commanded
-            delta = np.clip(target_raw - prev_raw_target,
-                            -MAX_RAW_DELTA_PER_STEP, MAX_RAW_DELTA_PER_STEP)
-            target_raw = (prev_raw_target + delta).astype(np.int64)
-
-            if args.execute:
-                bus.write_all(target_raw, SERVO_SPEED, SERVO_ACCEL)
-            prev_raw_target = target_raw
-
-            t_next = t_loop + dt
-            sleep_for = t_next - time.time()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            t_loop = time.time()
-
-            raw = bus.read_all()
-            new_qpos = raw_to_rad(raw, jm, direction)
-            qvel = (new_qpos - qpos) / dt
-            qpos = new_qpos
-
-            dist = float(np.linalg.norm(qpos - target_qpos_goal))
+            dist = float(np.linalg.norm(loop.qpos - target_qpos_goal))
             in_target = dist < tolerance
             dwell_count = dwell_count + 1 if in_target else 0
-            ee = compute_ee_pos(model, data, qposadr, qpos, ee_site_id)
+            ee = compute_ee_pos(model, data, qposadr, loop.qpos, ee_site_id)
 
             log_steps.append(step)
             log_actions.append(action.copy())
-            log_qpos.append(qpos.copy())
+            log_qpos.append(loop.qpos.copy())
             log_ee.append(ee.copy())
             log_dist.append(dist)
 
@@ -319,7 +228,7 @@ def main() -> int:
         ee_arr = np.stack(log_ee)
         dist_arr = np.array(log_dist)
         write_csv(csv_path, steps_arr, actions_arr, qpos_arr, ee_arr,
-                  dist_arr, tolerance, control_hz)
+                  dist_arr, tolerance, loop.control_hz)
         plot_rollout(
             steps=steps_arr,
             actions=actions_arr,
@@ -330,7 +239,7 @@ def main() -> int:
             target_ee=target_ee_goal,
             tolerance=tolerance,
             waypoint_idx=args.waypoint,
-            control_hz=control_hz,
+            control_hz=loop.control_hz,
             out_path=plot_path,
         )
         print(f"saved {csv_path.relative_to(REPO_ROOT)} {plot_path.relative_to(REPO_ROOT)}")

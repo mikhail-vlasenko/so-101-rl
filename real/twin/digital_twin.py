@@ -21,6 +21,8 @@ import mujoco.viewer
 import numpy as np
 from omegaconf import OmegaConf
 
+from src.units import max_raw_delta_per_step
+
 from .constants import INTERP_HZ, SERVO_ACCEL, SERVO_SPEED
 from .control import clamp_raw_delta, stream_sub_targets
 from .gamepad import gamepad_worker
@@ -64,7 +66,8 @@ def print_mapping_header(jm: JointMaps) -> None:
     print()
 
 
-def servo_worker(state: TwinState, bus: ServoBus, jm: JointMaps) -> None:
+def servo_worker(state: TwinState, bus: ServoBus, jm: JointMaps,
+                 max_raw_delta: int) -> None:
     period = 1.0 / READ_HZ
     n_interp = max(1, round(INTERP_HZ / READ_HZ))
     sub_dt = period / n_interp
@@ -87,7 +90,8 @@ def servo_worker(state: TwinState, bus: ServoBus, jm: JointMaps) -> None:
             direction = state.direction.copy()
 
         if mode == CONTROL:
-            target_raw = clamp_raw_delta(prev, rad_to_raw(targets_rad, jm, direction))
+            target_raw = clamp_raw_delta(prev, rad_to_raw(targets_rad, jm, direction),
+                                         max_raw_delta)
             # Streaming sub-targets across the period is what paces this tick.
             stream_sub_targets(prev, target_raw, n_interp, sub_dt, write_raw)
             with state.lock:
@@ -213,12 +217,15 @@ def main() -> int:
                 time.sleep(period)
         state.stop = True
 
-    worker = threading.Thread(target=servo_worker, args=(state, bus, jm),
+    # action_scale is the policy's per-step joint delta; reuse it as the manual
+    # target leash so the gamepad moves at the same scale the policy would, and
+    # derive the per-tick raw write clamp from it.
+    action_scale = float(OmegaConf.load(CONFIG_YAML)["action_scale"])
+    max_raw_delta = max_raw_delta_per_step(action_scale)
+
+    worker = threading.Thread(target=servo_worker, args=(state, bus, jm, max_raw_delta),
                               name="servo-worker", daemon=True)
     viewer_thread = threading.Thread(target=viewer_loop, name="mj-viewer", daemon=True)
-    # action_scale is the policy's per-step joint delta; reuse it as the manual
-    # target leash so the gamepad moves at the same scale the policy would.
-    action_scale = float(OmegaConf.load(CONFIG_YAML)["action_scale"])
     gamepad_thread = threading.Thread(
         target=gamepad_worker,
         args=(state, jm, gamepad_mode_toggle, estop, action_scale),

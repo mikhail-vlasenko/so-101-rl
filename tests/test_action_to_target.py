@@ -2,10 +2,19 @@
 bridges sim→real by zeroing sub-deadzone commands and rounding to raw units.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
+from omegaconf import OmegaConf
 
-from src.base_env import SERVO_DEADZONE_RAW, SERVO_RAW_UNIT_RAD, action_to_target
+from src.units import (
+    SERVO_DEADZONE_RAW,
+    SERVO_RAW_UNIT_RAD,
+    action_to_target,
+    max_raw_delta_per_step,
+    rad_to_raw_units,
+)
 
 
 JOINT_LOW = np.full(6, -2.0)
@@ -84,3 +93,20 @@ def test_max_action_is_above_deadzone(action_scale):
         f"action_scale={action_scale}: max command is {raw_at_max:.2f} raw units, "
         f"which is below deadzone={SERVO_DEADZONE_RAW}. Increase action_scale."
     )
+
+
+@pytest.mark.parametrize("action_scale", [0.02, 0.035, 0.05, 0.07, 0.1])
+def test_raw_clamp_never_truncates_full_action(action_scale):
+    """The real-bus safety clamp must sit above the policy's max per-tick step,
+    otherwise in-distribution actions get silently truncated on the real arm."""
+    assert max_raw_delta_per_step(action_scale) >= rad_to_raw_units(action_scale)
+
+
+def test_raw_clamp_covers_configured_action_scale():
+    """Same invariant pinned to the *live* config, so raising action_scale in
+    conf/config.yaml can never silently outgrow the real-arm clamp again."""
+    config_yaml = Path(__file__).resolve().parent.parent / "conf" / "config.yaml"
+    cfg_action_scale = float(OmegaConf.load(config_yaml)["action_scale"])
+    assert max_raw_delta_per_step(cfg_action_scale) >= rad_to_raw_units(cfg_action_scale)
+    # And a full-scale action still clears the stiction deadzone.
+    assert rad_to_raw_units(cfg_action_scale) > SERVO_DEADZONE_RAW

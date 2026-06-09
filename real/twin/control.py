@@ -21,13 +21,13 @@ from typing import Callable
 
 import numpy as np
 
-from .constants import MAX_RAW_DELTA_PER_STEP
 
-
-def clamp_raw_delta(prev_raw: np.ndarray, target_raw: np.ndarray) -> np.ndarray:
-    """Limit the per-tick raw move to ±MAX_RAW_DELTA_PER_STEP so a large target
-    jump can't command a full-speed lunge."""
-    delta = np.clip(target_raw - prev_raw, -MAX_RAW_DELTA_PER_STEP, MAX_RAW_DELTA_PER_STEP)
+def clamp_raw_delta(prev_raw: np.ndarray, target_raw: np.ndarray,
+                    max_delta: int) -> np.ndarray:
+    """Limit the per-tick raw move to ±max_delta so a large target jump can't
+    command a full-speed lunge. Callers derive max_delta from the action scale
+    via `src.units.max_raw_delta_per_step`."""
+    delta = np.clip(target_raw - prev_raw, -max_delta, max_delta)
     return (prev_raw + delta).astype(np.int64)
 
 

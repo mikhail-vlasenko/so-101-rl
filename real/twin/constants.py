@@ -1,15 +1,10 @@
 """Shared servo-side safety / control constants for the real-arm tools.
 
-Imported by `digital_twin.py` (CONTROL-mode writes) and `rollout_real.py`
-(policy rollout writes). Single source of truth.
+Imported by `digital_twin.py` (CONTROL-mode writes) and the policy rollouts.
+Single source of truth for bus-level settings. Anything derived from
+`action_scale` (per-tick raw-delta clamp, speed limits) lives in `src.units`
+and is computed at runtime from the composed config — not hard-coded here.
 """
-
-# Per-step raw-position delta clamp (in servo units, 0-4095). With the SO-101's
-# 0.087°/unit, 35 units ≈ 3.05° per step. At 30 Hz that caps real-side joint
-# speed at ~1.6 rad/s, which sits just above the policy's max commanded step
-# (action_scale=0.05 rad ≈ 33 raw units) — leaving safety headroom without
-# silently truncating in-distribution commands.
-MAX_RAW_DELTA_PER_STEP = 35
 
 # SyncWritePosEx speed argument. Range 0-32767 (BIT15 = direction), units
 # 0.732 RPM. 1500 -> ~1100 RPM ceiling; well above what the policy commands,

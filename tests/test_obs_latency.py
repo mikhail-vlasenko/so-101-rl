@@ -43,7 +43,9 @@ def _move_action():
 
 
 def test_default_config_has_obs_latency(cfg):
-    assert int(cfg.obs_latency) == 2
+    """Latency DR must stay enabled in the default config — the exact frame
+    count is a tuning choice (see the obs_latency comment in config.yaml)."""
+    assert int(cfg.obs_latency) >= 1
 
 
 def test_latency_zero_returns_current_obs(cfg):

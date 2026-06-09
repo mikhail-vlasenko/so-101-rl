@@ -19,7 +19,8 @@ Long-term tasks and ideas live in `TODO.md` at the repo root. Check it for known
 
 ### Shared
 
-- `src/base_env.py` — Base Gymnasium env with MuJoCo setup, contact detection, rendering, reset/step skeleton (20-dim obs, 6-dim action)
+- `src/base_env.py` — Base Gymnasium env with MuJoCo setup, contact detection, rendering, reset/step skeleton (22 + 6·prev_actions_n obs dims, 6-dim action)
+- `src/units.py` — single source of truth for the action → rad → servo-raw-unit chain: `action_to_target` (quantization + stiction deadzone, used by sim envs and real rollouts alike) and `max_raw_delta_per_step(action_scale)` (per-tick real-bus safety clamp, always derived, never hard-coded)
 
 ### Lift
 
@@ -39,6 +40,7 @@ Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE 
 
 ## Real arm
 
+- `real/rollout_common.py` — shared core for every real-arm policy rollout: Hydra config compose, policy loading with obs-dim check, common CLI args (`--execute`, `--slow`, `--ema-alpha`, `--interp-hz`, ...), and `ArmLoop`, which owns the safety-critical per-tick command shaping (training-matched `action_to_target` quantization, derived raw clamp, sub-target streaming, `--slow` time dilation, sim-time qvel). `real/rollout_lift.py` and `real/rollout_real.py` build on it and own only observation construction, termination, and plots. New rollout scripts must go through `ArmLoop` — never reimplement the tick. Contract-tested against a fake bus in `tests/test_arm_loop.py`.
 - `real/twin/digital_twin.py` — MuJoCo passive viewer + tkinter side panel that mirrors the real SO-101 arm's encoders into MuJoCo and lets the user verify the rad↔raw mapping (live direction toggles per joint, raw/norm/rad readouts, optional slider control with torque-on). Built from scratch on raw `scservo_sdk`; does not import from other `real/*.py` files. Run with `python -m real.twin.digital_twin` (default port `/dev/ttyACM0`). Optional DualSense control (`real/twin/gamepad.py`): if a controller is connected, sticks/triggers drive `targets_rad` in CONTROL mode (LX=pan, LY=lift, RY=elbow, R1/R2=wrist_flex, RX=wrist_roll, L1/L2=gripper); D-pad up/down cycles SLOW/MED/FAST speed presets (Tk Up/Down keys do the same); Create toggles MIRROR↔CONTROL, PS is e-stop. Requires `evdev` (in `requirements.txt`); the user must be in the `input` group.
 
 ## Training

@@ -10,7 +10,7 @@ Output CSV schema matches sysid.replay_sim so analyze.py can compare directly.
 
 Safety:
   - --execute is OFF by default (dry-run reads positions only).
-  - Per-step raw-delta clamp from real.twin.constants.
+  - Per-step raw-delta clamp derived from action_scale (src.units).
   - Trajectories are validated against XML joint limits before connecting.
   - Ctrl-C triggers a clean torque-off via ServoBus.close().
 
@@ -26,20 +26,23 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+from omegaconf import OmegaConf
 
 from real.twin.constants import (
-    MAX_RAW_DELTA_PER_STEP,
     SERVO_ACCEL,
     SERVO_POSITION_KP,
     SERVO_SPEED,
 )
+from real.twin.control import clamp_raw_delta
 from real.twin.mapping import JointMaps, load_joint_maps, rad_to_raw, raw_to_rad
 from real.twin.servo_io import ServoBus
+from src.units import max_raw_delta_per_step
 from sysid.io import OUT_DIR_REAL, REPO_ROOT, write_log
 from sysid.trajectories import SYSID_DT, SYSID_HZ, TRAJECTORIES
 
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 DEFAULT_CAL = REPO_ROOT.parent / "feetech-servo-sdk" / "calibration.json"
+CONFIG_YAML = REPO_ROOT / "conf" / "config.yaml"
 HOMING_S = 3.0
 SETTLE_S = 0.5
 
@@ -50,7 +53,7 @@ def smooth_ramp(start: np.ndarray, end: np.ndarray, n_steps: int) -> np.ndarray:
 
 
 def stream(bus: ServoBus, targets: np.ndarray, jm: JointMaps, direction: np.ndarray,
-           prev_raw: np.ndarray, execute: bool,
+           prev_raw: np.ndarray, execute: bool, max_raw_delta: int,
            log_pos: list[np.ndarray] | None) -> np.ndarray:
     """Send each target row at SYSID_DT period, optionally recording measured pos.
 
@@ -58,9 +61,7 @@ def stream(bus: ServoBus, targets: np.ndarray, jm: JointMaps, direction: np.ndar
     t_loop = time.time()
     for i in range(len(targets)):
         target_raw = rad_to_raw(targets[i], jm, direction)
-        delta = np.clip(target_raw - prev_raw,
-                        -MAX_RAW_DELTA_PER_STEP, MAX_RAW_DELTA_PER_STEP)
-        target_raw = (prev_raw + delta).astype(np.int64)
+        target_raw = clamp_raw_delta(prev_raw, target_raw, max_raw_delta)
         if execute:
             bus.write_all(target_raw, SERVO_SPEED, SERVO_ACCEL)
         prev_raw = target_raw
@@ -78,20 +79,23 @@ def stream(bus: ServoBus, targets: np.ndarray, jm: JointMaps, direction: np.ndar
 
 
 def run_traj(bus: ServoBus, jm: JointMaps, direction: np.ndarray,
-             name: str, traj: np.ndarray, execute: bool, prev_raw: np.ndarray
-             ) -> np.ndarray:
+             name: str, traj: np.ndarray, execute: bool, prev_raw: np.ndarray,
+             max_raw_delta: int) -> np.ndarray:
     raw_now = bus.read_all()
     qpos_now = raw_to_rad(raw_now, jm, direction)
     n_homing = int(round(HOMING_S * SYSID_HZ))
     homing = smooth_ramp(qpos_now, traj[0], n_homing)
-    prev_raw = stream(bus, homing, jm, direction, prev_raw, execute, log_pos=None)
+    prev_raw = stream(bus, homing, jm, direction, prev_raw, execute, max_raw_delta,
+                      log_pos=None)
 
     n_settle = max(1, int(round(SETTLE_S * SYSID_HZ)))
     settle = np.tile(traj[0], (n_settle, 1))
-    prev_raw = stream(bus, settle, jm, direction, prev_raw, execute, log_pos=None)
+    prev_raw = stream(bus, settle, jm, direction, prev_raw, execute, max_raw_delta,
+                      log_pos=None)
 
     log_pos: list[np.ndarray] = []
-    prev_raw = stream(bus, traj, jm, direction, prev_raw, execute, log_pos=log_pos)
+    prev_raw = stream(bus, traj, jm, direction, prev_raw, execute, max_raw_delta,
+                      log_pos=log_pos)
     pos = np.stack(log_pos)
     out = OUT_DIR_REAL / f"{name}.csv"
     write_log(out, target=traj, pos=pos, dt=SYSID_DT)
@@ -127,6 +131,9 @@ def main() -> int:
 
     model = mujoco.MjModel.from_xml_path(args.xml)
     jm = load_joint_maps(model, Path(args.cal))
+    # Same per-tick raw clamp the policy rollouts use, derived from the
+    # configured action_scale.
+    max_raw_delta = max_raw_delta_per_step(float(OmegaConf.load(CONFIG_YAML)["action_scale"]))
     direction = np.ones(len(jm.items), dtype=np.int8)
     xml_low, xml_high = jm.xml_low(), jm.xml_high()
     for name in names:
@@ -162,7 +169,8 @@ def main() -> int:
                 print("stopped by user")
                 break
             prev_raw = run_traj(bus, jm, direction, name,
-                                TRAJECTORIES[name], args.execute, prev_raw)
+                                TRAJECTORIES[name], args.execute, prev_raw,
+                                max_raw_delta)
     finally:
         bus.close()
     return 0

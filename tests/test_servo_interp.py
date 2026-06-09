@@ -5,23 +5,24 @@ stream emits exactly n_interp waypoints sliding monotonically to the target.
 """
 import numpy as np
 
-from real.twin.constants import MAX_RAW_DELTA_PER_STEP
 from real.twin.control import clamp_raw_delta, stream_sub_targets
+
+MAX_DELTA = 35
 
 
 def test_clamp_limits_large_jump():
     prev = np.full(6, 2048, dtype=np.int64)
     target = prev + 1000  # far beyond the per-tick cap
-    out = clamp_raw_delta(prev, target)
-    assert np.all(out - prev == MAX_RAW_DELTA_PER_STEP)
+    out = clamp_raw_delta(prev, target, MAX_DELTA)
+    assert np.all(out - prev == MAX_DELTA)
 
 
 def test_clamp_passes_in_range_delta():
     prev = np.full(6, 2048, dtype=np.int64)
     target = prev + np.array(
-        [1, -2, 3, 0, MAX_RAW_DELTA_PER_STEP, -MAX_RAW_DELTA_PER_STEP], dtype=np.int64
+        [1, -2, 3, 0, MAX_DELTA, -MAX_DELTA], dtype=np.int64
     )
-    assert np.array_equal(clamp_raw_delta(prev, target), target)
+    assert np.array_equal(clamp_raw_delta(prev, target, MAX_DELTA), target)
 
 
 def test_stream_emits_n_waypoints_ending_at_target():
