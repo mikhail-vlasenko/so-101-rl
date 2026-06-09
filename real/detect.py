@@ -18,7 +18,13 @@ from real.marker_spec import FAMILIES, APRILTAG_FAMILY
 @dataclass
 class Detection:
     id: int
-    corners: np.ndarray   # (4, 2) float32 image points
+    corners: np.ndarray   # (4, 2) float32 image points, canonical order TL, TR, BR, BL
+
+
+# pupil-apriltags returns corners as TR, TL, BL, BR (verified by detecting a
+# rendered tag); reorder to the OpenCV-ArUco canonical TL, TR, BR, BL so both
+# families feed real.pose.PoseEstimator the same corner order.
+_APRILTAG_TO_CANONICAL = [1, 0, 3, 2]
 
 
 class ArucoBackend:
@@ -41,7 +47,7 @@ class AprilTagBackend:
         self._det = AprilTagDetector(families=APRILTAG_FAMILY)
 
     def detect(self, gray):
-        return [Detection(d.tag_id, d.corners.astype(np.float32))
+        return [Detection(d.tag_id, d.corners[_APRILTAG_TO_CANONICAL].astype(np.float32))
                 for d in self._det.detect(gray)]
 
 
