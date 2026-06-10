@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Artifacts — SO-101 panel{% endblock %}
+{% block content %}
+<h1>Artifacts</h1>
+
+<section class="card">
+  <h2>Rollouts</h2>
+  {% if rollouts %}
+  <div class="rollout-grid">
+    {% for r in rollouts %}
+    <figure>
+      <a href="/files/rollouts/{{ r.png }}" target="_blank">
+        <img src="/files/rollouts/{{ r.png }}" loading="lazy" alt="{{ r.png }}">
+      </a>
+      <figcaption>
+        {{ r.png }} <span class="muted">{{ r.mtime }}</span>
+        {% if r.csv %} · <a href="/files/rollouts/{{ r.csv }}">csv</a>{% endif %}
+      </figcaption>
+    </figure>
+    {% endfor %}
+  </div>
+  {% else %}<p class="muted">no rollouts yet</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Sysid</h2>
+  {% if sysid_plots %}
+  <div class="rollout-grid">
+    {% for p in sysid_plots %}
+    <figure>
+      <a href="/files/sysid_logs/plots/{{ p }}" target="_blank">
+        <img src="/files/sysid_logs/plots/{{ p }}" loading="lazy" alt="{{ p }}">
+      </a>
+      <figcaption>{{ p }}</figcaption>
+    </figure>
+    {% endfor %}
+  </div>
+  {% else %}<p class="muted">no sysid plots</p>{% endif %}
+  {% if report_text %}
+  <h3>report.tsv</h3>
+  <pre class="log">{{ report_text }}</pre>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Checkpoints</h2>
+  {% if checkpoints %}
+  <table>
+    <thead><tr><th>Log dir</th><th>Checkpoints</th><th>Latest</th><th>Best</th></tr></thead>
+    <tbody>
+      {% for c in checkpoints %}
+      <tr>
+        <td>{{ c.log_dir }}</td><td>{{ c.count }}</td>
+        <td>{{ c.latest or '—' }}</td><td>{{ '✓' if c.has_best else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">no checkpoints</p>{% endif %}
+</section>
+{% endblock %}

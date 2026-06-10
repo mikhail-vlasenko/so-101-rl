@@ -175,6 +175,11 @@ def main() -> int:
     bus.connect()
     stopped = install_sigint_flag()
 
+    publisher = None
+    if args.stream_port is not None:
+        from panel.sim_stream import SimStreamPublisher
+        publisher = SimStreamPublisher(model, args.stream_port)
+
     dwell_count = 0
     step = 0
     dist = float("nan")
@@ -196,6 +201,8 @@ def main() -> int:
             in_target = dist < tolerance
             dwell_count = dwell_count + 1 if in_target else 0
             ee = compute_ee_pos(model, data, qposadr, loop.qpos, ee_site_id)
+            if publisher is not None:
+                publisher.publish(data)  # data holds the live FK pose from compute_ee_pos
 
             log_steps.append(step)
             log_actions.append(action.copy())
@@ -215,6 +222,8 @@ def main() -> int:
                 print(f"TIMEOUT at step {step} (dist={dist:.3f})")
     finally:
         bus.close()
+        if publisher is not None:
+            publisher.close()
 
     if log_steps:
         out_dir = REPO_ROOT / "rollouts"

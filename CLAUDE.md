@@ -43,6 +43,15 @@ Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE 
 - `real/rollout_common.py` — shared core for every real-arm policy rollout: Hydra config compose, policy loading with obs-dim check, common CLI args (`--execute`, `--slow`, `--ema-alpha`, `--interp-hz`, ...), and `ArmLoop`, which owns the safety-critical per-tick command shaping (training-matched `action_to_target` quantization, derived raw clamp, sub-target streaming, `--slow` time dilation, sim-time qvel). `real/rollout_lift.py` and `real/rollout_real.py` build on it and own only observation construction, termination, and plots. New rollout scripts must go through `ArmLoop` — never reimplement the tick. Contract-tested against a fake bus in `tests/test_arm_loop.py`.
 - `real/twin/digital_twin.py` — MuJoCo passive viewer + tkinter side panel that mirrors the real SO-101 arm's encoders into MuJoCo and lets the user verify the rad↔raw mapping (live direction toggles per joint, raw/norm/rad readouts, optional slider control with torque-on). Built from scratch on raw `scservo_sdk`; does not import from other `real/*.py` files. Run with `python -m real.twin.digital_twin` (default port `/dev/ttyACM0`). Optional DualSense control (`real/twin/gamepad.py`): if a controller is connected, sticks/triggers drive `targets_rad` in CONTROL mode (LX=pan, LY=lift, RY=elbow, R1/R2=wrist_flex, RX=wrist_roll, L1/L2=gripper); D-pad up/down cycles SLOW/MED/FAST speed presets (Tk Up/Down keys do the same); Create toggles MIRROR↔CONTROL, PS is e-stop. Requires `evdev` (in `requirements.txt`); the user must be in the `input` group.
 
+## Control panel
+
+`python -m panel` (in `mujoco_env`) serves a web control panel on `127.0.0.1:8800`. There is **no auth** — `--host 0.0.0.0` exposes it to the LAN, where anyone on the network can launch scripts, so only do that on trusted networks. It launches/stops every runnable script from a curated registry (`panel/registry.py` — keep it updated when adding scripts or args), shows live logs (SSE + `logs/panel/<run_id>.log`), and embeds sim views and the camera.
+
+- Sim streaming: scripts with a sim accept `--stream-port N` (argparse) / `stream_port=N` (Hydra) and serve their offscreen-rendered frames as MJPEG at `http://host:N/stream` via `panel/sim_stream.py`. The panel allocates ports 8801–8819 and sets `MUJOCO_GL=egl` for those launches.
+- Camera page: in-server capture (`panel/camera_service.py`) with the `real.marker_view` overlays via the shared `real/overlay.py`.
+- Hardware exclusivity: one accounting in `panel/runner.py` — serial/camera scripts and the camera stream 409 instead of double-claiming a device. `--execute` is a plain checkbox (default off = dry-run); there is no extra confirmation step.
+- Stop = SIGINT (scripts' handlers do torque-off / save plots), SIGKILL after 15 s.
+
 ## Training
 
 - `src/train.py` — Training with Hydra config + W&B logging

@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% from "_form.html" import script_card %}
+{% block title %}{{ page_title }} — SO-101 panel{% endblock %}
+{% block content %}
+<h1>{{ page_title }}</h1>
+<div class="cards">
+  {% for spec in specs %}{{ script_card(spec) }}{% endfor %}
+</div>
+{% endblock %}

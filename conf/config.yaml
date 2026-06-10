@@ -8,6 +8,7 @@ deterministic: true
 seed: null
 slow_factor: 2
 render: true   # eval.py only: false for headless metric collection
+stream_port: null  # eval/show_starts: serve sim view as MJPEG on this port (web panel)
 
 # Per-step joint-space delta (rad) when |action|=1. Shared across all envs so
 # the policy's notion of "one step" is uniform — env yamls reference this as

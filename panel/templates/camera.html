@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% from "_form.html" import script_card %}
+{% block title %}Camera — SO-101 panel{% endblock %}
+{% block content %}
+<h1>Camera</h1>
+
+<section class="card" id="camera-view" data-streaming="{{ '1' if camera_streaming else '' }}">
+  <header>
+    <h2>Live marker view</h2>
+    <span class="badge resource">camera</span>
+  </header>
+  <p class="description">C922 feed with ArUco/AprilTag detections, IDs, and camera-frame
+     pose overlays — the in-browser equivalent of <code>real.marker_view</code>.
+     Holds the camera while streaming: stop it before launching the native tools below.</p>
+  <div class="launch-row camera-controls">
+    <label>family
+      <select id="camera-family">
+        <option value="aruco">aruco</option>
+        <option value="apriltag">apriltag</option>
+      </select>
+    </label>
+    <label>exposure <input type="number" id="camera-exposure" min="3" max="2047" step="10"
+                           value="{{ camera_defaults.exposure }}"></label>
+    <label>gain <input type="number" id="camera-gain" min="0" max="255" step="15"
+                       value="{{ camera_defaults.gain }}"></label>
+    <button id="camera-start">Start stream</button>
+    <button id="camera-stop" class="danger">Stop stream</button>
+  </div>
+  <div class="stream-wrap hidden" id="camera-stream-wrap">
+    <img id="camera-stream" alt="camera stream">
+  </div>
+</section>
+
+<div class="cards">
+  {% for spec in specs %}{{ script_card(spec) }}{% endfor %}
+</div>
+{% endblock %}

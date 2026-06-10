@@ -1,0 +1,42 @@
+{% macro script_card(spec) %}
+<section class="card script-card" data-spec-id="{{ spec.id }}">
+  <header>
+    <h2>{{ spec.title }}</h2>
+    <code class="module">python -m {{ spec.module }}</code>
+    {% if spec.native_gui %}<span class="badge native">native window</span>{% endif %}
+    {% for r in spec.resources %}<span class="badge resource">{{ r.value }}</span>{% endfor %}
+  </header>
+  <p class="description">{{ spec.description }}</p>
+  <form onsubmit="return false;">
+    {% for arg in spec.args %}
+    <label class="field">
+      <span>{{ arg.label }}</span>
+      {% if arg.kind == 'flag' %}
+        <input type="checkbox" name="{{ arg.field_name }}" value="on">
+      {% elif arg.kind == 'choice' %}
+        <select name="{{ arg.field_name }}" data-default="{{ arg.default }}">
+          <option value="">(default{{ ': ' + arg.default if arg.default }})</option>
+          {% for c in arg.choices %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+        </select>
+      {% elif arg.checkpoint_picker %}
+        <input type="text" name="{{ arg.field_name }}" placeholder="{{ arg.default }}"
+               list="ckpt-{{ spec.id }}-{{ arg.field_name }}"
+               class="ckpt-input" data-logdir-template="{{ arg.checkpoint_picker }}">
+        <datalist id="ckpt-{{ spec.id }}-{{ arg.field_name }}"></datalist>
+      {% else %}
+        <input type="text" name="{{ arg.field_name }}" placeholder="{{ arg.default }}"
+               {% if arg.kind in ('int', 'float') %}inputmode="numeric"{% endif %}>
+      {% endif %}
+    </label>
+    {% endfor %}
+    <div class="launch-row">
+      {% if spec.supports_stream %}
+      <label class="stream-toggle">
+        <input type="checkbox" name="__stream__" checked> sim view stream
+      </label>
+      {% endif %}
+      <button class="launch-btn" type="button">Launch</button>
+    </div>
+  </form>
+</section>
+{% endmacro %}

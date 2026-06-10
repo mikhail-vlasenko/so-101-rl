@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — SO-101 panel{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<section class="card">
+  <h2>Runs</h2>
+  <table id="runs-table">
+    <thead>
+      <tr><th>Run</th><th>Status</th><th>Uptime</th><th>Stream</th><th></th></tr>
+    </thead>
+    <tbody>
+      <tr><td colspan="5" class="muted">loading…</td></tr>
+    </tbody>
+  </table>
+</section>
+{% endblock %}

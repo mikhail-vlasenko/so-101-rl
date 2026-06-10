@@ -13,7 +13,14 @@ from src.pickplace_env import SO101PickPlaceEnv
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
 def main(cfg: DictConfig):
-    env = SO101PickPlaceEnv(render_mode="human", env_cfg=cfg["pickplace_env"])
+    # When streaming (web panel), render offscreen instead of the native viewer.
+    stream = cfg.stream_port is not None
+    env = SO101PickPlaceEnv(render_mode=None if stream else "human",
+                            env_cfg=cfg["pickplace_env"])
+    publisher = None
+    if stream:
+        from panel.sim_stream import SimStreamPublisher
+        publisher = SimStreamPublisher(env.model, int(cfg.stream_port))
     try:
         i = 0
         while True:
@@ -23,11 +30,16 @@ def main(cfg: DictConfig):
             print(f"Reset #{i} — cube={env._get_cube_pos()}  ring_h={env.ring_height:.3f}  joints={joints.round(3)}")
             t0 = time.time()
             while time.time() - t0 < 5:
-                env._render_human()
+                if publisher is not None:
+                    publisher.publish(env.data)
+                else:
+                    env._render_human()
                 time.sleep(0.05)
     except KeyboardInterrupt:
         pass
     finally:
+        if publisher is not None:
+            publisher.close()
         env.close()
 
 

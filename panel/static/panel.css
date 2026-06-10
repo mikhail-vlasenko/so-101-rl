@@ -1,0 +1,144 @@
+:root {
+  --bg: #14171c;
+  --panel: #1d222a;
+  --border: #2e3640;
+  --text: #d8dee6;
+  --muted: #7a8694;
+  --accent: #4da3ff;
+  --danger: #e2574c;
+  --ok: #4caf7d;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, sans-serif;
+}
+
+nav {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.5rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+nav .brand { font-weight: 700; margin-right: 1rem; color: var(--accent); }
+nav a {
+  color: var(--text);
+  text-decoration: none;
+  padding: 0.35rem 0.7rem;
+  border-radius: 6px;
+}
+nav a:hover { background: var(--border); }
+nav a.active { background: var(--accent); color: #08111c; }
+
+main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
+h1 { font-size: 1.4rem; }
+h2 { font-size: 1.1rem; margin: 0; }
+.muted { color: var(--muted); }
+.hidden { display: none; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1rem; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+.card header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.card .module { color: var(--muted); font-size: 0.8rem; }
+.card .description { color: var(--muted); font-size: 0.88rem; }
+
+.badge {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.badge.resource { border-color: #b08030; color: #d9a84e; }
+.badge.native { border-color: #7d68c9; color: #a392e8; }
+.badge.running { border-color: var(--ok); color: var(--ok); }
+.badge.done { border-color: var(--muted); }
+
+.field { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0; }
+.field > span { flex: 0 1 200px; font-size: 0.85rem; color: var(--muted); }
+.field input[type="text"], .field select, .camera-controls input, .camera-controls select {
+  flex: 1;
+  min-width: 0; /* flex items default to min-width:auto and overflow the card */
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+button {
+  background: var(--accent);
+  color: #08111c;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.45rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.1); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.danger { background: var(--danger); color: #fff; }
+
+.launch-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 0.6rem;
+  flex-wrap: wrap;
+}
+.stream-toggle { color: var(--muted); font-size: 0.85rem; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 600; font-size: 0.82rem; }
+td a { color: var(--accent); }
+
+.log {
+  background: #0d1014;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.8rem;
+  max-height: 60vh;
+  overflow-y: auto;
+  font: 12.5px/1.5 ui-monospace, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.run-header { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+.run-header .argv { font-size: 0.8rem; color: var(--muted); flex: 1; min-width: 200px; }
+
+.stream-wrap { margin: 0.8rem 0; text-align: center; }
+.stream-wrap img {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #000;
+  min-height: 120px;
+}
+
+.rollout-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+.rollout-grid img { width: 100%; border-radius: 6px; border: 1px solid var(--border); }
+.rollout-grid figure { margin: 0; }
+.rollout-grid figcaption { font-size: 0.78rem; color: var(--muted); margin-top: 0.3rem; }
+
+.camera-controls { justify-content: flex-start; }
+.camera-controls label { color: var(--muted); font-size: 0.85rem; display: flex; gap: 0.4rem; align-items: center; }
+.camera-controls input { width: 90px; flex: 0; }

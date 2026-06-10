@@ -57,6 +57,11 @@ def main(cfg: DictConfig):
     if frame_stack > 1:
         vec_env = VecFrameStack(vec_env, n_stack=frame_stack)
 
+    publisher = None
+    if cfg.stream_port is not None:
+        from panel.sim_stream import SimStreamPublisher
+        publisher = SimStreamPublisher(inner_env.model, int(cfg.stream_port))
+
     drag_ratios = []
     try:
         for ep in range(episodes):
@@ -72,6 +77,8 @@ def main(cfg: DictConfig):
                 total_reward += float(reward[0])
                 done = bool(dones[0])
                 info = infos[0]
+                if publisher is not None:
+                    publisher.publish(inner_env.data)
             extras = f"  seed={seed}"
             if "placed" in info:
                 extras += f"  placed={info['placed']}"
@@ -86,6 +93,8 @@ def main(cfg: DictConfig):
     except KeyboardInterrupt:
         pass
     finally:
+        if publisher is not None:
+            publisher.close()
         vec_env.close()
 
 

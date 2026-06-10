@@ -22,12 +22,12 @@ import argparse
 
 import cv2
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from real.camera import open_camera, set_exposure, set_auto_exposure, v4l2_set, HEIGHT
-from real.marker_spec import FAMILIES, ROLES, TAG_SIZE_MM, MARKER_EXPOSURE, MARKER_GAIN
+from real.marker_spec import FAMILIES, MARKER_EXPOSURE, MARKER_GAIN
 from real.calibrate_camera import FOCUS_ABSOLUTE
 from real.detect import make_detector
+from real.overlay import annotate_detections
 from real.pose import load_intrinsics, PoseEstimator
 
 EXPOSURE_MIN, EXPOSURE_MAX, EXPOSURE_STEP = 3, 2047, 10
@@ -58,28 +58,7 @@ def main():
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         dets = detector.detect(gray)
-        for d in dets:
-            quad = d.corners.astype(np.int32)
-            cv2.polylines(frame, [quad], True, (0, 255, 0), 2)
-            cv2.circle(frame, tuple(quad[0]), 4, (255, 0, 0), -1)   # corner 0 (TL) marks orientation
-            cx, cy = d.corners.mean(axis=0).astype(int)
-            label = f"{d.id}" + (f" {ROLES[d.id]}" if d.id in ROLES else "")
-            cv2.putText(frame, label, (cx - 10, cy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            if d.id in TAG_SIZE_MM:
-                rvec, tvec = estimator.estimate(d)
-                axis_len = TAG_SIZE_MM[d.id] / 1000.0 / 2.0
-                cv2.drawFrameAxes(frame, estimator.camera_matrix, estimator.dist_coeffs,
-                                  rvec, tvec, axis_len, 2)
-                roll, pitch, yaw = Rotation.from_rotvec(rvec).as_euler("xyz", degrees=True)
-                x, y, z = tvec * 100.0
-                cv2.putText(frame, f"{x:+.1f} {y:+.1f} {z:+.1f} cm", (cx - 10, cy + 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                cv2.putText(frame, f"rpy {roll:+.0f} {pitch:+.0f} {yaw:+.0f}", (cx - 10, cy + 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-            else:
-                cv2.putText(frame, "no size", (cx - 10, cy + 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        annotate_detections(frame, dets, estimator)
 
         seen = sorted(d.id for d in dets)
         exp_str = "auto" if exposure is None else f"{exposure} (~{exposure / 10:.1f}ms)"

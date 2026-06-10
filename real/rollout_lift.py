@@ -202,6 +202,10 @@ def main() -> int:
     stopped = install_sigint_flag()
 
     viewer = None if args.no_view else mujoco.viewer.launch_passive(model, data)
+    publisher = None
+    if args.stream_port is not None:
+        from panel.sim_stream import SimStreamPublisher
+        publisher = SimStreamPublisher(model, args.stream_port)
     log_rows: list[dict] = []
     try:
         loop.boot()
@@ -239,6 +243,8 @@ def main() -> int:
             data.qpos[qposadr] = loop.qpos
             data.qvel[joint_dofadr] = loop.qvel
             mujoco.mj_forward(model, data)
+            if publisher is not None:
+                publisher.publish(data)
 
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
             ee_pos = data.site_xpos[ee_site_id].copy()
@@ -277,6 +283,8 @@ def main() -> int:
         bus.close()
         if viewer is not None:
             viewer.close()
+        if publisher is not None:
+            publisher.close()
 
     if log_rows:
         out_dir = REPO_ROOT / "rollouts"

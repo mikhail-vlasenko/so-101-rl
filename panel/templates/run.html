@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}{{ run.run_id }} — SO-101 panel{% endblock %}
+{% block content %}
+<h1>{{ run.spec.title }} <span class="muted">({{ run.run_id }})</span></h1>
+<section class="card run-view" id="run-view"
+         data-run-id="{{ run.run_id }}"
+         data-stream-port="{{ run.stream_port if run.stream_port is not none else '' }}">
+  <div class="run-header">
+    <code class="argv">{{ summary.argv | join(' ') }}</code>
+    <span id="run-status" class="badge {{ 'running' if summary.running else 'done' }}">
+      {{ 'running' if summary.running else 'exit ' ~ summary.returncode }}
+    </span>
+    <button id="stop-btn" class="danger" {{ 'disabled' if not summary.running }}>Stop</button>
+    <button id="restart-btn" {{ 'disabled' if summary.running }}>Restart</button>
+  </div>
+  {% if run.stream_port is not none and summary.running %}
+  <div class="stream-wrap" id="stream-wrap">
+    <img id="sim-stream" alt="sim stream (waiting for first frame…)">
+  </div>
+  {% endif %}
+  <pre id="log" class="log"></pre>
+</section>
+{% endblock %}

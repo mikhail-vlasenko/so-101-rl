@@ -2,3 +2,5 @@ pyserial
 evdev
 scipy
 pupil-apriltags
+fastapi
+uvicorn

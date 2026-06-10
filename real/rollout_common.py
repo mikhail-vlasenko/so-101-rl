@@ -87,6 +87,9 @@ def add_common_args(p: argparse.ArgumentParser, default_xml: Path,
     p.add_argument("--port", default="/dev/ttyACM0")
     p.add_argument("--xml", default=str(default_xml))
     p.add_argument("--cal", default=str(DEFAULT_CAL))
+    p.add_argument("--stream-port", type=int, default=None,
+                   help="Serve the sim view as MJPEG on this port "
+                        "(http://host:PORT/stream); used by the web panel.")
 
 
 def load_policy(model_arg: str, log_dir: Path, expected_obs: int) -> PPO:
