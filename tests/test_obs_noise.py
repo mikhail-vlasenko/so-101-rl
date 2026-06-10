@@ -1,8 +1,8 @@
 """Tests for per-step Gaussian observation noise (sim2real domain randomization).
 
-Noise is applied at the source values (qpos, qvel, ee_pos, cube_pos) inside
-SO101BaseEnv._get_obs. Derived task obs (e.g. pickplace's cube_to_target) must
-inherit the noise via the noisy cube_pos rather than re-noising independently.
+Noise is applied at the source values (qpos, qvel, marker poses, cube_pos)
+inside SO101BaseEnv._get_obs. Derived task obs (e.g. pickplace's cube_to_target)
+must inherit the noise via the noisy cube_pos rather than re-noising independently.
 """
 
 import numpy as np
@@ -18,20 +18,22 @@ from src.pickplace_env import SO101PickPlaceEnv
 SIGMAS = {
     "qpos_sigma": 0.005,
     "qvel_sigma": 0.05,
-    "ee_sigma": 0.002,
+    "marker_pos_sigma": 0.002,
+    "marker_rot_sigma": 0.02,
     "cube_sigma": 0.003,
 }
 
-# Obs layout: [qpos(6), qvel(6), ee_pos(3), cube_pos(3), task_extra(4), prev_actions(2*6)]
+# Obs layout: [qpos(6), qvel(6), markers(2*6), cube_pos(3), task_extra(4), prev_actions(2*6)]
 QPOS = slice(0, 6)
 QVEL = slice(6, 12)
-EE = slice(12, 15)
-CUBE = slice(15, 18)
-C2T = slice(18, 20)
-RING_H = 20
-TASK_ID = 21
-PREV_ACTIONS = slice(22, 34)
-OBS_DIM = 34
+MARKER_POS = np.r_[12:15, 18:21]   # finger pos, wrist pos
+MARKER_ROT = np.r_[15:18, 21:24]   # finger rot, wrist rot
+CUBE = slice(24, 27)
+C2T = slice(27, 29)
+RING_H = 29
+TASK_ID = 30
+PREV_ACTIONS = slice(31, 43)
+OBS_DIM = 43
 
 
 @pytest.fixture(scope="module")
@@ -130,7 +132,10 @@ def test_per_step_noise_magnitude_matches_sigmas(cfg):
     # Noise std should be within ~10% of configured sigma.
     np.testing.assert_allclose(diffs[:, QPOS].std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.1)
     np.testing.assert_allclose(diffs[:, QVEL].std(axis=0).mean(), SIGMAS["qvel_sigma"], rtol=0.1)
-    np.testing.assert_allclose(diffs[:, EE].std(axis=0).mean(), SIGMAS["ee_sigma"], rtol=0.1)
+    np.testing.assert_allclose(diffs[:, MARKER_POS].std(axis=0).mean(),
+                               SIGMAS["marker_pos_sigma"], rtol=0.1)
+    np.testing.assert_allclose(diffs[:, MARKER_ROT].std(axis=0).mean(),
+                               SIGMAS["marker_rot_sigma"], rtol=0.1)
     np.testing.assert_allclose(diffs[:, CUBE].std(axis=0).mean(), SIGMAS["cube_sigma"], rtol=0.1)
     # cube_to_target inherits cube_sigma (same draw, derived).
     np.testing.assert_allclose(diffs[:, C2T].std(axis=0).mean(), SIGMAS["cube_sigma"], rtol=0.1)
@@ -158,8 +163,8 @@ def test_lift_env_compatible_with_noise(lift_cfg):
                       obs_noise=SIGMAS)
     obs, _ = env.reset(seed=0)
     assert obs.shape == (OBS_DIM,)
-    # Lift's _obs_extra returns zeros + task_id, so [18:21] should be zero, [21]=lift TASK_ID=0.0
-    assert np.array_equal(obs[18:21], np.zeros(3, dtype=np.float32))
+    # Lift's _obs_extra returns zeros + task_id, so [27:30] should be zero, [30]=lift TASK_ID=0.0
+    assert np.array_equal(obs[27:30], np.zeros(3, dtype=np.float32))
     assert obs[TASK_ID] == 0.0
     # Prev actions are zero immediately after reset (no action has been taken yet).
     assert np.array_equal(obs[PREV_ACTIONS], np.zeros(12, dtype=np.float32))

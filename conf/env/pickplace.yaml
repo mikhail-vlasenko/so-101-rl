@@ -5,8 +5,8 @@ pickplace_env:
   action_scale: ${action_scale}   # shared across envs, defined in config.yaml
   max_steps: 450          # 450 steps / 30 Hz = 15 s episode
   n_substeps: 10          # 10 * (1/300 s timestep in so101.xml) = exactly 30 Hz
-  cube_low: [0.15, -0.15, 0.015]
-  cube_high: [0.30, 0.15, 0.015]
+  cube_low: [0.15, -0.15]    # xy only; spawn z + orientation come from sample_cube_orientation
+  cube_high: [0.30, 0.15]
   place_target: [0.18, 0.0, 0.02]
   # place_target_radius and place_target_height must match the place_target site in scene_pickplace.xml
   place_target_radius: 0.04

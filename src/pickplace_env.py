@@ -50,10 +50,10 @@ class SO101PickPlaceEnv(SO101BaseEnv):
 
     def _sample_cube_pos(self):
         while True:
-            cube_pos = self.np_random.uniform(self.cube_low, self.cube_high)
-            dist_to_ring = np.linalg.norm(cube_pos[:2] - self.ring_center)
+            cube_xy = self.np_random.uniform(self.cube_low, self.cube_high)
+            dist_to_ring = np.linalg.norm(cube_xy - self.ring_center)
             if dist_to_ring > self.ring_exclusion_radius:
-                return cube_pos
+                return cube_xy
 
     def _on_reset(self, cube_pos):
         # Random ring height: sink the ring body into the floor

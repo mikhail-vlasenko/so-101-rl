@@ -18,22 +18,25 @@ stream_port: null  # eval/show_starts: serve sim view as MJPEG on this port (web
 action_scale: 0.07
 
 # Per-step Gaussian noise added to observations during training (sim2real domain randomization).
-# Noise is applied at the source (qpos, qvel, ee_pos, cube_pos); derived obs (cube_to_target)
-# inherit the noise via the noisy cube_pos. Reward computation always uses the true state.
+# Noise is applied at the source (qpos, qvel, marker poses, cube_pos); derived obs
+# (cube_to_target) inherit the noise via the noisy cube_pos. Reward always uses true state.
 obs_noise:
-  qpos_sigma: 0.005    # rad,   joint encoder jitter (~0.3°)
-  qvel_sigma: 0.05     # rad/s, joint velocity noise (numerically differentiated)
-  ee_sigma: 0.002      # m,     end-effector position
-  cube_sigma: 0.003    # m,     cube position from vision pipeline
+  qpos_sigma: 0.005        # rad,   joint encoder jitter (~0.3°)
+  qvel_sigma: 0.05         # rad/s, joint velocity noise (numerically differentiated)
+  marker_pos_sigma: 0.002  # m,     per-frame AprilTag position jitter (solvePnP)
+  marker_rot_sigma: 0.02   # rad,   per-frame AprilTag orientation jitter (~1°)
+  cube_sigma: 0.003        # m,     cube position from vision pipeline
 
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
 # differentiating biased qpos has zero DC offset, so a velocity bias is non-physical.
-# Currently disabled: see calibration_plan.md — we calibrate bias on the real rig with ArUco
-# markers and subtract it pre-policy, rather than asking the policy to absorb it via DR.
+# Marker biases are drawn independently per tag (glue placement + camera extrinsics error
+# don't correlate between the two tags). qpos/cube bias stay disabled: see
+# calibration_plan.md — those are calibrated on the real rig and subtracted pre-policy.
 obs_bias:
   qpos_sigma: 0.0
-  ee_sigma:   0.0
+  marker_pos_sigma: 0.005  # m,    tag glue placement + extrinsics offset
+  marker_rot_sigma: 0.05   # rad,  tag alignment error (~3°)
   cube_sigma: 0.0
 
 # Number of frames the agent's observation lags behind the true state (sim2real DR).

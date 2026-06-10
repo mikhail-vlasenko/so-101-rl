@@ -36,7 +36,13 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from src.base_env import JOINT_NAMES
+from src.base_env import (
+    JOINT_NAMES,
+    MARKER_SITE_NAMES,
+    marker_world_poses,
+    obs_dim_for,
+    sample_cube_orientation,
+)
 
 from .rollout_common import (
     ArmLoop,
@@ -66,13 +72,20 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_obs(qpos: np.ndarray, qvel: np.ndarray, ee_pos: np.ndarray,
-              cube_pos: np.ndarray, prev_actions: np.ndarray) -> np.ndarray:
-    """Match SO101LiftEnv._compute_obs: qpos+qvel+ee+cube+[0,0,0,task_id]+prev_actions."""
+def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
+              marker_rot: np.ndarray, cube_pos: np.ndarray,
+              prev_actions: np.ndarray) -> np.ndarray:
+    """Match SO101LiftEnv._compute_obs: qpos+qvel+markers+cube+[0,0,0,task_id]+prev_actions.
+
+    Marker poses come from FK on the lockstep sim (the same sites the policy saw
+    in training) — a stand-in until the camera AprilTag pipeline feeds measured
+    poses here.
+    """
     extra = np.array([0.0, 0.0, 0.0, LIFT_TASK_ID], dtype=np.float32)
+    markers = np.hstack([marker_pos, marker_rot]).flatten()
     return np.concatenate([qpos.astype(np.float32),
                            qvel.astype(np.float32),
-                           ee_pos.astype(np.float32),
+                           markers.astype(np.float32),
                            cube_pos.astype(np.float32),
                            extra,
                            prev_actions.flatten().astype(np.float32)]).astype(np.float32)
@@ -180,14 +193,23 @@ def main() -> int:
     joint_dofadr = model.jnt_dofadr[joint_ids]
     ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
     assert ee_site_id >= 0, "site 'gripperframe' not found in model"
+    marker_site_ids = []
+    for name in MARKER_SITE_NAMES:
+        sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
+        assert sid >= 0, f"site '{name}' not found in model"
+        marker_site_ids.append(sid)
     cube_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
     cube_qposadr = int(model.jnt_qposadr[cube_joint_id])
+    cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
+    assert cube_geom_id >= 0, "geom 'cube_geom' not found in model"
 
-    expected_obs = 22 + prev_actions_n * 6
-    policy = load_policy(args.model, LOG_DIR, expected_obs)
+    policy = load_policy(args.model, LOG_DIR, obs_dim_for(prev_actions_n))
 
     rng = np.random.default_rng(args.seed)
-    cube_pos_init = rng.uniform(cube_low, cube_high)
+    cube_xy_init = rng.uniform(cube_low, cube_high)
+    cube_quat_init, rest_half_z = sample_cube_orientation(
+        rng, model.geom_size[cube_geom_id])
+    cube_pos_init = np.array([cube_xy_init[0], cube_xy_init[1], rest_half_z])
 
     bus = ServoBus(args.port, jm.servo_ids())
     loop = ArmLoop(model=model, n_substeps=n_substeps, jm=jm, bus=bus,
@@ -214,7 +236,7 @@ def main() -> int:
         data.qpos[qposadr] = loop.qpos
         data.qvel[joint_dofadr] = 0.0
         data.qpos[cube_qposadr:cube_qposadr + 3] = cube_pos_init
-        data.qpos[cube_qposadr + 3:cube_qposadr + 7] = [1, 0, 0, 0]
+        data.qpos[cube_qposadr + 3:cube_qposadr + 7] = cube_quat_init
         # Init actuators (filter state) at current qpos so they don't snap.
         data.ctrl[:6] = loop.qpos
         if model.na > 0:
@@ -224,10 +246,11 @@ def main() -> int:
         dwell_count = 0
         step = 0
         while not stopped["flag"] and step < args.max_steps:
-            ee_pos = data.site_xpos[ee_site_id].copy()
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
+            marker_pos, marker_rot = marker_world_poses(data, marker_site_ids)
 
-            obs = build_obs(loop.qpos, loop.qvel, ee_pos, cube_pos, loop.prev_actions)
+            obs = build_obs(loop.qpos, loop.qvel, marker_pos, marker_rot,
+                            cube_pos, loop.prev_actions)
             raw_action, _ = policy.predict(obs, deterministic=True)
             action = loop.tick(raw_action)
 

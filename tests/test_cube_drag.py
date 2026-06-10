@@ -1,7 +1,7 @@
 """Tests for the cube_drag_ratio metric.
 
 Cube is considered "dragged" on a step when:
-  cube_z < cube_half_z + DRAG_HEIGHT_TOL  AND  ||cube_xy_velocity|| > DRAG_SPEED_THRESH
+  cube_z < cube_rest_half_z + DRAG_HEIGHT_TOL  AND  ||cube_xy_velocity|| > DRAG_SPEED_THRESH
 
 The metric is the fraction of episode steps where this holds. Reported in info
 at episode end as `cube_drag_ratio`.
@@ -76,7 +76,7 @@ def test_lateral_drag_registers(cfg):
     n_drag = int(env.max_steps * 0.7)
     for _ in range(n_drag):
         env.data.qpos[env.cube_qpos_idx] += 0.005
-        env.data.qpos[env.cube_qpos_idx + 2] = env.cube_half_z
+        env.data.qpos[env.cube_qpos_idx + 2] = env.cube_rest_half_z
         env.data.qvel[cube_dofadr:cube_dofadr + 6] = 0
         _, _, term, trunc, info = env.step(_zero_action())
         if term or trunc:
