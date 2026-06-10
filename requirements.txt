@@ -4,3 +4,4 @@ scipy
 pupil-apriltags
 fastapi
 uvicorn
+watchfiles  # fast file watcher for `python -m panel --reload`

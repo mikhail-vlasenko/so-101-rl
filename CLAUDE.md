@@ -50,7 +50,8 @@ Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE 
 - Sim streaming: scripts with a sim accept `--stream-port N` (argparse) / `stream_port=N` (Hydra) and serve their offscreen-rendered frames as MJPEG at `http://host:N/stream` via `panel/sim_stream.py`. The panel allocates ports 8801–8819 and sets `MUJOCO_GL=egl` for those launches.
 - Camera page: in-server capture (`panel/camera_service.py`) with the `real.marker_view` overlays via the shared `real/overlay.py`.
 - Hardware exclusivity: one accounting in `panel/runner.py` — serial/camera scripts and the camera stream 409 instead of double-claiming a device. `--execute` is a plain checkbox (default off = dry-run); there is no extra confirmation step.
-- Stop = SIGINT (scripts' handlers do torque-off / save plots), SIGKILL after 15 s.
+- Stop = SIGINT (scripts' handlers do torque-off / save plots), SIGKILL after 15 s. A finished run can be relaunched with its original args via the run page's **Restart** button (disabled while running).
+- Route code (`panel/*.py`) loads into memory at startup; templates and `static/*` are re-read per request. For Python edits, restart the server or run `python -m panel --reload` (dev only: uvicorn watches `panel/*.py` and restarts on edits, SIGINTing every live run each time — don't use it mid-rollout).
 
 ## Training
 

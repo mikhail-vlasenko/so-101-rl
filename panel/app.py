@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -63,7 +64,16 @@ def run_summary(run: Run) -> dict:
 
 def create_app(runner: Runner | None = None) -> FastAPI:
     validate_registry()
-    app = FastAPI(title="SO-101 panel")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # On shutdown — including a --reload restart — SIGINT every live run
+        # (so scripts torque-off / save) and release the camera device.
+        yield
+        app.state.runner.shutdown()
+        app.state.camera.stop()  # no-op when the stream was never started
+
+    app = FastAPI(title="SO-101 panel", lifespan=lifespan)
     app.state.runner = runner if runner is not None else Runner()
     app.state.camera = CameraService(app.state.runner)
 
