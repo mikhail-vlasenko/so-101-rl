@@ -179,6 +179,33 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         native_gui=True,
     ),
     ScriptSpec(
+        id="shake_probe", title="Shake probe", page="real",
+        module="scripts.shake_probe", arg_style="argparse",
+        description="High-rate single-servo recording to isolate joint chatter: "
+                    "hold (PID limit cycle / tap ring-down) or slow triangle sweep. "
+                    "Torque ON immediately; restores standard gains on exit.",
+        args=(
+            ArgSpec("--joint", "choice", "Joint", default="shoulder_pan",
+                    choices=("shoulder_pan", "shoulder_lift", "elbow_flex",
+                             "wrist_flex", "wrist_roll", "gripper")),
+            ArgSpec("--mode", "choice", "Mode", default="hold",
+                    choices=("hold", "sweep")),
+            ArgSpec("--watch-joint", "choice", "Record this joint instead (sweep only)",
+                    choices=("shoulder_pan", "shoulder_lift", "elbow_flex",
+                             "wrist_flex", "wrist_roll", "gripper")),
+            ArgSpec("--duration", "float", "Recording length (s)", default="10"),
+            ArgSpec("--kp", "int", "Probed-servo Kp override"),
+            ArgSpec("--deadzone", "int", "Probed-servo deadzone override"),
+            ArgSpec("--speed", "int", "Servo speed argument"),
+            ArgSpec("--accel", "int", "Servo accel argument"),
+            ArgSpec("--sweep-range", "int", "Sweep amplitude (raw units)", default="150"),
+            ArgSpec("--sweep-raw-per-s", "float", "Sweep velocity (raw/s)", default="100"),
+            ArgSpec("--dwell-s", "float", "Dwell at sweep extremes (s)", default="2"),
+            ArgSpec("--port", "str", "Serial port", default="/dev/ttyACM0"),
+        ),
+        resources=(Resource.SERIAL,),
+    ),
+    ScriptSpec(
         id="read_kp", title="Read servo gains", page="real",
         module="real.read_kp", arg_style="argparse",
         description="Dump position-loop gains and related registers from every servo.",

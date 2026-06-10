@@ -23,7 +23,13 @@ from omegaconf import OmegaConf
 
 from src.units import max_raw_delta_per_step
 
-from .constants import INTERP_HZ, SERVO_ACCEL, SERVO_SPEED
+from .constants import (
+    INTERP_HZ,
+    SERVO_ACCEL,
+    SERVO_POSITION_DEADZONE,
+    SERVO_POSITION_KP,
+    SERVO_SPEED,
+)
 from .control import clamp_raw_delta, stream_sub_targets
 from .gamepad import gamepad_worker
 from .gui import CONTROL, MIRROR, TwinState, run as run_gui
@@ -125,6 +131,11 @@ def make_enter_control(state: TwinState, bus: ServoBus, jm: JointMaps):
             state.targets_rad = current_rad
             state.prev_raw_target = raw
         with state.bus_lock:
+            # Kp/deadzone live in servo EEPROM; write the standard values so
+            # CONTROL mode always runs the same loop tuning as the rollouts,
+            # not whatever the last tool left behind.
+            bus.set_position_kp(SERVO_POSITION_KP)
+            bus.set_position_deadzone(SERVO_POSITION_DEADZONE)
             bus.enable_torque_all()
         with state.lock:
             state.mode = CONTROL

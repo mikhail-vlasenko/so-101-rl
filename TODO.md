@@ -12,6 +12,8 @@ Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/li
 
 - **Joint friction / damping.** Check `<joint frictionloss damping>` values in `so101.xml`. Real servos have stiction and gearbox friction that's commonly modeled at zero. Add a reasonable fixed value or domain randomize.
 
+- **shoulder_pan servo Kp lowered to 8 — sim gain now wrong for that joint.** The sysid fit behind the `sts3215` actuator class in `so101.xml` (`kp=77.5 kv=2.731`) was done with all servos at Kp 32. Pan now runs at 8 (factory 32 rings the extended arm during motion; see `SERVO_POSITION_KP` in `real/twin/constants.py`), so the sim's pan actuator is ~4x stiffer than real. Split the pan actuator out of the shared class and refit its kp/kv against step responses recorded at servo Kp 8.
+
 - **Internal servo dynamics — confirmed gap.** Real Feetech has internal PID + current loop + comms latency; sim's `<position>` actuator is instantaneous torque ∝ err. The sysid fit (`sysid_logs/fit.json`) drove damping/armature/frictionloss to the upper bound of its search range, which is the optimizer using joint-side losses as a proxy for the servo's internal speed/accel ramp. Best concrete fix: rate-limit `data.ctrl` in `replay_sim.py` (and the policy env) using `SERVO_SPEED`/`SERVO_ACCEL` from `real/twin/constants.py`, then refit. Until that's in, fast/wide-amplitude motions (e.g. `sweep_wrist_roll`) are visibly over-damped in sim.
 
 ## Train a policy in PWM / torque-ish mode
@@ -32,6 +34,6 @@ Nothing in the rollout layer notices "I've been pushing the same wall for 5 seco
 - **`Maximum Temperature Limit` register (addr 14).** Confirm it's at the factory default 70 °C (or lower) on every joint. Triggers torque-off when the servo overheats.
 - **`Overload Protection` register / flag.** Confirm enabled — auto-shuts torque if output stays at max for the configured time. Without this, sustained stall cooks the windings or the H-bridge MOSFETs.
 - **`Maximum Torque` register.** Check it's not at the absolute max — capping it firmware-side limits stall current and gives a margin before thermal trip.
-- **Per-joint `SERVO_POSITION_KP`.** Currently 64 across the board (`real/twin/constants.py`). For first rollouts consider dropping to the factory default 32 to reduce push-into-obstacle force; raise back per joint if holding is the bottleneck.
+- **Per-joint `SERVO_POSITION_KP`.** Now per-joint in `real/twin/constants.py` (pan 8, rest factory 32). Raise back per joint only if holding is the bottleneck.
 - **Power-supply / bus current headroom.** All six joints stalling at once can pop a fuse or trip the bench PSU. Know the supply's trip current and have a hand on the power switch for the first rollouts.
 - **Gear-strip risk.** Hobby-grade Feetech servos most commonly fail by stripping the second-to-last plastic gear on hard impact. Slow-and-firm pushing is far less risky than fast contact — start rollouts with the arm well away from the table edge / fixtures.

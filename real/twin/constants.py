@@ -36,14 +36,28 @@ SERVO_ACCEL = 10
 # push into obstacles (stall torque ≈ Kp · action_scale), at the cost of
 # worse static-hold on gravity-loaded joints (shoulder_lift, elbow_flex) —
 # revisit per-joint if they sag. Range 0..254 per value.
-SERVO_POSITION_KP = (32, 32, 32, 32, 32, 32)
+#
+# shoulder_pan runs at 8: at the factory 32 the P-loop is underdamped against
+# the arm's large, gravity-unloaded inertia about the vertical axis and rings
+# visibly during motion (worst with the arm extended). Verified with
+# scripts/shake_probe sweeps up to 500 raw/s: Kp 32 shakes, 16 is near-clean,
+# 8 shows no oscillation at all. Cost: ~4x the tracking error per unit of
+# acceleration demand — harmless on an unloaded axis driven closed-loop, but
+# note the sim actuator gain (so101.xml sts3215 class) was sysid-fit at 32;
+# see TODO.md.
+#
+# gripper also runs at 8: it needs no positioning stiffness, and since grip
+# force scales with Kp · position error, a soft loop squeezes the cube (and
+# its own gear train) gently instead of grinding at full P-torque.
+SERVO_POSITION_KP = (8, 32, 32, 32, 32, 8)
 
 # Position-correction deadzone (Feetech SMS-STS registers 26/27, CW/CCW),
 # per joint in JOINT_NAMES order. Units 0.087°/unit, range 0..16, factory
 # default 1. Inside ±deadzone the servo's position loop does not correct,
 # so the joint can sit anywhere in a backlash gap without the PID hunting
-# across it. Shoulder_pan sees the largest reaction load when the arm is
-# extended and visibly chatters at the factory default; bumped to 8 (~0.7°
-# of allowed slop). Other joints left at the default — bump per joint if
-# they show similar load-dependent jitter.
-SERVO_POSITION_DEADZONE = (8, 1, 1, 1, 1, 1)
+# across it. shoulder_pan ran at 8 for a while to mask the Kp-32 ringing
+# (see SERVO_POSITION_KP above) at the cost of ~0.7° of slop and visible
+# stick-slip stepping on slow moves; with pan Kp at 8 the root cause is
+# gone and everything is back at factory. If rest-hold chatter returns on
+# a joint, bump that joint only.
+SERVO_POSITION_DEADZONE = (1, 1, 1, 1, 1, 1)
