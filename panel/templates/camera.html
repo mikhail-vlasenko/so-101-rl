@@ -14,14 +14,14 @@
      Holds the camera while streaming: stop it before launching the native tools below.</p>
   <div class="launch-row camera-controls" data-persist="camera">
     <label>family
-      <select id="camera-family">
+      <select id="camera-family" name="family">
         <option value="aruco">aruco</option>
         <option value="apriltag">apriltag</option>
       </select>
     </label>
-    <label>exposure <input type="number" id="camera-exposure" min="3" max="2047" step="10"
+    <label>exposure <input type="number" id="camera-exposure" name="exposure" min="3" max="2047" step="10"
                            value="{{ camera_defaults.exposure }}"></label>
-    <label>gain <input type="number" id="camera-gain" min="0" max="255" step="15"
+    <label>gain <input type="number" id="camera-gain" name="gain" min="0" max="255" step="15"
                        value="{{ camera_defaults.gain }}"></label>
     <button id="camera-start">Start stream</button>
     <button id="camera-stop" class="danger">Stop stream</button>
