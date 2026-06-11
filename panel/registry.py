@@ -114,6 +114,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
                     checkpoint_picker="{algorithm}_{env}"),
             ArgSpec("+episodes", "int", "Episodes", default="10"),
             ArgSpec("seed", "int", "Seed"),
+            ArgSpec("slow_factor", "float", "Slowdown factor", default="2"),
             ArgSpec("render", "choice", "Native render window", default="true",
                     choices=("true", "false")),
         ),

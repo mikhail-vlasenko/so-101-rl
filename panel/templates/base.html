@@ -16,6 +16,7 @@
   <a href="/camera" class="{{ 'active' if active == 'camera' }}">Camera</a>
   <a href="/page/sysid" class="{{ 'active' if active == 'sysid' }}">Sysid</a>
   <a href="/artifacts" class="{{ 'active' if active == 'artifacts' }}">Artifacts</a>
+  <button id="reset-settings" class="nav-reset" title="Clear saved form values and restore original defaults">Reset defaults</button>
 </nav>
 <main>
 {% block content %}{% endblock %}

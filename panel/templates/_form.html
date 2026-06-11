@@ -7,7 +7,7 @@
     {% for r in spec.resources %}<span class="badge resource">{{ r.value }}</span>{% endfor %}
   </header>
   <p class="description">{{ spec.description }}</p>
-  <form onsubmit="return false;">
+  <form onsubmit="return false;" data-persist="script:{{ spec.id }}">
     {% for arg in spec.args %}
     <label class="field">
       <span>{{ arg.label }}</span>
@@ -15,8 +15,8 @@
         <input type="checkbox" name="{{ arg.field_name }}" value="on">
       {% elif arg.kind == 'choice' %}
         <select name="{{ arg.field_name }}" data-default="{{ arg.default }}">
-          <option value="">(default{{ ': ' + arg.default if arg.default }})</option>
-          {% for c in arg.choices %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+          {% if not arg.default %}<option value="">(default)</option>{% endif %}
+          {% for c in arg.choices %}<option value="{{ c }}"{{ ' selected' if c == arg.default }}>{{ c }}</option>{% endfor %}
         </select>
       {% elif arg.checkpoint_picker %}
         <input type="text" name="{{ arg.field_name }}" placeholder="{{ arg.default }}"

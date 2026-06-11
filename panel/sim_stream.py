@@ -17,12 +17,16 @@ import mujoco
 
 from panel.streamer import FrameBox, JpegStreamer
 
-WIDTH, HEIGHT = 640, 480
-JPEG_QUALITY = 80
+WIDTH, HEIGHT = 960, 720
+JPEG_QUALITY = 92
 
 
 class SimStreamPublisher:
     def __init__(self, model: mujoco.MjModel, port: int) -> None:
+        # Scenes leave the offscreen framebuffer at MuJoCo's 640x480 default;
+        # enlarge it to match our stream resolution or the Renderer rejects it.
+        model.vis.global_.offwidth = WIDTH
+        model.vis.global_.offheight = HEIGHT
         self._renderer = mujoco.Renderer(model, height=HEIGHT, width=WIDTH)
         self._camera = mujoco.MjvCamera()
         mujoco.mjv_defaultFreeCamera(model, self._camera)

@@ -22,6 +22,46 @@ function fmtUptime(seconds) {
   return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
 }
 
+// ---------- form-field persistence ----------
+//
+// Every container with [data-persist="<scope>"] has its named fields saved to
+// the server on change and restored on load. The server stores only overrides;
+// the original defaults stay in the rendered HTML, so "Reset defaults" wipes
+// the overrides and a reload shows the code defaults again.
+
+function fieldValue(el) {
+  return el.type === "checkbox" ? el.checked : el.value;
+}
+
+function applyValue(el, value) {
+  if (el.type === "checkbox") el.checked = Boolean(value);
+  else el.value = value;
+}
+
+async function initSettings() {
+  const containers = document.querySelectorAll("[data-persist]");
+  const resetBtn = document.getElementById("reset-settings");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", async () => {
+      await postJSON("/api/settings/reset", {});
+      window.location.reload();
+    });
+  }
+  if (!containers.length) return;
+  const resp = await fetch("/api/settings");
+  const saved = resp.ok ? await resp.json() : {};
+  for (const container of containers) {
+    const scope = container.dataset.persist;
+    const scopeSaved = saved[scope] || {};
+    for (const el of container.querySelectorAll("[name]")) {
+      if (el.name in scopeSaved) applyValue(el, scopeSaved[el.name]);
+      el.addEventListener("change", () => {
+        postJSON("/api/settings", { scope, field: el.name, value: fieldValue(el) });
+      });
+    }
+  }
+}
+
 // ---------- script launch cards ----------
 
 function collectValues(card) {
@@ -236,6 +276,7 @@ function initCameraPage() {
   showStream(view.dataset.streaming === "1");
 }
 
+initSettings();
 initScriptCards();
 initDashboard();
 initRunPage();

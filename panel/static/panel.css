@@ -38,6 +38,15 @@ nav a {
 }
 nav a:hover { background: var(--border); }
 nav a.active { background: var(--accent); color: #08111c; }
+nav .nav-reset {
+  margin-left: auto;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-weight: 500;
+  padding: 0.3rem 0.7rem;
+}
+nav .nav-reset:hover { color: var(--text); background: var(--border); filter: none; }
 
 main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 h1 { font-size: 1.4rem; }
@@ -141,4 +150,4 @@ td a { color: var(--accent); }
 
 .camera-controls { justify-content: flex-start; }
 .camera-controls label { color: var(--muted); font-size: 0.85rem; display: flex; gap: 0.4rem; align-items: center; }
-.camera-controls input { width: 90px; flex: 0; }
+.camera-controls input { width: 120px; flex: 0 0 auto; }

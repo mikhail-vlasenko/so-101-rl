@@ -25,6 +25,7 @@ from panel.registry import (
     validate_registry,
 )
 from panel.runner import ResourceBusyError, Run, Runner
+from panel.settings import SettingsStore
 from panel.streamer import STREAM_BOUNDARY
 
 PANEL_DIR = Path(__file__).resolve().parent
@@ -76,6 +77,7 @@ def create_app(runner: Runner | None = None) -> FastAPI:
     app = FastAPI(title="SO-101 panel", lifespan=lifespan)
     app.state.runner = runner if runner is not None else Runner()
     app.state.camera = CameraService(app.state.runner)
+    app.state.settings = SettingsStore()
 
     templates = Jinja2Templates(directory=str(PANEL_DIR / "templates"))
     app.mount("/static", StaticFiles(directory=str(PANEL_DIR / "static")), name="static")
@@ -241,6 +243,23 @@ def create_app(runner: Runner | None = None) -> FastAPI:
             options += [str(p.relative_to(REPO_ROOT)) for p in zips]
         return {"log_dir": log_dir, "options": options,
                 "exists": base.is_dir(), "has_best": (base / "best_model.zip").exists()}
+
+    # ---- ui settings (form-field persistence) ----
+
+    @app.get("/api/settings")
+    def api_settings():
+        return app.state.settings.all()
+
+    @app.post("/api/settings")
+    async def api_settings_set(request: Request):
+        body = await request.json()
+        app.state.settings.set(body["scope"], body["field"], body["value"])
+        return {"ok": True}
+
+    @app.post("/api/settings/reset")
+    def api_settings_reset():
+        app.state.settings.reset()
+        return {"ok": True}
 
     # ---- camera ----
 
