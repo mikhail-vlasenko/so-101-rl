@@ -243,8 +243,8 @@ class SO101BaseEnv(gym.Env):
             self._obs_history.popleft()
         return self._obs_history[0]
 
-    def _has_gripper_contact(self):
-        """Check if cube_geom is in contact with both jaws simultaneously."""
+    def _n_jaw_contacts(self):
+        """Number of distinct gripper jaws (0, 1, or 2) currently touching the cube."""
         fixed_contact = False
         moving_contact = False
         for i in range(self.data.ncon):
@@ -260,9 +260,11 @@ class SO101BaseEnv(gym.Env):
                 fixed_contact = True
             if other in self.moving_jaw_geom_ids:
                 moving_contact = True
-            if fixed_contact and moving_contact:
-                return True
-        return False
+        return int(fixed_contact) + int(moving_contact)
+
+    def _has_gripper_contact(self):
+        """Check if cube_geom is in contact with both jaws simultaneously."""
+        return self._n_jaw_contacts() == 2
 
     def _has_arm_collision(self):
         """Check if any arm/gripper geom has a contact (with environment or itself)."""
@@ -304,6 +306,14 @@ class SO101BaseEnv(gym.Env):
         return (dist < 0.05
                 and gripper_val < 0.3
                 and self._has_gripper_contact())
+
+    def _gripper_closedness(self):
+        """Fraction the gripper is closed, in [0, 1]. 0 = fully open, 1 = fully closed.
+        Normalized against the gripper joint's range from the model (single source)."""
+        gripper_val = self.data.qpos[self.joint_ids[self.gripper_idx]]
+        lo = self.joint_low[self.gripper_idx]
+        hi = self.joint_high[self.gripper_idx]
+        return float(np.clip((hi - gripper_val) / (hi - lo), 0.0, 1.0))
 
     def _sample_cube_pos(self):
         """Return random cube xy position. Override for rejection sampling."""

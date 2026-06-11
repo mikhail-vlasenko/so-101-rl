@@ -1,6 +1,7 @@
 defaults:
   - _self_
   - env: pickplace
+  - dr: full          # domain randomization preset: full (default) | none (curriculum stage 1)
 
 algorithm: ppo
 resume: null
@@ -17,32 +18,10 @@ stream_port: null  # eval/show_starts: serve sim view as MJPEG on this port (web
 # speed limits) come from src/units.py — don't hand-compute them in comments.
 action_scale: 0.07
 
-# Per-step Gaussian noise added to observations during training (sim2real domain randomization).
-# Noise is applied at the source (qpos, qvel, marker poses, cube_pos); derived obs
-# (cube_to_target) inherit the noise via the noisy cube_pos. Reward always uses true state.
-obs_noise:
-  qpos_sigma: 0.005        # rad,   joint encoder jitter (~0.3°)
-  qvel_sigma: 0.05         # rad/s, joint velocity noise (numerically differentiated)
-  marker_pos_sigma: 0.002  # m,     per-frame AprilTag position jitter (solvePnP)
-  marker_rot_sigma: 0.02   # rad,   per-frame AprilTag orientation jitter (~1°)
-  cube_sigma: 0.003        # m,     cube position from vision pipeline
-
-# Per-episode constant bias added to observations (calibration drift / mounting offset).
-# Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
-# differentiating biased qpos has zero DC offset, so a velocity bias is non-physical.
-# Marker biases are drawn independently per tag (glue placement + camera extrinsics error
-# don't correlate between the two tags). qpos/cube bias stay disabled: see
-# calibration_plan.md — those are calibrated on the real rig and subtracted pre-policy.
-obs_bias:
-  qpos_sigma: 0.0
-  marker_pos_sigma: 0.005  # m,    tag glue placement + extrinsics offset
-  marker_rot_sigma: 0.05   # rad,  tag alignment error (~3°)
-  cube_sigma: 0.0
-
-# Number of frames the agent's observation lags behind the true state (sim2real DR).
-# 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
-# At 15 Hz control, 2 frames = 133 ms, more lag than the real bus exhibits — 1 frame fits.
-obs_latency: 1
+# obs_noise / obs_bias / obs_latency are the domain-randomization knobs and live in
+# the `dr` config group (conf/dr/{full,none}.yaml), selected via the defaults list
+# above. They differ between curriculum stages; prev_actions_n / frame_stack below
+# do NOT (they change obs dim and must match across a resume).
 
 # Number of past actions appended to the observation. 0 = disabled; N=2 lets the
 # policy infer velocity / action smoothness from its own recent commands.
@@ -53,7 +32,7 @@ prev_actions_n: 1
 frame_stack: 1
 
 train:
-  time_limit_minutes: 40
+  time_limit_minutes: 20
   n_envs: 16
   net_arch: [256, 256, 256, 256]
   input_batchnorm: true

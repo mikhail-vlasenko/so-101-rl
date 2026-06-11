@@ -4,8 +4,9 @@ import numpy as np
 import pytest
 
 from src.lift_env import (
-    SO101LiftEnv, CONTACT_FORCE_COEFF, CUBE_MOTION_COEFF,
-    HEIGHT_PROGRESS_COEFF, GRASP_HOLD_REWARD,
+    SO101LiftEnv, CUBE_MOTION_COEFF, CUBE_MOTION_DEADZONE,
+    HEIGHT_PROGRESS_COEFF, GRASP_HOLD_REWARD, TIME_PENALTY,
+    EE_CUBE_COEFF, JAW_CONTACT_REWARD, GRIPPER_CLOSE_COEFF,
 )
 
 
@@ -37,9 +38,9 @@ def test_height_progress_gated_on_grasp(monkeypatch):
     env.reset(seed=0)
     # Force not-grasped: cube should not get height-progress reward even if it rises.
     monkeypatch.setattr(env, "_detect_grasp", lambda: False)
-    monkeypatch.setattr(env, "_arm_cube_contact_force", lambda: 0.0)
+    monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
     env._prev_cube_pos = np.array([0.2, 0.0, 0.05])
-    cube_pos = np.array([0.2, 0.0, 0.10])  # rose 5 cm
+    cube_pos = np.array([0.2, 0.0, 0.10])  # rose 5 cm (vertical only)
     reward, _, _ = env._compute_step(
         ee_pos=np.array([0.2, 0.0, 0.15]),
         cube_pos=cube_pos,
@@ -47,8 +48,9 @@ def test_height_progress_gated_on_grasp(monkeypatch):
         grasped=False,
         floor_contact=False,
     )
-    # Should NOT contain HEIGHT_PROGRESS_COEFF * 0.05; instead motion penalty applies.
-    assert reward < 0  # dominated by negatives
+    # Pre-grasp vertical rise must NOT be credited the height-progress term, and
+    # horizontal-only motion penalty means a purely vertical move isn't penalized.
+    assert reward == pytest.approx(TIME_PENALTY + EE_CUBE_COEFF * 0.05)
     # If gating broke, this would be > +9 from the height-progress term.
     assert reward > -2.0  # sanity bound
 
@@ -72,7 +74,7 @@ def test_height_progress_credited_when_grasped():
 def test_floor_proximity_penalty(monkeypatch):
     env = SO101LiftEnv(env_cfg=_cfg())
     env.reset(seed=0)
-    monkeypatch.setattr(env, "_arm_cube_contact_force", lambda: 0.0)
+    monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
     env._prev_cube_pos = np.array([0.2, 0.0, 0.05])
 
     # Case 1: arm far from floor → no proximity penalty
@@ -106,7 +108,7 @@ def test_min_arm_floor_dist_runs():
 def test_cube_motion_penalty_pregrasp(monkeypatch):
     env = SO101LiftEnv(env_cfg=_cfg())
     env.reset(seed=0)
-    monkeypatch.setattr(env, "_arm_cube_contact_force", lambda: 0.0)
+    monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
     env._prev_cube_pos = np.array([0.20, 0.0, 0.05])
     # Move cube 1 cm laterally in one step (dt ~ 0.0667s) → speed ~0.15 m/s
     cube_pos = np.array([0.21, 0.0, 0.05])
@@ -118,5 +120,26 @@ def test_cube_motion_penalty_pregrasp(monkeypatch):
         floor_contact=False,
     )
     speed = 0.01 / env._step_dt
-    expected = -0.05 + 0.0 + CUBE_MOTION_COEFF * speed  # ee_cube_dist=0, no contact force
+    # Only horizontal speed past the deadzone is penalized; no jaw contact.
+    expected = TIME_PENALTY + CUBE_MOTION_COEFF * max(0.0, speed - CUBE_MOTION_DEADZONE)
     assert reward == pytest.approx(expected)
+
+
+def test_grasp_contact_ladder_pregrasp(monkeypatch):
+    """Pre-grasp reward rises with jaw contact: touch one jaw, then close on both."""
+    env = SO101LiftEnv(env_cfg=_cfg())
+    env.reset(seed=0)
+    monkeypatch.setattr(env, "_gripper_closedness", lambda: 1.0)
+    kwargs = dict(ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
+                  ee_cube_dist=0.02, grasped=False, floor_contact=False)
+
+    def step_with(n_jaw):
+        env._prev_cube_pos = np.array([0.20, 0.0, 0.05])  # stationary: no motion penalty
+        monkeypatch.setattr(env, "_n_jaw_contacts", lambda: n_jaw)
+        r, _, _ = env._compute_step(**kwargs)
+        return r
+
+    r0, r1, r2 = step_with(0), step_with(1), step_with(2)
+    # One jaw earns the contact reward; both jaws additionally earn the close reward.
+    assert r1 == pytest.approx(r0 + JAW_CONTACT_REWARD)
+    assert r2 == pytest.approx(r0 + JAW_CONTACT_REWARD + GRIPPER_CLOSE_COEFF)  # closedness=1

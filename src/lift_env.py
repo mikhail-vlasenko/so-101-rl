@@ -5,7 +5,6 @@ Terminates when cube reaches target height.
 """
 
 import numpy as np
-import mujoco
 
 from src.base_env import SO101BaseEnv
 
@@ -13,10 +12,17 @@ from src.base_env import SO101BaseEnv
 # Reward constants
 TIME_PENALTY = -0.05
 EE_CUBE_COEFF = -0.5
-GRASP_HOLD_REWARD = 0.05
-HEIGHT_PROGRESS_COEFF = 200.0   # credited only while grasped
-CONTACT_FORCE_COEFF = -0.002    # per N of arm↔cube normal force, pre-grasp only
-CUBE_MOTION_COEFF = -2.0        # per m/s of cube speed, pre-grasp only
+GRASP_HOLD_REWARD = 0.15         # a static grasp must strictly beat the pre-grasp shaping rungs
+HEIGHT_PROGRESS_COEFF = 200.0    # credited only while grasped
+# Contact-quality bridge reach -> grasp (the gradient out of the local optima).
+# Both rungs are gated on real cube↔jaw contact so the bonus can't be farmed by
+# shoving the sponge with a closed gripper near it (which is what proximity-only
+# shaping produced). Only horizontal flinging is penalized; gentle grasp contact
+# is free.
+JAW_CONTACT_REWARD = 0.05        # one+ gripper jaw touching the cube, pre-grasp
+GRIPPER_CLOSE_COEFF = 0.05       # per unit closedness, only once BOTH jaws straddle the cube
+CUBE_MOTION_COEFF = -1.0         # per m/s of horizontal cube speed past the deadzone, pre-grasp
+CUBE_MOTION_DEADZONE = 0.05      # m/s; cube jitter below this isn't penalized
 
 
 class SO101LiftEnv(SO101BaseEnv):
@@ -37,24 +43,6 @@ class SO101LiftEnv(SO101BaseEnv):
     def _on_reset(self, cube_pos):
         self._prev_cube_pos = cube_pos.copy()
 
-    def _arm_cube_contact_force(self):
-        """Sum of normal contact force magnitudes (N) between any arm geom and the cube."""
-        total = 0.0
-        wrench = np.zeros(6)
-        for i in range(self.data.ncon):
-            c = self.data.contact[i]
-            if c.geom1 == self.cube_geom_id:
-                other = c.geom2
-            elif c.geom2 == self.cube_geom_id:
-                other = c.geom1
-            else:
-                continue
-            if other not in self.arm_geom_ids:
-                continue
-            mujoco.mj_contactForce(self.model, self.data, i, wrench)
-            total += abs(wrench[0])
-        return total
-
     def _compute_step(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):
         reward = TIME_PENALTY
         reward += EE_CUBE_COEFF * ee_cube_dist
@@ -64,9 +52,13 @@ class SO101LiftEnv(SO101BaseEnv):
             height_delta = cube_pos[2] - self._prev_cube_pos[2]
             reward += HEIGHT_PROGRESS_COEFF * height_delta
         else:
-            cube_speed = np.linalg.norm(cube_pos - self._prev_cube_pos) / self._step_dt
-            reward += CUBE_MOTION_COEFF * cube_speed
-            reward += CONTACT_FORCE_COEFF * self._arm_cube_contact_force()
+            horiz_speed = np.linalg.norm((cube_pos - self._prev_cube_pos)[:2]) / self._step_dt
+            reward += CUBE_MOTION_COEFF * max(0.0, horiz_speed - CUBE_MOTION_DEADZONE)
+            n_jaw = self._n_jaw_contacts()
+            if n_jaw >= 1:
+                reward += JAW_CONTACT_REWARD
+            if n_jaw == 2:
+                reward += GRIPPER_CLOSE_COEFF * self._gripper_closedness()
 
         self._prev_cube_pos = cube_pos.copy()
 
