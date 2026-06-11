@@ -21,7 +21,6 @@ Usage:
 
 import argparse
 import signal
-import time
 from pathlib import Path
 
 import mujoco
@@ -29,11 +28,12 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from real.twin.constants import (
+    INTERP_HZ,
     SERVO_ACCEL,
     SERVO_POSITION_KP,
     SERVO_SPEED,
 )
-from real.twin.control import clamp_raw_delta
+from real.twin.control import clamp_raw_delta, stream_sub_targets
 from real.twin.mapping import JointMaps, load_joint_maps, rad_to_raw, raw_to_rad
 from real.twin.servo_io import ServoBus
 from src.units import max_raw_delta_per_step
@@ -44,7 +44,16 @@ DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 DEFAULT_CAL = REPO_ROOT.parent / "feetech-servo-sdk" / "calibration.json"
 CONFIG_YAML = REPO_ROOT / "conf" / "config.yaml"
 HOMING_S = 3.0
-SETTLE_S = 0.5
+# Long enough for the servo's slow accel ramp to close the homing lag and for
+# stiction to settle — the stretch_* trajectories start gravity-loaded, so an
+# unsettled start would leak the homing transient into the first logged ticks.
+SETTLE_S = 1.0
+
+# Sub-target interpolation across each sysid tick, mirroring ArmLoop: the
+# servo profile chases a fresh waypoint every few ms instead of one coarse
+# 15 Hz step, so recorded dynamics match the deployment command shaping.
+N_INTERP = max(1, int(round(INTERP_HZ / SYSID_HZ)))
+SUB_DT = SYSID_DT / N_INTERP
 
 
 def smooth_ramp(start: np.ndarray, end: np.ndarray, n_steps: int) -> np.ndarray:
@@ -57,20 +66,18 @@ def stream(bus: ServoBus, targets: np.ndarray, jm: JointMaps, direction: np.ndar
            log_pos: list[np.ndarray] | None) -> np.ndarray:
     """Send each target row at SYSID_DT period, optionally recording measured pos.
 
+    Each tick is streamed as N_INTERP interpolated sub-targets (same shaping as
+    ArmLoop.tick); stream_sub_targets paces the full SYSID_DT internally.
     Returns the last raw target written (for chaining)."""
-    t_loop = time.time()
+    def write(raw: np.ndarray) -> None:
+        if execute:
+            bus.write_all(raw, SERVO_SPEED, SERVO_ACCEL)
+
     for i in range(len(targets)):
         target_raw = rad_to_raw(targets[i], jm, direction)
         target_raw = clamp_raw_delta(prev_raw, target_raw, max_raw_delta)
-        if execute:
-            bus.write_all(target_raw, SERVO_SPEED, SERVO_ACCEL)
+        stream_sub_targets(prev_raw, target_raw, N_INTERP, SUB_DT, write)
         prev_raw = target_raw
-
-        t_next = t_loop + SYSID_DT
-        sleep_for = t_next - time.time()
-        if sleep_for > 0:
-            time.sleep(sleep_for)
-        t_loop = time.time()
 
         raw = bus.read_all()
         if log_pos is not None:

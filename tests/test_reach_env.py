@@ -73,13 +73,16 @@ def test_terminates_after_dwell_when_snapped_to_target():
     # Snap arm exactly onto the target waypoint and zero velocity. Also snap
     # the actuator filter state (data.act) — position actuators with a
     # timeconst drive toward act, not ctrl, so leaving act at the reset pose
-    # would pull the arm back to HOME on the first step.
+    # would pull the arm back to HOME on the first step — and the servo
+    # profile state, which would otherwise chase a setpoint at the reset pose.
     env.data.qpos[env.joint_qposadr] = env.target_qpos
     env.data.qvel[env.joint_dofadr] = 0.0
     env.data.ctrl[:env.n_joints] = env.target_qpos
     if env.model.na > 0:
         env.data.act[:] = env.target_qpos
     mujoco.mj_forward(env.model, env.data)
+    env._servo_profile.reset(env.target_qpos)
+    env._ctrl_target = env.target_qpos.copy()
     env._prev_dist = 0.0
 
     terminated = False

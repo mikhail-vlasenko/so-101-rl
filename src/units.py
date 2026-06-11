@@ -18,6 +18,13 @@ import numpy as np
 SERVO_RAW_PER_REV = 4096
 SERVO_RAW_UNIT_RAD = 2.0 * np.pi / SERVO_RAW_PER_REV
 
+# SyncWritePosEx argument units (Feetech SMS-STS protocol):
+# speed argument is in steps of 0.732 RPM, accel argument in steps of
+# 8.7 deg/s². Multiply SERVO_SPEED / SERVO_ACCEL (real/twin/constants.py)
+# by these to get the firmware profile limits in joint-space SI units.
+SERVO_SPEED_UNIT_RAD_S = 0.732 * 2.0 * np.pi / 60.0
+SERVO_ACCEL_UNIT_RAD_S2 = 8.7 * np.pi / 180.0
+
 # Commanded position-target deltas below this many raw units get zeroed. Models
 # the motor's stiction / min-PWM deadzone: small target errors yield
 # below-bring-up current and the joint stalls. Observed on the real arm at

@@ -11,6 +11,7 @@ import mujoco
 import gymnasium as gym
 from gymnasium import spaces
 
+from src.servo_profile import ServoProfile
 from src.units import action_to_target
 
 
@@ -171,6 +172,11 @@ class SO101BaseEnv(gym.Env):
         self.gripper_idx = JOINT_NAMES.index("gripper")
 
         self._prev_actions = np.zeros((self.prev_actions_n, self.n_joints), dtype=np.float32)
+
+        # Firmware motion-profile model: ctrl carries the profiled setpoint,
+        # not the raw tick target (see src/servo_profile.py).
+        self._servo_profile = ServoProfile(self.n_joints)
+        self._ctrl_target = None
 
         # Cube-drag metric: cube center within DRAG_HEIGHT_TOL of resting height
         # AND lateral speed above DRAG_SPEED_THRESH (m/s).
@@ -378,6 +384,8 @@ class SO101BaseEnv(gym.Env):
             attempt += 1
             if attempt % 10 == 0:
                 print(f"WARNING: {attempt} arm position samples rejected (collision)")
+        self._servo_profile.reset(joint_pos)
+        self._ctrl_target = joint_pos.copy()
         self.step_count = 0
         self._max_cube_height = cube_pos[2]
         self._floor_contact_steps = 0
@@ -416,10 +424,12 @@ class SO101BaseEnv(gym.Env):
         current = self.data.qpos[self.joint_qposadr].copy()
         target = action_to_target(current, action, self.action_scale,
                                   self.joint_low, self.joint_high)
-        self.data.ctrl[:self.n_joints] = target
-
-        for _ in range(self.n_substeps):
+        setpoints = self._servo_profile.tick(self._ctrl_target, target,
+                                             self.n_substeps, self.model.opt.timestep)
+        for k in range(self.n_substeps):
+            self.data.ctrl[:self.n_joints] = setpoints[k]
             mujoco.mj_step(self.model, self.data)
+        self._ctrl_target = target
 
         ee_pos = self._get_ee_pos()
         cube_pos = self._get_cube_pos()

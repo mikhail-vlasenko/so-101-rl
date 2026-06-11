@@ -20,7 +20,8 @@ Long-term tasks and ideas live in `TODO.md` at the repo root. Check it for known
 ### Shared
 
 - `src/base_env.py` — Base Gymnasium env with MuJoCo setup, contact detection, rendering, reset/step skeleton (31 + 6·prev_actions_n obs dims, 6-dim action). The policy sees no GT end-effector position; instead it gets the world poses (xyz + axis-angle rotation vector) of the two AprilTag marker sites (`marker_finger`, `marker_wrist` in `so101.xml`), matching what the camera measures on the real arm. The manipulated object is a 3×2×1.5 cm sponge stand-in (still named `cube_*` everywhere) that spawns standing on a random non-largest face.
-- `src/units.py` — single source of truth for the action → rad → servo-raw-unit chain: `action_to_target` (quantization + stiction deadzone, used by sim envs and real rollouts alike) and `max_raw_delta_per_step(action_scale)` (per-tick real-bus safety clamp, always derived, never hard-coded)
+- `src/units.py` — single source of truth for the action → rad → servo-raw-unit chain: `action_to_target` (quantization + stiction deadzone, used by sim envs and real rollouts alike), `max_raw_delta_per_step(action_scale)` (per-tick real-bus safety clamp, always derived, never hard-coded), and the Feetech speed/accel register unit conversions
+- `src/servo_profile.py` — sim-side model of the Feetech firmware's trapezoidal motion profile (`SERVO_SPEED`/`SERVO_ACCEL` registers) plus per-tick sub-target interpolation. The training envs and `sysid.replay_sim` feed `data.ctrl` from `ServoProfile.tick`, never the raw tick target — keep any new sim driver on this path.
 
 ### Lift
 

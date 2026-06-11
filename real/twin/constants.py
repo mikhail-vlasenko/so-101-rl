@@ -49,7 +49,11 @@ SERVO_ACCEL = 10
 # gripper also runs at 8: it needs no positioning stiffness, and since grip
 # force scales with Kp · position error, a soft loop squeezes the cube (and
 # its own gear train) gently instead of grinding at full P-torque.
-SERVO_POSITION_KP = (8, 32, 32, 32, 32, 8)
+#
+# shoulder_lift runs at 24: visible shake at the factory 32, mild softening
+# was enough. It carries the largest gravity load — if it starts sagging on
+# stretched-out holds, this is the first value to revisit.
+SERVO_POSITION_KP = (8, 24, 32, 32, 32, 8)
 
 # Position-correction deadzone (Feetech SMS-STS registers 26/27, CW/CCW),
 # per joint in JOINT_NAMES order. Units 0.087°/unit, range 0..16, factory

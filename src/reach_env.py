@@ -14,6 +14,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from src.base_env import JOINT_NAMES
+from src.servo_profile import ServoProfile
 from src.units import action_to_target
 
 
@@ -84,6 +85,11 @@ class SO101ReachEnv(gym.Env):
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
         self._prev_actions = np.zeros((self.prev_actions_n, self.n_joints), dtype=np.float32)
+
+        # Firmware motion-profile model: ctrl carries the profiled setpoint,
+        # not the raw tick target (see src/servo_profile.py).
+        self._servo_profile = ServoProfile(self.n_joints)
+        self._ctrl_target = None
 
         self.step_count = 0
         self.viewer = None
@@ -173,7 +179,13 @@ class SO101ReachEnv(gym.Env):
         q0 = self._sample_safe_init()
         self.data.qpos[self.joint_qposadr] = q0
         self.data.ctrl[:self.n_joints] = q0
+        # Actuators carry activation state (dyntype="filter"); initialize it at
+        # the joint position so the controller doesn't snap from 0 on step one.
+        if self.model.na > 0:
+            self.data.act[:] = q0
         mujoco.mj_forward(self.model, self.data)
+        self._servo_profile.reset(q0)
+        self._ctrl_target = q0.copy()
 
         self.step_count = 0
         self.dwell_count = 0
@@ -195,10 +207,12 @@ class SO101ReachEnv(gym.Env):
         current = self.data.qpos[self.joint_qposadr].copy()
         target = action_to_target(current, action, self.action_scale,
                                   self.joint_low, self.joint_high)
-        self.data.ctrl[:self.n_joints] = target
-
-        for _ in range(self.n_substeps):
+        setpoints = self._servo_profile.tick(self._ctrl_target, target,
+                                             self.n_substeps, self.model.opt.timestep)
+        for k in range(self.n_substeps):
+            self.data.ctrl[:self.n_joints] = setpoints[k]
             mujoco.mj_step(self.model, self.data)
+        self._ctrl_target = target
 
         q = self._get_joint_pos()
         ee_pos = self._get_ee_pos()
