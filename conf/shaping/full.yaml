@@ -1,0 +1,16 @@
+# @package _global_
+# Full careful-behavior shaping for the lift task: keep the arm off the floor and
+# grasp the sponge gently instead of poking/rolling it. Default preset; the
+# from-scratch curriculum stage runs `shaping=none` so these terms can't block
+# learning to grasp at all, then a later stage fine-tunes under `shaping=full`.
+# Lift-scoped (writes lift_env.*); pickplace keeps its own floor penalty.
+# Magnitudes are deliberately small: pre-grasp, touching the cube is only worth
+# the +0.05 jaw-contact reward, so a tip/poke/floor penalty that exceeds that at
+# typical contact makes the policy stop touching the cube entirely. Reach `full`
+# via `shaping=light` first — fine-tuning straight from `none` to `full` is a cliff.
+lift_env:
+  floor_contact_penalty: -0.20     # per step any arm geom touches the floor
+  floor_proximity_thresh: 0.003    # m; penalize arm geoms closer than this to the floor
+  floor_proximity_penalty: -0.10   # per step the min arm↔floor dist is under the threshold
+  poke_force_coeff: -0.001         # per N of arm↔cube contact force, pre-grasp (gentle approach)
+  cube_tip_coeff: -0.05            # per rad/s of cube angular speed, pre-grasp (don't roll it over)

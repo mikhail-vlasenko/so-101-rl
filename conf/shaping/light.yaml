@@ -1,0 +1,12 @@
+# @package _global_
+# Intermediate careful-behavior shaping — the first refinement rung. Roughly the
+# floor penalties the policy already trained under, plus a faint gentleness nudge.
+# Curriculum: shaping=none (learn to grasp) -> light (relearn while staying gentle)
+# -> full (deployment-target gentleness). Fine-tuning none -> full directly makes
+# the policy stop touching the cube, so step through light.
+lift_env:
+  floor_contact_penalty: -0.12
+  floor_proximity_thresh: 0.003
+  floor_proximity_penalty: -0.05
+  poke_force_coeff: -0.0004
+  cube_tip_coeff: -0.02

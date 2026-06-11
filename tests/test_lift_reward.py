@@ -20,6 +20,8 @@ def _cfg():
         "floor_contact_penalty": -0.10,
         "floor_proximity_thresh": 0.003,
         "floor_proximity_penalty": -0.05,
+        "poke_force_coeff": 0.0,
+        "cube_tip_coeff": 0.0,
         "target_height": 0.10,
     }
 
@@ -143,3 +145,50 @@ def test_grasp_contact_ladder_pregrasp(monkeypatch):
     # One jaw earns the contact reward; both jaws additionally earn the close reward.
     assert r1 == pytest.approx(r0 + JAW_CONTACT_REWARD)
     assert r2 == pytest.approx(r0 + JAW_CONTACT_REWARD + GRIPPER_CLOSE_COEFF)  # closedness=1
+
+
+def test_poke_force_penalty_pregrasp(monkeypatch):
+    """With shaping on, pre-grasp arm↔cube contact force is penalized (gentle approach)."""
+    env = SO101LiftEnv(env_cfg=_cfg())
+    env.reset(seed=0)
+    env.poke_force_coeff = -0.002
+    monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
+    monkeypatch.setattr(env, "_arm_cube_contact_force", lambda: 20.0)
+    env._prev_cube_pos = np.array([0.20, 0.0, 0.05])
+    reward, _, _ = env._compute_step(
+        ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
+        ee_cube_dist=0.0, grasped=False, floor_contact=False,
+    )
+    assert reward == pytest.approx(TIME_PENALTY + env.poke_force_coeff * 20.0)
+
+
+def test_cube_tip_penalty_pregrasp(monkeypatch):
+    """With shaping on, pre-grasp cube angular speed (rolling it over) is penalized."""
+    env = SO101LiftEnv(env_cfg=_cfg())
+    env.reset(seed=0)
+    env.cube_tip_coeff = -0.5
+    monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
+    monkeypatch.setattr(env, "_cube_angular_speed", lambda: 2.0)
+    env._prev_cube_pos = np.array([0.20, 0.0, 0.05])
+    reward, _, _ = env._compute_step(
+        ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
+        ee_cube_dist=0.0, grasped=False, floor_contact=False,
+    )
+    assert reward == pytest.approx(TIME_PENALTY + env.cube_tip_coeff * 2.0)
+
+
+def test_shaping_terms_skipped_when_zero(monkeypatch):
+    """shaping=none: poke/tip helpers and the proximity check aren't even called."""
+    env = SO101LiftEnv(env_cfg=_cfg())  # poke/tip coeffs are 0 in the fixture
+    env.reset(seed=0)
+    env.floor_proximity_penalty = 0.0
+    monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
+    for name in ("_arm_cube_contact_force", "_cube_angular_speed", "_min_arm_floor_dist"):
+        monkeypatch.setattr(env, name, lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(f"{name} should not be called when its shaping term is off")))
+    env._prev_cube_pos = np.array([0.20, 0.0, 0.05])
+    reward, _, _ = env._compute_step(
+        ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
+        ee_cube_dist=0.0, grasped=False, floor_contact=False,
+    )
+    assert reward == pytest.approx(TIME_PENALTY)

@@ -2,6 +2,7 @@ defaults:
   - _self_
   - env: pickplace
   - dr: full          # domain randomization preset: full (default) | none (curriculum stage 1)
+  - shaping: full     # lift careful-behavior shaping: full (default) | none (curriculum stage 1)
 
 algorithm: ppo
 resume: null

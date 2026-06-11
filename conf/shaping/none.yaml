@@ -1,0 +1,11 @@
+# @package _global_
+# No careful-behavior shaping — curriculum stage 1. The policy learns to grasp
+# and lift at all (floor hits / rough pokes are fine here); `shaping=full`
+# refines gentleness afterward. All penalties zeroed; thresh is unused while its
+# penalty is 0 (the env gates the proximity check on a nonzero penalty).
+lift_env:
+  floor_contact_penalty: 0.0
+  floor_proximity_thresh: 0.003
+  floor_proximity_penalty: 0.0
+  poke_force_coeff: 0.0
+  cube_tip_coeff: 0.0

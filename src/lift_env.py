@@ -34,8 +34,14 @@ class SO101LiftEnv(SO101BaseEnv):
 
     def _parse_config(self, cfg):
         self.target_height = float(cfg["target_height"])
+        # Careful-behavior shaping (floor avoidance + gentle grasp). Owned by the
+        # `shaping` config group (conf/shaping/{full,none}.yaml); zeroed for the
+        # from-scratch stage so it can't block learning to grasp at all. Each term
+        # is gated on its coefficient below, so `shaping=none` skips the extra work.
         self.floor_proximity_thresh = float(cfg["floor_proximity_thresh"])
         self.floor_proximity_penalty = float(cfg["floor_proximity_penalty"])
+        self.poke_force_coeff = float(cfg["poke_force_coeff"])
+        self.cube_tip_coeff = float(cfg["cube_tip_coeff"])
 
     def _obs_extra(self, cube_pos):
         return [0.0, 0.0, 0.0, self.TASK_ID]
@@ -59,13 +65,20 @@ class SO101LiftEnv(SO101BaseEnv):
                 reward += JAW_CONTACT_REWARD
             if n_jaw == 2:
                 reward += GRIPPER_CLOSE_COEFF * self._gripper_closedness()
+            # Gentle approach: penalize hard pokes and rolling the sponge over,
+            # pre-grasp only (after grasp the cube rides with the gripper).
+            if self.poke_force_coeff:
+                reward += self.poke_force_coeff * self._arm_cube_contact_force()
+            if self.cube_tip_coeff:
+                reward += self.cube_tip_coeff * self._cube_angular_speed()
 
         self._prev_cube_pos = cube_pos.copy()
 
         if floor_contact:
             reward += self.floor_contact_penalty
 
-        if self._min_arm_floor_dist(self.floor_proximity_thresh) < self.floor_proximity_thresh:
+        if self.floor_proximity_penalty and \
+                self._min_arm_floor_dist(self.floor_proximity_thresh) < self.floor_proximity_thresh:
             reward += self.floor_proximity_penalty
 
         terminated = cube_pos[2] >= self.target_height

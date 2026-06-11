@@ -151,6 +151,7 @@ class SO101BaseEnv(gym.Env):
 
         cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
         self.cube_qpos_idx = self.model.jnt_qposadr[cube_joint_id]
+        self.cube_dofadr = self.model.jnt_dofadr[cube_joint_id]
         # Sponge box half extents; per-episode resting half-height (depends on
         # which face it stands on) is set in reset() as self.cube_rest_half_z.
         self.cube_half_extents = self.model.geom_size[self.cube_geom_id].copy()
@@ -265,6 +266,29 @@ class SO101BaseEnv(gym.Env):
     def _has_gripper_contact(self):
         """Check if cube_geom is in contact with both jaws simultaneously."""
         return self._n_jaw_contacts() == 2
+
+    def _arm_cube_contact_force(self):
+        """Sum of normal contact force magnitudes (N) between any arm geom and the cube."""
+        total = 0.0
+        wrench = np.zeros(6)
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            if c.geom1 == self.cube_geom_id:
+                other = c.geom2
+            elif c.geom2 == self.cube_geom_id:
+                other = c.geom1
+            else:
+                continue
+            if other not in self.arm_geom_ids:
+                continue
+            mujoco.mj_contactForce(self.model, self.data, i, wrench)
+            total += abs(wrench[0])
+        return total
+
+    def _cube_angular_speed(self):
+        """Magnitude of the cube's angular velocity (rad/s) — how fast it tips/rolls."""
+        w = self.data.qvel[self.cube_dofadr + 3:self.cube_dofadr + 6]
+        return float(np.linalg.norm(w))
 
     def _has_arm_collision(self):
         """Check if any arm/gripper geom has a contact (with environment or itself)."""

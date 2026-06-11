@@ -20,10 +20,10 @@ obs_noise:
 # don't correlate between the two tags). qpos/cube bias stay disabled: see
 # calibration_plan.md — those are calibrated on the real rig and subtracted pre-policy.
 obs_bias:
-  qpos_sigma: 0.0
+  qpos_sigma: 0.01
   marker_pos_sigma: 0.005  # m,    tag glue placement + extrinsics offset
   marker_rot_sigma: 0.05   # rad,  tag alignment error (~3°)
-  cube_sigma: 0.0
+  cube_sigma: 0.005
 
 # Number of frames the agent's observation lags behind the true state (sim2real DR).
 # 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
