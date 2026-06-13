@@ -208,6 +208,51 @@ def _pan_action():
     return action
 
 
+def _run_seq(use_profile, phase1, phase2, n1=20, n2=25, accel=None):
+    """Drive `phase1` action for n1 ticks, then `phase2` for n2; return the
+    pan-joint qpos trajectory of phase 2 plus the qpos at the switch. `accel`
+    overrides the profile's SERVO_ACCEL register value."""
+    from src.units import SERVO_ACCEL_UNIT_RAD_S2
+    pan = JOINT_NAMES.index("shoulder_pan")
+    env = _make_env(); env.use_servo_profile = use_profile; env.reset(seed=0)
+    if accel is not None:
+        env._servo_profile.a_max = accel * SERVO_ACCEL_UNIT_RAD_S2
+    a1 = np.zeros(env.n_joints, dtype=np.float32); a1[pan] = phase1
+    for _ in range(n1):
+        env.step(a1)
+    switch_q = env.data.qpos[env.joint_qposadr][pan]
+    a2 = np.zeros(env.n_joints, dtype=np.float32); a2[pan] = phase2
+    traj = []
+    for _ in range(n2):
+        env.step(a2)
+        traj.append(env.data.qpos[env.joint_qposadr][pan])
+    return switch_q, np.array(traj)
+
+
+def test_transient_overshoot_and_reversal():
+    """The steady-state probes miss the profile's setpoint momentum (self.vel
+    persists). Drive up, then (a) command HOLD and (b) command REVERSE, and
+    compare overshoot / reversal latency with profile on vs off (raw ctrl)."""
+    configs = [("raw (off)", False, None),
+               ("accel=10", True, 10),
+               ("accel=40", True, 40),
+               ("accel=100", True, 100),
+               ("accel=254", True, 254)]
+
+    print("\n--- stop after motion: overshoot past the hold point (rad) ---")
+    for label, use_profile, accel in configs:
+        sw, traj = _run_seq(use_profile, +1.0, 0.0, accel=accel)
+        print(f"  {label:11}  overshoot={traj.max()-sw:+.4f}  "
+              f"residual_drift={traj[-1]-sw:+.4f}")
+
+    print("\n--- reverse after motion: ticks before qpos actually turns around ---")
+    for label, use_profile, accel in configs:
+        sw, traj = _run_seq(use_profile, +1.0, -1.0, accel=accel)
+        peak_i = int(np.argmax(traj))          # last tick still moving the old way
+        print(f"  {label:11}  ticks_to_reverse={peak_i+1:2d}  "
+              f"overshoot_past_switch={traj.max()-sw:+.4f}")
+
+
 def _patch_old_sysid(env):
     """Overwrite the loaded model's actuator/joint params with the pre-sysid
     (a8dd00e) fit: uniform kp=77.5, kv=2.731, timeconst=0.025, damping=3.86,

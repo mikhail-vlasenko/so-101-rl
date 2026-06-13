@@ -20,15 +20,24 @@ SERVO_SPEED = 1500
 INTERP_HZ = 100.0
 
 # SyncWritePosEx acceleration argument. Range 0-254, units 8.7 deg/s^2.
-# 10 -> ~87 deg/s^2 (~1.5 rad/s^2). Earlier this was held at 5 to keep the
-# servo permanently ramping so the 15Hz square-wave velocity excitation
-# (accel→cruise→decel→park→repeat) couldn't shake the arm — but that made
-# manual control feel laggy, since each coarse target arrived faster than the
-# servo could crawl into it. Now that both the twin and the rollout stream
-# interpolated sub-targets at INTERP_HZ, the servo always has a fresh point a
-# few ms ahead and never reaches the decel cusp, so the accel can be raised for
-# responsiveness without reintroducing the shake.
-SERVO_ACCEL = 10
+# 40 -> ~348 deg/s^2 (~6.1 rad/s^2). This ramp is the dominant servo dynamic:
+# the firmware accelerates its internal setpoint at this rate toward each coarse
+# target (the P loop is comparatively fast). Held low to keep the 15 Hz
+# square-wave excitation (accel→cruise→decel→park→repeat) from shaking the arm;
+# with the twin/rollout streaming interpolated sub-targets at INTERP_HZ the
+# servo never reaches the decel cusp, so it can be raised for responsiveness.
+# 40 is verified shake-free on the real arm; the earlier 10 was needlessly slow.
+#
+# The ramp also gives the setpoint *momentum* — its velocity carries across
+# control ticks. At accel=10 that cost a ~4-tick (~270 ms) reversal lag and
+# ~0.05 rad overshoot on every stop / direction change. Sim models this via
+# src/servo_profile.py, where it made lift unlearnable and broke checkpoint
+# transfer — a constant-action authority probe missed it (only ~0.66x slower);
+# only the stop/reverse transients exposed it (see tests/test_profile_stall.py).
+# Higher accel collapses the momentum toward an instant setpoint: 40 halves the
+# reversal lag (4→2 ticks), 254 ≈ instant. Sim default is still profile-off
+# (conf/config.yaml:use_servo_profile) pending a real-arm transfer check.
+SERVO_ACCEL = 40
 
 # Position-loop P gain (Feetech SMS-STS register addr 21), per joint in
 # JOINT_NAMES order (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
