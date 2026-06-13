@@ -51,6 +51,19 @@ class FloorContactCallback(BaseCallback):
         return True
 
 
+class MarkerHiddenCallback(BaseCallback):
+    """Log mean per-episode fraction of marker-steps hidden from the tag camera."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "marker_hidden_ratio" in info:
+                val = info["marker_hidden_ratio"]
+                self.logger.record_mean("rollout/marker_hidden_ratio", val)
+                if "task_name" in info:
+                    self.logger.record_mean(f"rollout/{info['task_name']}/marker_hidden_ratio", val)
+        return True
+
+
 class CubeDragCallback(BaseCallback):
     """Log mean per-episode cube-drag ratio (cube near floor + lateral motion)."""
 

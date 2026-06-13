@@ -12,7 +12,7 @@ from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecNormalize
 from src.callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EvalStatsCallback,
-    EvalStatsTracker, FloorContactCallback, MaxCubeHeightCallback,
+    EvalStatsTracker, FloorContactCallback, MarkerHiddenCallback, MaxCubeHeightCallback,
     MeanReturnCallback, ReachStatsCallback, RingContactCallback, TimeLimitCallback,
     XYProgressCallback,
 )
@@ -172,6 +172,7 @@ def train(cfg: DictConfig):
     callbacks.append(FloorContactCallback())
     callbacks.append(RingContactCallback())
     callbacks.append(CubeDragCallback())
+    callbacks.append(MarkerHiddenCallback())
     callbacks.append(XYProgressCallback())
     callbacks.append(CompletionRateCallback())
     callbacks.append(ReachStatsCallback())

@@ -11,6 +11,7 @@ import pytest
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
+from src.base_env import markers_visible
 from src.lift_env import SO101LiftEnv
 from src.pickplace_env import SO101PickPlaceEnv
 
@@ -26,8 +27,6 @@ SIGMAS = {
 # Obs layout: [qpos(6), qvel(6), markers(2*6), cube_pos(3), task_extra(4), prev_actions(2*6)]
 QPOS = slice(0, 6)
 QVEL = slice(6, 12)
-MARKER_POS = np.r_[12:15, 18:21]   # finger pos, wrist pos
-MARKER_ROT = np.r_[15:18, 21:24]   # finger rot, wrist rot
 CUBE = slice(24, 27)
 C2T = slice(27, 29)
 RING_H = 29
@@ -122,20 +121,28 @@ def test_per_step_noise_magnitude_matches_sigmas(cfg):
 
     n_samples = 1000
     diffs = np.empty((n_samples, OBS_DIM), dtype=np.float64)
+    visible = np.empty((n_samples, 2), dtype=bool)
     for i in range(n_samples):
         env_clean.reset(seed=i)
         env_noisy.reset(seed=i)
         oc, *_ = env_clean.step(_zero_action())
         on, *_ = env_noisy.step(_zero_action())
         diffs[i] = on - oc
+        # Hidden tags are zeroed in both envs (identical dynamics, so identical
+        # visibility) — exclude them from the marker noise statistics.
+        visible[i] = markers_visible(env_noisy.data, env_noisy.marker_site_ids,
+                                     env_noisy.tag_cam_pos)
+    assert visible.all(axis=1).mean() > 0.1, "too few both-visible samples"
+    marker_pos_diffs = np.concatenate([diffs[visible[:, 0], 12:15].ravel(),
+                                       diffs[visible[:, 1], 18:21].ravel()])
+    marker_rot_diffs = np.concatenate([diffs[visible[:, 0], 15:18].ravel(),
+                                       diffs[visible[:, 1], 21:24].ravel()])
 
     # Noise std should be within ~10% of configured sigma.
     np.testing.assert_allclose(diffs[:, QPOS].std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.1)
     np.testing.assert_allclose(diffs[:, QVEL].std(axis=0).mean(), SIGMAS["qvel_sigma"], rtol=0.1)
-    np.testing.assert_allclose(diffs[:, MARKER_POS].std(axis=0).mean(),
-                               SIGMAS["marker_pos_sigma"], rtol=0.1)
-    np.testing.assert_allclose(diffs[:, MARKER_ROT].std(axis=0).mean(),
-                               SIGMAS["marker_rot_sigma"], rtol=0.1)
+    np.testing.assert_allclose(marker_pos_diffs.std(), SIGMAS["marker_pos_sigma"], rtol=0.1)
+    np.testing.assert_allclose(marker_rot_diffs.std(), SIGMAS["marker_rot_sigma"], rtol=0.1)
     np.testing.assert_allclose(diffs[:, CUBE].std(axis=0).mean(), SIGMAS["cube_sigma"], rtol=0.1)
     # cube_to_target inherits cube_sigma (same draw, derived).
     np.testing.assert_allclose(diffs[:, C2T].std(axis=0).mean(), SIGMAS["cube_sigma"], rtol=0.1)

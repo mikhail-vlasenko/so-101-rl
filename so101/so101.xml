@@ -93,6 +93,13 @@
   </asset>
 
   <worldbody>
+    <!-- Sim stand-in for the physical webcam: to the right of the arm (-y, the
+         same "right" as the marker_wrist comment), ~40 cm away, aimed slightly
+         down and forward of the arm base (lookat ~(0.18, 0, 0.05); zaxis is the
+         camera's backward direction, pos - lookat). The marker-visibility check
+         in src/base_env.py only consumes its position; the orientation is for
+         debug renders. Match it to the real camera mount before real rollouts. -->
+    <camera name="tag_cam" pos="0.10 -0.35 0.22" zaxis="-0.08 -0.35 0.17"/>
     <!-- Link base -->
     <body name="base" pos="0 0 0" quat="1 0 0 0" childclass="so101">
       <inertial pos="0.0137179 -5.19711e-05 0.0334843" mass="0.147" fullinertia="0.000114686 0.000136117 0.000130364 -4.59787e-07 4.97151e-06 9.75275e-08"/>

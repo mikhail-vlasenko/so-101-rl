@@ -39,7 +39,9 @@ import numpy as np
 from src.base_env import (
     JOINT_NAMES,
     MARKER_SITE_NAMES,
+    TAG_CAM_NAME,
     marker_world_poses,
+    markers_visible,
     obs_dim_for,
     sample_cube_orientation,
 )
@@ -198,6 +200,9 @@ def main() -> int:
         sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
         assert sid >= 0, f"site '{name}' not found in model"
         marker_site_ids.append(sid)
+    tag_cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, TAG_CAM_NAME)
+    assert tag_cam_id >= 0, f"camera '{TAG_CAM_NAME}' not found in model"
+    tag_cam_pos = model.cam_pos[tag_cam_id].copy()
     cube_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
     cube_qposadr = int(model.jnt_qposadr[cube_joint_id])
     cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
@@ -248,6 +253,11 @@ def main() -> int:
         while not stopped["flag"] and step < args.max_steps:
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
             marker_pos, marker_rot = marker_world_poses(data, marker_site_ids)
+            # Match training (base_env._compute_obs): a tag turned away from
+            # tag_cam is zeroed — the policy never saw FK-filled hidden tags.
+            hidden = ~markers_visible(data, marker_site_ids, tag_cam_pos)
+            marker_pos[hidden] = 0.0
+            marker_rot[hidden] = 0.0
 
             obs = build_obs(loop.qpos, loop.qvel, marker_pos, marker_rot,
                             cube_pos, loop.prev_actions)

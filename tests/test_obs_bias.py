@@ -13,6 +13,7 @@ import pytest
 
 from hydra import compose, initialize
 
+from src.base_env import markers_visible
 from src.pickplace_env import SO101PickPlaceEnv
 
 
@@ -127,13 +128,18 @@ def test_bias_magnitude_matches_sigmas(cfg):
 
 
 def test_bias_offsets_obs_relative_to_clean(cfg):
-    """obs[QPOS] - clean_obs[QPOS] should equal qpos_bias exactly (noise off)."""
+    """obs[QPOS] - clean_obs[QPOS] should equal qpos_bias exactly (noise off).
+
+    Seed 4 keeps both tags facing tag_cam — a hidden tag is zeroed (bias and
+    all), which would break the marker-dim offset equality below."""
     env_clean = _pickplace(cfg, obs_bias=None, obs_noise=None)
     env_bias = _pickplace(cfg, obs_bias=SIGMAS, obs_noise=None)
-    env_clean.reset(seed=0)
-    env_bias.reset(seed=0)
+    env_clean.reset(seed=4)
+    env_bias.reset(seed=4)
     obs_clean, *_ = env_clean.step(_zero_action())
     obs_bias_, *_ = env_bias.step(_zero_action())
+    assert markers_visible(env_bias.data, env_bias.marker_site_ids,
+                           env_bias.tag_cam_pos).all()
     np.testing.assert_allclose(obs_bias_[QPOS] - obs_clean[QPOS], env_bias._qpos_bias, atol=1e-6)
     np.testing.assert_allclose(obs_bias_[MARKER_FINGER_POS] - obs_clean[MARKER_FINGER_POS],
                                env_bias._marker_pos_bias[0], atol=1e-6)

@@ -12,7 +12,7 @@ import pytest
 import mujoco
 from hydra import compose, initialize
 
-from src.base_env import marker_world_poses, sample_cube_orientation
+from src.base_env import marker_world_poses, markers_visible, sample_cube_orientation
 from src.lift_env import SO101LiftEnv
 
 
@@ -67,8 +67,12 @@ def test_spawn_is_stable_and_at_rest_height(env):
 
 
 def test_marker_obs_match_site_poses(env):
-    """Clean obs marker dims must equal FK world poses of the marker sites."""
-    obs, _ = env.reset(seed=0)
+    """Clean obs marker dims must equal FK world poses of the marker sites.
+
+    Seed 4 spawns the arm with both tags facing tag_cam — hidden tags are
+    zeroed instead (covered by tests/test_marker_visibility.py)."""
+    obs, _ = env.reset(seed=4)
+    assert markers_visible(env.data, env.marker_site_ids, env.tag_cam_pos).all()
     marker_pos, marker_rot = marker_world_poses(env.data, env.marker_site_ids)
     np.testing.assert_allclose(obs[MARKER_FINGER_POS], marker_pos[0], atol=1e-6)
     np.testing.assert_allclose(obs[MARKER_FINGER_ROT], marker_rot[0], atol=1e-6)

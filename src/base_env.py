@@ -31,6 +31,15 @@ def obs_dim_for(prev_actions_n: int) -> int:
 MARKER_SITE_NAMES = ["marker_finger", "marker_wrist"]
 N_MARKERS = len(MARKER_SITE_NAMES)
 
+# Fixed camera in so101.xml standing in for the physical webcam that watches
+# the tags. A tag counts as visible when the angle between its outward normal
+# (+z of the site frame) and the tag->camera ray is under this — past that the
+# AprilTag detector loses the grazing view. Deliberately a plane-angle check
+# only: no FOV or occlusion test.
+TAG_CAM_NAME = "tag_cam"
+MARKER_VIS_MAX_ANGLE_DEG = 70.0
+_MARKER_VIS_COS_MIN = np.cos(np.radians(MARKER_VIS_MAX_ANGLE_DEG))
+
 
 def marker_world_poses(data, site_ids):
     """World poses of the marker sites: (pos (N,3), rot (N,3)).
@@ -46,6 +55,16 @@ def marker_world_poses(data, site_ids):
         mujoco.mju_mat2Quat(quat, data.site_xmat[sid])
         mujoco.mju_quat2Vel(rot[i], quat, 1.0)
     return pos, rot
+
+
+def markers_visible(data, site_ids, cam_pos):
+    """Per-marker visibility from cam_pos as a bool array (see TAG_CAM_NAME doc)."""
+    visible = np.empty(len(site_ids), dtype=bool)
+    for i, sid in enumerate(site_ids):
+        normal = data.site_xmat[sid].reshape(3, 3)[:, 2]
+        to_cam = cam_pos - data.site_xpos[sid]
+        visible[i] = normal @ to_cam >= _MARKER_VIS_COS_MIN * np.linalg.norm(to_cam)
+    return visible
 
 
 def sample_cube_orientation(rng, half_extents):
@@ -131,6 +150,10 @@ class SO101BaseEnv(gym.Env):
             sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
             assert sid >= 0, f"Marker site '{name}' not found in XML"
             self.marker_site_ids.append(sid)
+        cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, TAG_CAM_NAME)
+        assert cam_id >= 0, f"Camera '{TAG_CAM_NAME}' not found in XML"
+        # Worldbody-fixed camera, so its model position is its world position.
+        self.tag_cam_pos = self.model.cam_pos[cam_id].copy()
 
         self.cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
 
@@ -168,6 +191,9 @@ class SO101BaseEnv(gym.Env):
         self.cube_low = np.array(cfg["cube_low"])
         self.cube_high = np.array(cfg["cube_high"])
         self.floor_contact_penalty = float(cfg["floor_contact_penalty"])
+        # Per hidden tag per step; lift gets it from the shaping config group,
+        # pickplace owns it in conf/env/pickplace.yaml (like its floor penalty).
+        self.marker_hidden_penalty = float(cfg["marker_hidden_penalty"])
 
         self.gripper_idx = JOINT_NAMES.index("gripper")
 
@@ -235,6 +261,12 @@ class SO101BaseEnv(gym.Env):
             marker_rot = marker_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
                                                  size=marker_rot.shape)
             cube_pos = cube_pos + rng.normal(0, self.obs_noise["cube_sigma"], size=cube_pos.shape)
+
+        # A tag the camera can't see yields exactly zeros — after bias/noise, the
+        # same convention the real camera pipeline must follow for undetected tags.
+        hidden = ~markers_visible(self.data, self.marker_site_ids, self.tag_cam_pos)
+        marker_pos[hidden] = 0.0
+        marker_rot[hidden] = 0.0
 
         # hstack interleaves per marker: [pos_finger, rot_finger, pos_wrist, rot_wrist]
         markers = np.hstack([marker_pos, marker_rot]).flatten()
@@ -390,6 +422,7 @@ class SO101BaseEnv(gym.Env):
         self._max_cube_height = cube_pos[2]
         self._floor_contact_steps = 0
         self._cube_drag_steps = 0
+        self._markers_hidden_total = 0
         self._prev_cube_xy = cube_pos[:2].copy()
 
         # Sample obs biases AFTER physics randomization so toggling obs_bias does
@@ -450,12 +483,22 @@ class SO101BaseEnv(gym.Env):
         )
         info["task_name"] = self.TASK_NAME
 
+        # Keep the tags facing the camera: penalize each tag the camera can't
+        # see this step (the same tags get zeroed in the obs).
+        n_hidden = N_MARKERS - int(
+            markers_visible(self.data, self.marker_site_ids, self.tag_cam_pos).sum())
+        self._markers_hidden_total += n_hidden
+        reward += self.marker_hidden_penalty * n_hidden
+
         truncated = self.step_count >= self.max_steps
         if terminated or truncated:
             info["max_cube_height"] = self._max_cube_height
             if self.floor_contact_penalty:
                 info["floor_contact_ratio"] = self._floor_contact_steps / self.step_count
             info["cube_drag_ratio"] = self._cube_drag_steps / self.step_count
+            # Fraction of marker-steps hidden from the camera (0 = always visible).
+            info["marker_hidden_ratio"] = \
+                self._markers_hidden_total / (self.step_count * N_MARKERS)
             self._on_episode_end(info)
 
         if self.render_mode == "human":
