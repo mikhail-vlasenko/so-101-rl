@@ -19,3 +19,8 @@ obs_bias:
   cube_sigma: 0.0
 
 obs_latency: 0
+
+# No stochastic detector dropout (tags past 70° are still zeroed — camera physics).
+marker_dropout:
+  near: 0.0
+  far: 0.0

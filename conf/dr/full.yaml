@@ -29,3 +29,12 @@ obs_bias:
 # 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
 # At 15 Hz control, 2 frames = 133 ms, more lag than the real bus exhibits — 1 frame fits.
 obs_latency: 1
+
+# AprilTag detector dropout: per-frame probability a geometrically-visible tag is
+# missed, so its obs goes to all-zeros (same convention as a tag turned away).
+# `near` applies in the grazing 65-70° boundary band (flakier detection), `far`
+# to tags comfortably facing the camera. Tags past 70° are always zeroed (camera
+# physics, not this knob). Losing the pose is its own cost — there is no reward term.
+marker_dropout:
+  near: 0.02
+  far: 0.01

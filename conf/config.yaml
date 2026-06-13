@@ -24,6 +24,13 @@ action_scale: 0.07
 # above. They differ between curriculum stages; prev_actions_n / frame_stack below
 # do NOT (they change obs dim and must match across a resume).
 
+# Easy-mode crutch for training from scratch: when true, every AprilTag pose is
+# always fed to the policy — neither the >70° camera-physics occlusion nor the `dr`
+# group's stochastic marker_dropout zero it. Leave false (the default) for any policy
+# you'll deploy, where the real camera genuinely loses tags. Doesn't change obs dim,
+# so it's safe to flip between resume stages (e.g. on for stage 1, off when refining).
+marker_always_visible: false
+
 # Number of past actions appended to the observation. 0 = disabled; N=2 lets the
 # policy infer velocity / action smoothness from its own recent commands.
 prev_actions_n: 1

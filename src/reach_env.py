@@ -27,9 +27,11 @@ class SO101ReachEnv(gym.Env):
     TASK_NAME = "reach"
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
-                 obs_noise=None, obs_latency=0, obs_bias=None, prev_actions_n=2):
+                 obs_noise=None, obs_latency=0, obs_bias=None, marker_dropout=None,
+                 marker_always_visible=False, prev_actions_n=2):
         super().__init__()
-        del obs_noise, obs_latency, obs_bias  # not used by reach env (kept for train.py signature)
+        # not used by reach env (kept for train.py signature)
+        del obs_noise, obs_latency, obs_bias, marker_dropout, marker_always_visible
         self.render_mode = render_mode
         self.slow_factor = slow_factor
         self.prev_actions_n = int(prev_actions_n)

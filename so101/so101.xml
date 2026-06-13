@@ -92,12 +92,24 @@
 
   <worldbody>
     <!-- Sim stand-in for the physical webcam: to the right of the arm (-y, the
-         same "right" as the marker_wrist comment), ~40 cm away, aimed slightly
-         down and forward of the arm base (lookat ~(0.18, 0, 0.05); zaxis is the
-         camera's backward direction, pos - lookat). The marker-visibility check
-         in src/base_env.py only consumes its position; the orientation is for
-         debug renders. Match it to the real camera mount before real rollouts. -->
-    <camera name="tag_cam" pos="0.10 -0.35 0.22" zaxis="-0.08 -0.35 0.17"/>
+         same "right" as the marker_wrist comment), ~45 cm away, aimed slightly
+         down and forward of the arm base (lookat ~(0.18, 0, 0.09); zaxis is the
+         camera's backward direction, pos - lookat). The pose lives on this fixed
+         mount body so the camera and its visible stand-in geoms share one source
+         of truth; src/base_env.tag_cam_world_pos resolves the world position via
+         cam_xpos. The marker-visibility check only consumes that position; the
+         orientation is for debug renders and the camera body's looks. Match it to
+         the real camera mount before real rollouts. -->
+    <body name="tag_cam_mount" pos="0.12 -0.42 0.154" zaxis="-0.06 -0.42 0.064">
+      <camera name="tag_cam"/>
+      <!-- Visible webcam stand-in (body + forward-facing lens). No collision
+           (contype/conaffinity 0) and default group 0 so it renders but never
+           enters the contact or arm-geom sets. -z is the camera view direction. -->
+      <geom name="tag_cam_body" type="box" size="0.022 0.032 0.018"
+            rgba="0.05 0.05 0.06 1" contype="0" conaffinity="0"/>
+      <geom name="tag_cam_lens" type="cylinder" size="0.009 0.012" pos="0 0 -0.024"
+            rgba="0.2 0.2 0.28 1" contype="0" conaffinity="0"/>
+    </body>
     <!-- Link base -->
     <body name="base" pos="0 0 0" quat="1 0 0 0" childclass="so101">
       <inertial pos="0.0137179 -5.19711e-05 0.0334843" mass="0.147" fullinertia="0.000114686 0.000136117 0.000130364 -4.59787e-07 4.97151e-06 9.75275e-08"/>

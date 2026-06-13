@@ -8,7 +8,7 @@ lift_env:
   cube_low: [0.15, -0.15]    # xy only; spawn z + orientation come from sample_cube_orientation
   cube_high: [0.30, 0.15]
   target_height: 0.10
-  # floor_contact_penalty / floor_proximity_* / poke_force_coeff / cube_tip_coeff /
-  # marker_hidden_penalty are careful-behavior shaping, owned by the `shaping`
-  # config group (conf/shaping/{full,light,none}.yaml) so they can be toggled
-  # off for stage 1.
+  # floor_contact_penalty / floor_proximity_* / poke_force_coeff / cube_tip_coeff are
+  # careful-behavior shaping, owned by the `shaping` config group
+  # (conf/shaping/{full,light,none}.yaml) so they can be toggled off for stage 1.
+  # AprilTag detector dropout (marker_dropout) lives in the `dr` group, not here.

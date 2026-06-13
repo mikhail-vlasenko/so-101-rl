@@ -35,10 +35,19 @@ N_MARKERS = len(MARKER_SITE_NAMES)
 # the tags. A tag counts as visible when the angle between its outward normal
 # (+z of the site frame) and the tag->camera ray is under this — past that the
 # AprilTag detector loses the grazing view. Deliberately a plane-angle check
-# only: no FOV or occlusion test.
+# only: no FOV or occlusion test. NEAR marks a softer band: from NEAR up to MAX
+# the view grazes and the detector flakes, so the DR dropout (marker_dropout_prob)
+# drops those tags more often than tags comfortably facing the camera.
 TAG_CAM_NAME = "tag_cam"
 MARKER_VIS_MAX_ANGLE_DEG = 70.0
+MARKER_VIS_NEAR_ANGLE_DEG = 65.0
 _MARKER_VIS_COS_MIN = np.cos(np.radians(MARKER_VIS_MAX_ANGLE_DEG))
+_MARKER_VIS_COS_NEAR = np.cos(np.radians(MARKER_VIS_NEAR_ANGLE_DEG))
+
+# Render-only tints for the marker sites: green when the tag is detected this
+# frame, red when not (over-angle or dropped). Visual only — never read by obs.
+MARKER_VISIBLE_RGBA = np.array([0.1, 0.8, 0.1, 1.0])
+MARKER_HIDDEN_RGBA = np.array([0.9, 0.1, 0.1, 1.0])
 
 
 def marker_world_poses(data, site_ids):
@@ -57,14 +66,50 @@ def marker_world_poses(data, site_ids):
     return pos, rot
 
 
+def tag_cam_world_pos(model, data):
+    """World position of TAG_CAM_NAME. The camera hangs off a fixed mount body,
+    so cam_xpos (filled by forward kinematics) is its constant world position;
+    model.cam_pos is body-relative and would be wrong. Runs mj_kinematics so the
+    caller need not have forwarded data first (the mount is qpos-independent)."""
+    cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, TAG_CAM_NAME)
+    assert cam_id >= 0, f"Camera '{TAG_CAM_NAME}' not found in model"
+    # cam_xpos is filled by mj_camlight, which needs body frames from mj_kinematics.
+    mujoco.mj_kinematics(model, data)
+    mujoco.mj_camlight(model, data)
+    return data.cam_xpos[cam_id].copy()
+
+
 def markers_visible(data, site_ids, cam_pos):
-    """Per-marker visibility from cam_pos as a bool array (see TAG_CAM_NAME doc)."""
+    """Per-marker geometric visibility from cam_pos as a bool array (plane angle
+    under MARKER_VIS_MAX_ANGLE_DEG; see TAG_CAM_NAME doc). No stochastic dropout —
+    used by tests and the real-arm twin rollout."""
     visible = np.empty(len(site_ids), dtype=bool)
     for i, sid in enumerate(site_ids):
         normal = data.site_xmat[sid].reshape(3, 3)[:, 2]
         to_cam = cam_pos - data.site_xpos[sid]
         visible[i] = normal @ to_cam >= _MARKER_VIS_COS_MIN * np.linalg.norm(to_cam)
     return visible
+
+
+def marker_dropout_prob(data, site_ids, cam_pos, p_near, p_far):
+    """Per-marker probability the tag is undetected this frame (its obs zeroed).
+
+    Past MARKER_VIS_MAX_ANGLE_DEG the camera can't see the tag at all -> 1.0.
+    In the near-boundary band [NEAR, MAX] the grazing view is flaky -> p_near.
+    Comfortably facing the camera (angle < NEAR) -> p_far (rare detector miss).
+    """
+    prob = np.empty(len(site_ids))
+    for i, sid in enumerate(site_ids):
+        normal = data.site_xmat[sid].reshape(3, 3)[:, 2]
+        to_cam = cam_pos - data.site_xpos[sid]
+        cos = (normal @ to_cam) / np.linalg.norm(to_cam)
+        if cos < _MARKER_VIS_COS_MIN:
+            prob[i] = 1.0
+        elif cos < _MARKER_VIS_COS_NEAR:
+            prob[i] = p_near
+        else:
+            prob[i] = p_far
+    return prob
 
 
 def sample_cube_orientation(rng, half_extents):
@@ -116,13 +161,22 @@ class SO101BaseEnv(gym.Env):
     TASK_NAME: str  # "lift" or "pickplace"
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
-                 obs_noise=None, obs_latency=0, obs_bias=None, prev_actions_n=2):
+                 obs_noise=None, obs_latency=0, obs_bias=None, marker_dropout=None,
+                 marker_always_visible=False, prev_actions_n=2):
         super().__init__()
         self.render_mode = render_mode
         self.slow_factor = slow_factor
         # dict with keys qpos_sigma, qvel_sigma, marker_pos_sigma,
         # marker_rot_sigma, cube_sigma; or None
         self.obs_noise = obs_noise
+        # AprilTag detector dropout (DR): dict with keys "near"/"far" giving the
+        # per-frame probability a geometrically-visible tag is missed (near-boundary
+        # vs comfortably-facing), or None for geometric visibility only.
+        self.marker_dropout = marker_dropout
+        # Easy-mode crutch: feed every tag to the policy regardless of camera angle
+        # or dropout (no obs zeroing). See conf/config.yaml:marker_always_visible.
+        self.marker_always_visible = bool(marker_always_visible)
+        self._markers_detected = np.ones(N_MARKERS, dtype=bool)
         self.obs_latency = int(obs_latency)  # frames; agent sees obs from N steps ago
         self._obs_history: deque = deque()
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
@@ -150,10 +204,7 @@ class SO101BaseEnv(gym.Env):
             sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
             assert sid >= 0, f"Marker site '{name}' not found in XML"
             self.marker_site_ids.append(sid)
-        cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, TAG_CAM_NAME)
-        assert cam_id >= 0, f"Camera '{TAG_CAM_NAME}' not found in XML"
-        # Worldbody-fixed camera, so its model position is its world position.
-        self.tag_cam_pos = self.model.cam_pos[cam_id].copy()
+        self.tag_cam_pos = tag_cam_world_pos(self.model, self.data)
 
         self.cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
 
@@ -191,9 +242,6 @@ class SO101BaseEnv(gym.Env):
         self.cube_low = np.array(cfg["cube_low"])
         self.cube_high = np.array(cfg["cube_high"])
         self.floor_contact_penalty = float(cfg["floor_contact_penalty"])
-        # Per hidden tag per step; lift gets it from the shaping config group,
-        # pickplace owns it in conf/env/pickplace.yaml (like its floor penalty).
-        self.marker_hidden_penalty = float(cfg["marker_hidden_penalty"])
 
         self.gripper_idx = JOINT_NAMES.index("gripper")
 
@@ -222,6 +270,31 @@ class SO101BaseEnv(gym.Env):
 
     def _parse_config(self, cfg):
         """Override for task-specific config."""
+
+    def _set_marker_render_colors(self, detected):
+        """Tint each marker site green when detected this frame, red otherwise.
+        Visual only (site rgba) — no effect on physics or observations."""
+        for sid, det in zip(self.marker_site_ids, detected):
+            self.model.site_rgba[sid] = MARKER_VISIBLE_RGBA if det else MARKER_HIDDEN_RGBA
+
+    def _update_marker_detection(self):
+        """Roll this frame's per-marker detection into self._markers_detected:
+        geometric visibility plus the DR dropout (near-boundary tags drop more
+        often). _compute_obs zeroes the undetected tags; here we also retint the
+        sites. Must run after physics and before the obs is built for the frame."""
+        if self.marker_always_visible:
+            self._markers_detected = np.ones(N_MARKERS, dtype=bool)
+            self._set_marker_render_colors(self._markers_detected)
+            return
+        if self.marker_dropout is None:
+            p_near = p_far = 0.0
+        else:
+            p_near = self.marker_dropout["near"]
+            p_far = self.marker_dropout["far"]
+        prob = marker_dropout_prob(self.data, self.marker_site_ids, self.tag_cam_pos,
+                                   p_near, p_far)
+        self._markers_detected = self.np_random.random(N_MARKERS) >= prob
+        self._set_marker_render_colors(self._markers_detected)
 
     def _get_cube_pos(self):
         return self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3].copy()
@@ -262,9 +335,10 @@ class SO101BaseEnv(gym.Env):
                                                  size=marker_rot.shape)
             cube_pos = cube_pos + rng.normal(0, self.obs_noise["cube_sigma"], size=cube_pos.shape)
 
-        # A tag the camera can't see yields exactly zeros — after bias/noise, the
-        # same convention the real camera pipeline must follow for undetected tags.
-        hidden = ~markers_visible(self.data, self.marker_site_ids, self.tag_cam_pos)
+        # An undetected tag (turned away, or a DR dropout) yields exactly zeros —
+        # after bias/noise, the convention the real camera pipeline must follow for
+        # undetected tags. Detection was rolled this frame in _update_marker_detection.
+        hidden = ~self._markers_detected
         marker_pos[hidden] = 0.0
         marker_rot[hidden] = 0.0
 
@@ -436,6 +510,8 @@ class SO101BaseEnv(gym.Env):
                                                size=(N_MARKERS, 3))
             self._cube_bias = rng.normal(0, self.obs_bias["cube_sigma"], size=3)
 
+        self._update_marker_detection()
+
         return self._get_obs(), {}
 
     def _compute_step(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):
@@ -483,12 +559,12 @@ class SO101BaseEnv(gym.Env):
         )
         info["task_name"] = self.TASK_NAME
 
-        # Keep the tags facing the camera: penalize each tag the camera can't
-        # see this step (the same tags get zeroed in the obs).
-        n_hidden = N_MARKERS - int(
-            markers_visible(self.data, self.marker_site_ids, self.tag_cam_pos).sum())
-        self._markers_hidden_total += n_hidden
-        reward += self.marker_hidden_penalty * n_hidden
+        # Roll detection for this frame (geometric visibility + DR dropout). The
+        # undetected tags are zeroed in the obs built below; track them for the
+        # hidden-ratio metric. Losing a tag's pose is the policy's own penalty —
+        # there is deliberately no reward term for it.
+        self._update_marker_detection()
+        self._markers_hidden_total += N_MARKERS - int(self._markers_detected.sum())
 
         truncated = self.step_count >= self.max_steps
         if terminated or truncated:

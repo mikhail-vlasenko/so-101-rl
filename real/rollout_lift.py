@@ -39,11 +39,11 @@ import numpy as np
 from src.base_env import (
     JOINT_NAMES,
     MARKER_SITE_NAMES,
-    TAG_CAM_NAME,
     marker_world_poses,
     markers_visible,
     obs_dim_for,
     sample_cube_orientation,
+    tag_cam_world_pos,
 )
 
 from .rollout_common import (
@@ -200,9 +200,7 @@ def main() -> int:
         sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
         assert sid >= 0, f"site '{name}' not found in model"
         marker_site_ids.append(sid)
-    tag_cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, TAG_CAM_NAME)
-    assert tag_cam_id >= 0, f"camera '{TAG_CAM_NAME}' not found in model"
-    tag_cam_pos = model.cam_pos[tag_cam_id].copy()
+    tag_cam_pos = tag_cam_world_pos(model, data)
     cube_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
     cube_qposadr = int(model.jnt_qposadr[cube_joint_id])
     cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
