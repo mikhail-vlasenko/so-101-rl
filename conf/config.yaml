@@ -19,6 +19,15 @@ stream_port: null  # eval/show_starts: serve sim view as MJPEG on this port (web
 # speed limits) come from src/units.py — don't hand-compute them in comments.
 action_scale: 0.07
 
+# Feed sim ctrl through the Feetech firmware motion profile (src/servo_profile.py).
+# true = write the profiled setpoint; false = write the raw tick target straight
+# to data.ctrl (pre-55bd1ba behavior). Currently OFF: with the profile on, lift
+# became unlearnable and old checkpoints stopped transferring — under
+# investigation (the refit kp/armature give only ~20% per-tick authority; see
+# tests/test_profile_stall.py). Env yamls reference this as ${use_servo_profile};
+# sim-only — does not affect real rollouts (the bus always writes accel).
+use_servo_profile: false
+
 # obs_noise / obs_bias / obs_latency are the domain-randomization knobs and live in
 # the `dr` config group (conf/dr/{full,none}.yaml), selected via the defaults list
 # above. They differ between curriculum stages; prev_actions_n / frame_stack below

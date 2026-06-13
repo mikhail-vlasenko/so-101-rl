@@ -3,6 +3,7 @@ env_name: pickplace
 
 pickplace_env:
   action_scale: ${action_scale}   # shared across envs, defined in config.yaml
+  use_servo_profile: ${use_servo_profile}   # defined in config.yaml
   max_steps: 450          # 450 steps / 30 Hz = 15 s episode
   n_substeps: 10          # 10 * (1/300 s timestep in so101.xml) = exactly 30 Hz
   cube_low: [0.15, -0.15]    # xy only; spawn z + orientation come from sample_cube_orientation

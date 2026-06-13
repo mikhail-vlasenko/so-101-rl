@@ -13,6 +13,7 @@ from src.lift_env import (
 def _cfg():
     return {
         "action_scale": 0.035,
+        "use_servo_profile": True,
         "max_steps": 150,
         "n_substeps": 10,
         "cube_low": [0.15, -0.15],

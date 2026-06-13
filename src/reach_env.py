@@ -56,6 +56,7 @@ class SO101ReachEnv(gym.Env):
 
         cfg = env_cfg
         self.action_scale = float(cfg["action_scale"])
+        self.use_servo_profile = bool(cfg["use_servo_profile"])
         self.max_steps = int(cfg["max_steps"])
         self.n_substeps = int(cfg["n_substeps"])
         self.ee_z_min = float(cfg["ee_z_min"])
@@ -209,12 +210,17 @@ class SO101ReachEnv(gym.Env):
         current = self.data.qpos[self.joint_qposadr].copy()
         target = action_to_target(current, action, self.action_scale,
                                   self.joint_low, self.joint_high)
-        setpoints = self._servo_profile.tick(self._ctrl_target, target,
-                                             self.n_substeps, self.model.opt.timestep)
-        for k in range(self.n_substeps):
-            self.data.ctrl[:self.n_joints] = setpoints[k]
-            mujoco.mj_step(self.model, self.data)
-        self._ctrl_target = target
+        if self.use_servo_profile:
+            setpoints = self._servo_profile.tick(self._ctrl_target, target,
+                                                 self.n_substeps, self.model.opt.timestep)
+            for k in range(self.n_substeps):
+                self.data.ctrl[:self.n_joints] = setpoints[k]
+                mujoco.mj_step(self.model, self.data)
+            self._ctrl_target = target
+        else:
+            self.data.ctrl[:self.n_joints] = target
+            for _ in range(self.n_substeps):
+                mujoco.mj_step(self.model, self.data)
 
         q = self._get_joint_pos()
         ee_pos = self._get_ee_pos()
