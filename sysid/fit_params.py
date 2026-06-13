@@ -16,7 +16,14 @@ frictionloss=0 and tau=xml recovers the current sim):
   - scale_damping:      joint damping (dof_damping)
   - scale_armature:     rotor armature (dof_armature)
   - frictionloss:       joint dry friction, absolute N·m (the xml baseline is
-                        0.0, so a scale would be a dead parameter)
+                        0.0, so a scale would be a dead parameter). NOTE: with
+                        the profile + tau filter modeling the lag, this fits to
+                        ~0 (2026-06-13: 0.003 N·m, negligible vs ~1-3 N·m servo
+                        torque) — the loss is dominated by the dynamic
+                        trajectories and the quasi-static staircase that would
+                        excite stiction is too small a slice to move it. Drop it
+                        (fix at 0) next refit unless stiction fidelity matters,
+                        in which case weight staircase/stretch_hold up instead.
   - tau:                first-order filter time constant on the actuator,
                         shared across all 6 joints (same hardware).
 

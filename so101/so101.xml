@@ -37,19 +37,17 @@
 
     <default class="sts3215">
       <geom contype="0" conaffinity="0"/>
-      <!-- Fit by sysid against real-arm CSVs (sysid_logs/fit.json). With the
-           timeconst filter modeling the servo's bandwidth, friction collapsed
-           to ~0 — earlier fits had used it as a stand-in for the missing lag.
-           timeconst is shared (same Feetech hardware on every joint).
-           kp is per-actuator (below), proportional to the per-joint servo
-           P gain (SERVO_POSITION_KP in real/twin/constants.py).
-           STALE: these values were fit before the firmware motion profile
-           (src/servo_profile.py) was modeled in sim and before the servo
-           settings changed (accel 150->10, pan/gripper Kp 32->8) — damping/
-           armature are inflated to fake the missing accel ramp. Re-record
-           sysid data at the current settings and refit (see TODO.md). -->
-      <joint damping="3.86" frictionloss="0.0" armature="0.242"/>
-      <position kv="2.731" forcerange="-2.94 2.94" timeconst="0.025"/>
+      <!-- Fit by sysid against real-arm CSVs (sysid_logs/fit.json), re-recorded
+           2026-06-13 at the current servo settings (SERVO_ACCEL=10, per-joint
+           SERVO_POSITION_KP) with the firmware motion profile modeled in sim
+           (src/servo_profile.py). With the profile carrying the accel ramp and
+           the timeconst filter the residual bandwidth, damping/armature dropped
+           to roughly a third of the earlier (inflated) fit and friction to ~0 —
+           earlier fits had leaned on all three to fake the missing servo lag.
+           damping/armature/friction/kv/timeconst are shared (same Feetech
+           hardware on every joint); kp is per-actuator (below). -->
+      <joint damping="1.3132" frictionloss="0.0032" armature="0.10930"/>
+      <position kv="2.2113" forcerange="-2.94 2.94" timeconst="0.005"/>
     </default>
 
     <default class="backlash">
@@ -234,16 +232,15 @@
   </worldbody>
 
   <actuator>
-    <!-- kp per joint, proportional to the real servo's P gain: 77.5 was fit
-         with every servo at Kp 32; the real arm now runs per-joint gains
-         (SERVO_POSITION_KP in real/twin/constants.py: pan/gripper 8,
-         shoulder_lift 24, rest 32), so sim kp is scaled by gain/32 pending
-         a refit. -->
-    <position class="sts3215" name="shoulder_pan"  joint="shoulder_pan"  kp="19.375" ctrlrange="-1.91986 1.91986"/>
-    <position class="sts3215" name="shoulder_lift" joint="shoulder_lift" kp="58.125" ctrlrange="-1.74533 1.74533"/>
-    <position class="sts3215" name="elbow_flex"    joint="elbow_flex"    kp="77.5"   ctrlrange="-1.69 1.69"/>
-    <position class="sts3215" name="wrist_flex"    joint="wrist_flex"    kp="77.5"   ctrlrange="-1.65806 1.65806"/>
-    <position class="sts3215" name="wrist_roll"    joint="wrist_roll"    kp="77.5"   ctrlrange="-2.74385 2.84121"/>
-    <position class="sts3215" name="gripper"       joint="gripper"       kp="19.375" ctrlrange="-0.17453 1.74533"/>
+    <!-- kp per joint, fit per distinct real P gain (sysid_logs/fit.json,
+         scale_kp@{8,24,32}): the three SERVO_POSITION_KP groups — pan/gripper
+         (Kp 8), shoulder_lift (Kp 24), elbow/wrist_flex/wrist_roll (Kp 32) —
+         each get one fitted scale, so equal-gain joints share a kp. -->
+    <position class="sts3215" name="shoulder_pan"  joint="shoulder_pan"  kp="24.90"  ctrlrange="-1.91986 1.91986"/>
+    <position class="sts3215" name="shoulder_lift" joint="shoulder_lift" kp="128.79" ctrlrange="-1.74533 1.74533"/>
+    <position class="sts3215" name="elbow_flex"    joint="elbow_flex"    kp="144.89" ctrlrange="-1.69 1.69"/>
+    <position class="sts3215" name="wrist_flex"    joint="wrist_flex"    kp="144.89" ctrlrange="-1.65806 1.65806"/>
+    <position class="sts3215" name="wrist_roll"    joint="wrist_roll"    kp="144.89" ctrlrange="-2.74385 2.84121"/>
+    <position class="sts3215" name="gripper"       joint="gripper"       kp="24.90"  ctrlrange="-0.17453 1.74533"/>
   </actuator>
 </mujoco>
