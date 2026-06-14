@@ -18,6 +18,7 @@ def _cfg():
         "n_substeps": 10,
         "cube_low": [0.15, -0.15],
         "cube_high": [0.30, 0.15],
+        "cube_smallest_face_only": False,
         "floor_contact_penalty": -0.10,
         "floor_proximity_thresh": 0.003,
         "floor_proximity_penalty": -0.05,

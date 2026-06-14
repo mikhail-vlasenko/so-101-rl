@@ -8,6 +8,7 @@ lift_env:
   n_substeps: 10          # 10 * (1/150 s timestep in so101.xml) = exactly 15 Hz
   cube_low: [0.15, -0.15]    # xy only; spawn z + orientation come from sample_cube_orientation
   cube_high: [0.30, 0.15]
+  cube_smallest_face_only: ${cube_smallest_face_only}   # defined in config.yaml
   target_height: 0.10
   # floor_contact_penalty / floor_proximity_* / poke_force_coeff / cube_tip_coeff are
   # careful-behavior shaping, owned by the `shaping` config group

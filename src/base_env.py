@@ -112,18 +112,22 @@ def marker_dropout_prob(data, site_ids, cam_pos, p_near, p_far):
     return prob
 
 
-def sample_cube_orientation(rng, half_extents):
+def sample_cube_orientation(rng, half_extents, smallest_face_only=False):
     """Spawn orientation for the sponge box: standing on a non-largest face.
 
     half_extents (hx, hy, hz) must be strictly ordered hx > hy > hz (the
     3 x 2 x 1.5 cm box). The box stands either on its hy*hz face (x-axis up,
     2*hx tall) or its hx*hz face (y-axis up, 2*hy tall), never on the largest
     hx*hy face, with a uniform random yaw. Returns (quat wxyz, rest_half_z).
+
+    smallest_face_only (simplified-starts curriculum crutch): always stand on
+    the smallest hy*hz face (x-axis vertical) so the box presents the same
+    upright, easy-to-grasp pose every episode. See conf/config.yaml.
     """
     hx, hy, hz = half_extents
     assert hx > hy > hz, f"expected strictly ordered half extents, got {half_extents}"
     s = np.sqrt(0.5)
-    if rng.uniform() < 0.5:
+    if smallest_face_only or rng.uniform() < 0.5:
         tilt = np.array([s, 0.0, s, 0.0])  # 90 deg about y: x-axis vertical
         rest_half_z = hx
     else:
@@ -242,6 +246,7 @@ class SO101BaseEnv(gym.Env):
         self.n_substeps = int(cfg["n_substeps"])
         self.cube_low = np.array(cfg["cube_low"])
         self.cube_high = np.array(cfg["cube_high"])
+        self.cube_smallest_face_only = bool(cfg["cube_smallest_face_only"])
         self.floor_contact_penalty = float(cfg["floor_contact_penalty"])
 
         self.gripper_idx = JOINT_NAMES.index("gripper")
@@ -467,7 +472,8 @@ class SO101BaseEnv(gym.Env):
 
         cube_xy = self._sample_cube_pos()
         cube_quat, self.cube_rest_half_z = sample_cube_orientation(
-            self.np_random, self.cube_half_extents)
+            self.np_random, self.cube_half_extents,
+            smallest_face_only=self.cube_smallest_face_only)
         cube_pos = np.array([cube_xy[0], cube_xy[1], self.cube_rest_half_z])
         self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
         self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = cube_quat

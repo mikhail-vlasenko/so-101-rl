@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - env: pickplace
-  - dr: full          # domain randomization preset: full (default) | none (curriculum stage 1)
+  - dr: full          # domain randomization preset: full (default) | light (lower cube/marker noise) | none (curriculum stage 1)
   - shaping: full     # lift careful-behavior shaping: full (default) | none (curriculum stage 1)
 
 algorithm: ppo
@@ -39,6 +39,14 @@ use_servo_profile: false
 # you'll deploy, where the real camera genuinely loses tags. Doesn't change obs dim,
 # so it's safe to flip between resume stages (e.g. on for stage 1, off when refining).
 marker_always_visible: false
+
+# Simplified-starts crutch for training from scratch: when true, the cube always
+# spawns standing upright on its smallest (hy*hz) face — the same easy-to-grasp
+# pose every episode — instead of a random non-largest face + yaw. Leave false
+# (the default) for any policy you'll deploy. Env yamls reference this as
+# ${cube_smallest_face_only}. Doesn't change obs dim, so safe to flip between
+# resume stages (e.g. on for stage 1, off when refining).
+cube_smallest_face_only: false
 
 # Number of past actions appended to the observation. 0 = disabled; N=2 lets the
 # policy infer velocity / action smoothness from its own recent commands.

@@ -1,0 +1,27 @@
+# @package _global_
+# Light domain randomization — an intermediate curriculum stage between `dr=none`
+# (clean stage 1) and `dr=full` (the sim2real deployment target). Vision is the
+# noisiest part of the real pipeline, so this profile keeps the joint-encoder
+# noise at the full level but lowers the cube and marker (AprilTag) noise and
+# biases, easing the policy into perception error before the full DR refine.
+# Only the DR knobs differ from full; prev_actions_n / frame_stack live in
+# config.yaml and MUST stay identical across stages (they change obs dim).
+
+obs_noise:
+  qpos_sigma: 0.005
+  qvel_sigma: 0.05
+  marker_pos_sigma: 0.001
+  marker_rot_sigma: 0.01
+  cube_sigma: 0.003
+
+obs_bias:
+  qpos_sigma: 0.01
+  marker_pos_sigma: 0.002
+  marker_rot_sigma: 0.02
+  cube_sigma: 0.002
+
+obs_latency: 1
+
+marker_dropout:
+  near: 0.02
+  far: 0.01

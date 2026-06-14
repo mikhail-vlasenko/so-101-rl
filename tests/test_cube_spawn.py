@@ -48,6 +48,20 @@ def test_sample_cube_orientation_rest_heights():
     assert rest_halves == {0.015, 0.01}, "both standing heights must occur"
 
 
+def test_sample_cube_orientation_smallest_face_only():
+    """smallest_face_only always stands on the hy*hz face (x-axis vertical, tallest)."""
+    rng = np.random.default_rng(0)
+    half = np.array([0.015, 0.01, 0.0075])
+    for _ in range(200):
+        quat, rest_half_z = sample_cube_orientation(rng, half, smallest_face_only=True)
+        assert rest_half_z == 0.015  # hx: standing on the smallest face
+        # The geom x-axis (largest half-extent) must end up vertical.
+        mat = np.empty(9)
+        mujoco.mju_quat2Mat(mat, quat)
+        x_axis_world = mat.reshape(3, 3)[:, 0]
+        assert abs(x_axis_world[2]) == pytest.approx(1.0, abs=1e-9)
+
+
 def test_sample_cube_orientation_rejects_unordered_extents():
     rng = np.random.default_rng(0)
     with pytest.raises(AssertionError):
