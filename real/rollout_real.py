@@ -32,6 +32,7 @@ from .rollout_common import (
     load_env_cfg,
     load_policy,
 )
+from .calibration import load_calibration
 from .twin.mapping import JOINT_NAMES, compute_ee_pos, load_joint_maps
 from .twin.servo_io import ServoBus
 
@@ -169,7 +170,8 @@ def main() -> int:
     loop = ArmLoop(model=model, n_substeps=n_substeps, jm=jm, bus=bus,
                    action_scale=action_scale, prev_actions_n=prev_actions_n,
                    execute=args.execute, ema_alpha=args.ema_alpha,
-                   slow=args.slow, interp_hz=args.interp_hz)
+                   slow=args.slow, interp_hz=args.interp_hz,
+                   qpos_bias=load_calibration())
     print(f"waypoint={args.waypoint} {loop.describe()}")
 
     bus.connect()

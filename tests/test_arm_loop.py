@@ -60,13 +60,15 @@ def _mid_raw(jm):
 
 
 def _make_loop(model, jm, bus, execute=True, slow=1.0, ema_alpha=1.0,
-               prev_actions_n=1, action_scale=0.07):
+               prev_actions_n=1, action_scale=0.07, qpos_bias=None):
     # interp_hz = control rate -> one sub-target per tick, so each test tick
     # sleeps only one wall tick.
+    if qpos_bias is None:
+        qpos_bias = np.zeros(len(jm.items))
     return ArmLoop(model=model, n_substeps=10, jm=jm, bus=bus,
                    action_scale=action_scale, prev_actions_n=prev_actions_n,
                    execute=execute, ema_alpha=ema_alpha, slow=slow,
-                   interp_hz=15.0)
+                   interp_hz=15.0, qpos_bias=qpos_bias)
 
 
 def test_dry_run_never_writes_or_torques(model, jm):
@@ -154,6 +156,26 @@ def test_ema_smoothing_applies_to_buffer_and_command(model, jm):
     smoothed = loop.tick(np.zeros(6))
     np.testing.assert_allclose(smoothed, np.full(6, 0.5))
     np.testing.assert_allclose(loop.prev_actions[-1], np.full(6, 0.5, dtype=np.float32))
+
+
+def test_qpos_bias_subtracted_on_read_and_added_on_write(model, jm):
+    """The qpos the policy sees must be the true joint angle (encoder angle minus
+    the calibration bias), and a hold action must still command the present raw —
+    i.e. the bias is inverted on the write so it doesn't shift the arm."""
+    raw0 = _mid_raw(jm)
+    direction = np.ones(len(jm.items), dtype=np.int8)
+    bias = np.array([0.0, -0.03, 0.16, -0.08, 0.01, 0.0])
+    bus = FakeBus(raw0)
+    loop = _make_loop(model, jm, bus, qpos_bias=bias)
+    qpos0 = loop.boot()
+
+    # obs qpos is the true joint angle = encoder angle - bias
+    np.testing.assert_allclose(qpos0, raw_to_rad(raw0, jm, direction) - bias)
+
+    # A below-deadzone (hold) action: target_true == qpos0, so adding the bias
+    # back must round-trip to the original raw — no spurious motion from the bias.
+    loop.tick(np.zeros(6))
+    assert np.array_equal(bus.writes[-1], raw0)
 
 
 def test_boot_aborts_on_pose_outside_calibration(model, jm):

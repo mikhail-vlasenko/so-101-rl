@@ -53,6 +53,7 @@ from .rollout_common import (
     load_env_cfg,
     load_policy,
 )
+from .calibration import load_calibration
 from .marker_obs import CameraMarkerSource
 from .twin.mapping import load_joint_maps
 from .twin.servo_io import ServoBus
@@ -228,7 +229,8 @@ def main() -> int:
     loop = ArmLoop(model=model, n_substeps=n_substeps, jm=jm, bus=bus,
                    action_scale=action_scale, prev_actions_n=prev_actions_n,
                    execute=args.execute, ema_alpha=args.ema_alpha,
-                   slow=args.slow, interp_hz=args.interp_hz)
+                   slow=args.slow, interp_hz=args.interp_hz,
+                   qpos_bias=load_calibration())
     print(f"seed={args.seed} {loop.describe()}")
     print(f"sim cube spawn: ({cube_pos_init[0]:+.3f}, {cube_pos_init[1]:+.3f}, "
           f"{cube_pos_init[2]:+.3f})  target_height={target_height}")

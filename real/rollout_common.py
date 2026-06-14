@@ -129,13 +129,21 @@ class ArmLoop:
 
     def __init__(self, model: mujoco.MjModel, n_substeps: int, jm: JointMaps,
                  bus: ServoBus, action_scale: float, prev_actions_n: int,
-                 execute: bool, ema_alpha: float, slow: float, interp_hz: float):
+                 execute: bool, ema_alpha: float, slow: float, interp_hz: float,
+                 qpos_bias: np.ndarray):
         assert 0.0 < ema_alpha <= 1.0, f"ema_alpha must be in (0, 1], got {ema_alpha}"
         assert slow >= 1.0, f"slow must be >= 1, got {slow}"
         self.jm = jm
         self.bus = bus
         self.n_joints = len(jm.items)
         self.direction = np.ones(self.n_joints, dtype=np.int8)  # verified via twin: no inversions
+        # Per-joint encoder zero-offset (rad) from real/calibrate_qpos.py:
+        # theta_true = theta_encoder - qpos_bias. Subtracted on every read so the
+        # policy sees the true joint angle it trained on (and the same frame the
+        # bias-corrected camera extrinsics assume); inverted on every write.
+        self.qpos_bias = np.asarray(qpos_bias, dtype=np.float64)
+        assert self.qpos_bias.shape == (self.n_joints,), \
+            f"qpos_bias must be ({self.n_joints},), got {self.qpos_bias.shape}"
         self.xml_low, self.xml_high = jm.xml_low(), jm.xml_high()
         self.action_scale = action_scale
         self.execute = execute
@@ -167,13 +175,24 @@ class ArmLoop:
                 f"slow={self.slow}x (max joint speed "
                 f"{max_joint_speed_rad_s(self.action_scale, self.control_hz) / self.slow:.2f} rad/s, "
                 f"raw clamp ±{self.max_raw_delta}/tick, "
-                f"{self.n_interp} sub-targets/tick @ {1.0 / self.sub_dt:.0f} Hz)")
+                f"{self.n_interp} sub-targets/tick @ {1.0 / self.sub_dt:.0f} Hz, "
+                f"qpos_bias≤{np.degrees(np.abs(self.qpos_bias)).max():.1f}deg)")
+
+    def _encoder_to_true(self, raw: np.ndarray) -> np.ndarray:
+        """Encoder raw -> true joint angle (rad): theta_true = theta_encoder - bias."""
+        return raw_to_rad(raw, self.jm, self.direction) - self.qpos_bias
+
+    def _true_to_encoder_raw(self, qpos_true: np.ndarray) -> np.ndarray:
+        """True joint target (rad) -> encoder raw. rad_to_raw is calibrated against
+        the encoder angle, so the bias is added back before the mapping — inverting
+        _encoder_to_true so a hold target round-trips to the present raw."""
+        return rad_to_raw(qpos_true + self.qpos_bias, self.jm, self.direction)
 
     def boot(self) -> np.ndarray:
         """Initial encoder read + calibration sanity check; on --execute also
         set servo gains and enable torque. Returns the boot qpos (rad)."""
         raw0 = self.bus.read_all()
-        qpos = raw_to_rad(raw0, self.jm, self.direction)
+        qpos = self._encoder_to_true(raw0)
         if not (np.all(qpos >= self.xml_low - INIT_RANGE_SLACK)
                 and np.all(qpos <= self.xml_high + INIT_RANGE_SLACK)):
             raise SystemExit(
@@ -212,14 +231,14 @@ class ArmLoop:
         # Exactly matches training: raw-unit quantization + stiction deadzone.
         target_qpos = action_to_target(self.qpos, action, self.action_scale,
                                        self.xml_low, self.xml_high)
-        target_raw = rad_to_raw(target_qpos, self.jm, self.direction)
+        target_raw = self._true_to_encoder_raw(target_qpos)
         target_raw = clamp_raw_delta(self.prev_raw_target, target_raw, self.max_raw_delta)
         stream_sub_targets(self.prev_raw_target, target_raw, self.n_interp,
                            self.sub_dt, self._write_raw)
         self.prev_raw_target = target_raw
 
         raw = self.bus.read_all()
-        new_qpos = raw_to_rad(raw, self.jm, self.direction)
+        new_qpos = self._encoder_to_true(raw)
         # Divide by the SIM tick, not the wall tick: under --slow the arm
         # covers the same per-tick delta in more wall time, and sim-time
         # velocities are what the policy saw in training.
