@@ -53,6 +53,7 @@ from .rollout_common import (
     load_env_cfg,
     load_policy,
 )
+from .marker_obs import CameraMarkerSource
 from .twin.mapping import load_joint_maps
 from .twin.servo_io import ServoBus
 
@@ -71,6 +72,13 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
                    help="Seed for cube spawn (default: nondeterministic).")
     p.add_argument("--no-view", action="store_true",
                    help="Disable the MuJoCo passive viewer.")
+    p.add_argument("--marker-source", default="fk", choices=["fk", "camera"],
+                   help="Where marker observations come from: 'fk' (default) "
+                        "fills them from the lockstep sim; 'camera' feeds measured "
+                        "AprilTag poses mapped to the base frame via the calibrated "
+                        "extrinsics (real/calibrate_table_marker.py).")
+    p.add_argument("--family", default="apriltag", choices=["apriltag", "aruco"],
+                   help="Marker family for --marker-source camera.")
     return p.parse_args()
 
 
@@ -226,6 +234,8 @@ def main() -> int:
     bus.connect()
     stopped = install_sigint_flag()
 
+    marker_source = CameraMarkerSource(args.family) if args.marker_source == "camera" else None
+
     viewer = None if args.no_view else mujoco.viewer.launch_passive(model, data)
     publisher = None
     if args.stream_port is not None:
@@ -233,6 +243,8 @@ def main() -> int:
         publisher = SimStreamPublisher(model, args.stream_port)
     log_rows: list[dict] = []
     try:
+        if marker_source is not None:
+            marker_source.start()
         loop.boot()
 
         # Sync the sim arm to the real arm and place the cube.
@@ -250,12 +262,17 @@ def main() -> int:
         step = 0
         while not stopped["flag"] and step < args.max_steps:
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
-            marker_pos, marker_rot = marker_world_poses(data, marker_site_ids)
-            # Match training (base_env._compute_obs): a tag turned away from
-            # tag_cam is zeroed — the policy never saw FK-filled hidden tags.
-            hidden = ~markers_visible(data, marker_site_ids, tag_cam_pos)
-            marker_pos[hidden] = 0.0
-            marker_rot[hidden] = 0.0
+            if marker_source is not None:
+                # Measured AprilTag poses, already in the base frame and zeroed
+                # for tags the camera can't see (real/marker_obs.py).
+                marker_pos, marker_rot = marker_source.marker_poses()
+            else:
+                marker_pos, marker_rot = marker_world_poses(data, marker_site_ids)
+                # Match training (base_env._compute_obs): a tag turned away from
+                # tag_cam is zeroed — the policy never saw FK-filled hidden tags.
+                hidden = ~markers_visible(data, marker_site_ids, tag_cam_pos)
+                marker_pos[hidden] = 0.0
+                marker_rot[hidden] = 0.0
 
             obs = build_obs(loop.qpos, loop.qvel, marker_pos, marker_rot,
                             cube_pos, loop.prev_actions)
@@ -311,6 +328,8 @@ def main() -> int:
             if not stopped["flag"]:
                 print(f"TIMEOUT at step {step}")
     finally:
+        if marker_source is not None:
+            marker_source.stop()
         bus.close()
         if viewer is not None:
             viewer.close()

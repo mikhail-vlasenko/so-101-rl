@@ -29,12 +29,21 @@ TAG_SIZE_MM = {
     10: 40.0, 11: 40.0, 12: 40.0,
 }
 
-# Intended physical role per id (from calibration_plan.md). Detection doesn't
-# need this; it documents the planned layout in one place. Ids 3/4 are spares.
+# Physical role per id, as glued on the rig. Detection keys tags by id and the
+# rollout maps id->obs slot, so this is the single source of truth for the
+# layout — keep it matching the arm. The finger/wrist sites in so101.xml carry
+# the same ids in their comments. Ids 1/3/4 are spares; 11/12 are extra table tags.
 ROLES = {
-    0: "wrist", 1: "finger", 2: "base",
+    0: "finger", 2: "wrist",
     10: "table", 11: "table", 12: "table",
 }
+
+# Tag id -> the so101.xml site modelling the same physical tag, named exactly as
+# in src.base_env.MARKER_SITE_NAMES. The calibrator uses each site's FK pose as
+# the base-frame anchor for its tag; the rollout writes a measured tag into the
+# observation slot of its site. Keep the ids in sync with ROLES.
+ARM_TAG_TO_SITE = {0: "marker_finger", 2: "marker_wrist"}
+TABLE_TAG_ID = 10
 
 # Camera capture settings tuned for marker detection on this rig (shared by the
 # viewer, the pose step, and deployment). Manual exposure kills motion blur.

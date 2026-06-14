@@ -148,6 +148,10 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
             *_arm_loop_args(),
             ArgSpec("--seed", "int", "Cube spawn seed"),
             ArgSpec("--no-view", "flag", "Disable native MuJoCo viewer"),
+            ArgSpec("--marker-source", "choice", "Marker obs source", default="fk",
+                    choices=("fk", "camera")),
+            ArgSpec("--family", "choice", "Marker family (camera source)", default="apriltag",
+                    choices=("apriltag", "aruco")),
         ),
         resources=(Resource.SERIAL,),
         supports_stream=True,
@@ -226,6 +230,19 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         module="real.focus_picker", arg_style="argparse",
         description="Interactively pick the pinned focus_absolute value (native cv2 window).",
         resources=(Resource.CAMERA,),
+        native_gui=True,
+    ),
+    ScriptSpec(
+        id="calibrate_table_marker", title="Calibrate table marker", page="camera",
+        module="real.calibrate_table_marker", arg_style="argparse",
+        description="Solve the table tag's pose in the arm base frame from hand-posed "
+                    "arm-tag captures (native cv2 window; torque off, reads encoders).",
+        args=(
+            ArgSpec("--port", "str", "Serial port", default="/dev/ttyACM0"),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+        ),
+        resources=(Resource.CAMERA, Resource.SERIAL),
         native_gui=True,
     ),
     # ---- Sysid ----
