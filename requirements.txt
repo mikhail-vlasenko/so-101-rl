@@ -1,6 +1,7 @@
 pyserial
 evdev
 scipy
+seaborn  # calibration residual diagnostic plots (real/plot_calib_residuals.py)
 pupil-apriltags
 fastapi
 uvicorn
