@@ -14,7 +14,12 @@ from scipy.spatial.transform import Rotation
 
 from real.calibrate_qpos import (
     OBSERVABLE_JOINTS,
+    OUTLIER_FLOOR_MM,
+    _apply_gravity_slack,
+    _backlash_dofs,
     generate_poses,
+    reject_outliers,
+    settled_site_xpos,
     solve_bias,
 )
 from real.calibration import load_calibration, save_calibration
@@ -38,9 +43,9 @@ def setup():
 
 
 def fk_site(model, data, qposadr, qpos, sid):
-    data.qpos[qposadr] = qpos
-    mujoco.mj_kinematics(model, data)
-    return data.site_xpos[sid].copy()
+    # Gear-play settled FK: the same forward model solve_bias inverts, so clean
+    # synthetic data must recover the planted bias to numerical precision.
+    return settled_site_xpos(model, data, qposadr, qpos, sid)
 
 
 def synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n, seed):
@@ -93,6 +98,93 @@ def test_pan_bias_is_gauge_absorbed(setup):
     assert np.allclose(b_est, 0.0, atol=1e-4)   # camera absorbs the pan, biases stay 0
 
 
+def test_gravity_slack_matches_dynamic_settle(setup):
+    """The quasi-static gear-play settle (sign of the gravity generalized force ->
+    backlash limit) must agree with an actual dynamic settle, and the slack must
+    move the tag by a real (mm-scale) amount vs rigid FK."""
+    model, data, jm, site_ids = setup
+    qposadr = jm.qposadr()
+    play_qadr, play_dadr, play_rng = _backlash_dofs(model)
+    assert len(play_qadr) == 4   # lift/elbow/wrist_flex/wrist_roll gear play wired
+
+    poses, _ = generate_poses(model, data, jm)
+    pose = poses[len(poses) // 3]   # a forward-reaching grid pose
+
+    data.qpos[:] = 0.0
+    data.qpos[qposadr] = pose
+    _apply_gravity_slack(model, data, (play_qadr, play_dadr, play_rng))
+    quasi = data.qpos[play_qadr].copy()
+    assert np.allclose(np.abs(quasi), play_rng[:, 1])   # settled hard against a limit
+
+    # Dynamic settle: hold the motors at the encoder pose, let only the play joints
+    # evolve under gravity, and confirm each lands on the same side.
+    data.qpos[:] = 0.0
+    data.qpos[qposadr] = pose
+    data.qvel[:] = 0.0
+    mujoco.mj_forward(model, data)
+    for _ in range(3000):
+        data.ctrl[:] = pose
+        mujoco.mj_step(model, data)
+        data.qpos[qposadr] = pose
+        data.qvel[jm.qposadr()] = 0.0
+    dynamic = data.qpos[play_qadr].copy()
+    assert np.array_equal(np.sign(quasi), np.sign(dynamic)), f"{quasi} vs {dynamic}"
+
+    # The slack actually displaces the wrist tag (not a no-op vs rigid FK).
+    wrist_sid = site_ids[2]
+    settled = settled_site_xpos(model, data, qposadr, pose, wrist_sid)
+    data.qpos[:] = 0.0
+    data.qpos[qposadr] = pose
+    mujoco.mj_kinematics(model, data)
+    rigid = data.site_xpos[wrist_sid].copy()
+    assert np.linalg.norm(settled - rigid) > 1e-3   # > 1 mm shift from gear play
+
+
+def test_rejects_corrupted_detection(setup):
+    """One arm tag mis-detected at one pose pulls the naive bias off; rejection must
+    drop exactly that point and recover the planted bias."""
+    model, data, jm, site_ids = setup
+    b_true = np.zeros(6)
+    b_true[2] = np.radians(9.0)    # elbow_flex
+    b_true[4] = np.radians(-5.0)   # wrist_roll
+    T_base_cam = np.eye(4)
+    T_base_cam[:3, :3] = Rotation.from_euler("xyz", [8, -110, 4], degrees=True).as_matrix()
+    T_base_cam[:3, 3] = [0.12, -0.42, 0.15]
+
+    samples = synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n=16, seed=7)
+    bad_tag = next(iter(site_ids))
+    samples[5][1][bad_tag] = (np.zeros(3), samples[5][1][bad_tag][1] + np.array([0.03, -0.02, 0.04]))
+
+    qposadr = jm.qposadr()
+    b_dirty = solve_bias(samples, model, data, qposadr, site_ids)
+    kept, dropped = reject_outliers(samples, model, data, qposadr, site_ids)
+    b_clean = solve_bias(kept, model, data, qposadr, site_ids)
+
+    assert dropped == [(5, bad_tag, dropped[0][2])]   # exactly the corrupted point
+    assert dropped[0][2] > OUTLIER_FLOOR_MM
+    for i in OBSERVABLE_JOINTS:                        # clean solve recovers the plant
+        assert abs(b_clean[i] - b_true[i]) < 1e-3, f"joint {i}: {b_clean[i]} vs {b_true[i]}"
+    # The outlier genuinely mattered: the naive solve is visibly worse on some joint.
+    assert max(abs(b_dirty[i] - b_true[i]) for i in OBSERVABLE_JOINTS) > 1e-2
+
+
+def test_rejection_keeps_clean_data(setup):
+    """On clean data nothing is dropped and the result matches the plain solve."""
+    model, data, jm, site_ids = setup
+    b_true = np.zeros(6)
+    b_true[1] = np.radians(-3.0)
+    b_true[2] = np.radians(9.0)
+    T_base_cam = np.eye(4)
+    T_base_cam[:3, :3] = Rotation.from_euler("xyz", [10, -120, 5], degrees=True).as_matrix()
+    T_base_cam[:3, 3] = [0.12, -0.42, 0.15]
+
+    samples = synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n=12, seed=3)
+    kept, dropped = reject_outliers(samples, model, data, jm.qposadr(), site_ids)
+    assert dropped == []
+    assert np.allclose(solve_bias(kept, model, data, jm.qposadr(), site_ids),
+                       solve_bias(samples, model, data, jm.qposadr(), site_ids))
+
+
 def test_generated_poses_are_valid(setup):
     model, data, jm, site_ids = setup
     poses, n_grid = generate_poses(model, data, jm)
@@ -122,6 +214,25 @@ def test_sweep_exercises_every_joint(setup):
     assert np.ptp(P[:n_grid, 4]) > 0.5   # wrist_roll sweeps wide within the pan=middle grid
     adj = np.abs(np.diff(P[:n_grid], axis=0))
     assert np.all(adj[:, 1:5].max(axis=1) > 0.01)   # every neighbour move touches a joint
+
+
+def test_sweep_includes_wrist_up_poses(setup):
+    """The wrist-up block contributes low poses with the gripper pitched skyward
+    (approach axis toward world-up while the wrist tag stays low) — wrist_flex
+    decorrelated from height for axial-bias observability."""
+    model, data, jm, site_ids = setup
+    poses, _ = generate_poses(model, data, jm)
+    qposadr = jm.qposadr()
+    gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
+    wrist_sid = site_ids[2]   # marker_wrist
+    n_up = 0
+    for q in poses:
+        data.qpos[qposadr] = q
+        mujoco.mj_forward(model, data)
+        gripper_up = data.site_xmat[gid].reshape(3, 3)[2, 0]   # gripper x-axis, world z
+        if gripper_up > 0.5 and data.site_xpos[wrist_sid][2] < 0.18:
+            n_up += 1
+    assert n_up >= 3, f"expected several low wrist-up poses, got {n_up}"
 
 
 def test_calibration_io_roundtrip(tmp_path):
