@@ -236,11 +236,14 @@ def create_app(runner: Runner | None = None) -> FastAPI:
             raise HTTPException(400, "bad log dir")
         base = FILE_ROOTS["logs"] / log_dir
         options = ["latest", "best"]
-        ckpt_dir = base / "checkpoints"
-        if ckpt_dir.is_dir():
-            zips = sorted(ckpt_dir.glob("*.zip"),
-                          key=lambda p: p.stat().st_mtime, reverse=True)
-            options += [str(p.relative_to(REPO_ROOT)) for p in zips]
+        # Promoted/named checkpoints live directly in the log dir (e.g.
+        # stage4_light_run222.zip); auto-saved ones live under checkpoints/.
+        # List both so either is selectable, newest first within each group.
+        for src in (base, base / "checkpoints"):
+            if src.is_dir():
+                zips = sorted((p for p in src.glob("*.zip") if p.name != "best_model.zip"),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+                options += [str(p.relative_to(REPO_ROOT)) for p in zips]
         return {"log_dir": log_dir, "options": options,
                 "exists": base.is_dir(), "has_best": (base / "best_model.zip").exists()}
 
