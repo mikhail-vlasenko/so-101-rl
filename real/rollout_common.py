@@ -49,13 +49,15 @@ DEFAULT_CAL = REPO_ROOT / "real" / "follower_calibration.json"
 INIT_RANGE_SLACK = 0.05
 
 
-def load_env_cfg(env_name: str) -> tuple[dict, int]:
+def load_env_cfg(env_name: str) -> tuple[dict, int, bool]:
     """Compose the full Hydra config with env=<env_name> so ${action_scale}
     (and any other top-level interpolations) resolve. Returns
-    (env cfg dict, prev_actions_n); prev_actions_n must match the trained policy."""
+    (env cfg dict, prev_actions_n, marker_include_rot); the latter two affect obs
+    dim and must match the trained policy."""
     with initialize_config_dir(config_dir=str(REPO_ROOT / "conf"), version_base=None):
         cfg = compose(config_name="config", overrides=[f"env={env_name}"])
-    return OmegaConf.to_container(cfg[f"{env_name}_env"], resolve=True), int(cfg.prev_actions_n)
+    return (OmegaConf.to_container(cfg[f"{env_name}_env"], resolve=True),
+            int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
 
 
 def add_common_args(p: argparse.ArgumentParser, default_xml: Path,

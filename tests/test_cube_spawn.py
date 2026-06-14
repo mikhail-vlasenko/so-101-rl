@@ -12,7 +12,9 @@ import pytest
 import mujoco
 from hydra import compose, initialize
 
-from src.base_env import marker_world_poses, markers_visible, sample_cube_orientation
+from src.base_env import (
+    marker_world_poses, markers_visible, obs_dim_for, sample_cube_orientation,
+)
 from src.lift_env import SO101LiftEnv
 
 
@@ -26,8 +28,9 @@ MARKER_WRIST_ROT = slice(21, 24)
 def env():
     with initialize(config_path="../conf", version_base=None):
         cfg = compose(config_name="config", overrides=["env=lift"])
+    # marker_include_rot=True so the MARKER_*_ROT obs slices below are populated.
     return SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
-                        obs_noise=None, obs_bias=None)
+                        obs_noise=None, obs_bias=None, marker_include_rot=True)
 
 
 def test_sample_cube_orientation_rest_heights():
@@ -111,3 +114,25 @@ def test_marker_rot_is_rotation_vector(env):
         # Quaternion double cover: q and -q are the same rotation.
         assert (np.allclose(quat_rebuilt, quat_expected, atol=1e-6)
                 or np.allclose(quat_rebuilt, -quat_expected, atol=1e-6))
+
+
+def test_default_obs_drops_marker_rotations():
+    """The default (marker_include_rot=False) obs carries marker positions only:
+    6 dims shorter than the rot-included layout, and the marker section equals the
+    two FK positions back-to-back (cube_pos follows immediately, no rot dims)."""
+    with initialize(config_path="../conf", version_base=None):
+        cfg = compose(config_name="config", overrides=["env=lift"])
+    # marker_always_visible so neither position is zeroed regardless of the spawn pose.
+    env = SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
+                       marker_always_visible=True)
+    assert env.marker_include_rot is False
+    assert env.obs_dim == obs_dim_for(env.prev_actions_n, marker_include_rot=False)
+    assert env.obs_dim == obs_dim_for(env.prev_actions_n, marker_include_rot=True) - 6
+
+    obs, _ = env.reset(seed=0)
+    assert obs.shape == (env.obs_dim,)
+    marker_pos, _ = marker_world_poses(env.data, env.marker_site_ids)
+    # qpos(6)+qvel(6)=12, then pos_finger(3), pos_wrist(3), then cube_pos(3).
+    np.testing.assert_allclose(obs[12:15], marker_pos[0], atol=1e-6)
+    np.testing.assert_allclose(obs[15:18], marker_pos[1], atol=1e-6)
+    np.testing.assert_allclose(obs[18:21], env._get_cube_pos(), atol=1e-6)

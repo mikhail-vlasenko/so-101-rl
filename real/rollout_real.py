@@ -140,7 +140,7 @@ def build_obs(model: mujoco.MjModel, data: mujoco.MjData, qposadr: np.ndarray,
 
 
 def main() -> int:
-    reach_cfg, prev_actions_n = load_env_cfg("reach")
+    reach_cfg, prev_actions_n, _ = load_env_cfg("reach")
     waypoints = np.array(reach_cfg["waypoints"], dtype=np.float64)
     n_waypoints, n_joints_cfg = waypoints.shape
     assert n_joints_cfg == 6, f"waypoints must have 6 joints, got {n_joints_cfg}"

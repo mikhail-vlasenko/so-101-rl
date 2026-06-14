@@ -49,11 +49,14 @@ def cfg():
         return compose(config_name="config", overrides=["env=pickplace"])
 
 
+# The obs-slice offsets above (MARKER_*_ROT, CUBE) assume marker rotations are in
+# the obs, so these envs pin the (non-default) marker_include_rot=True layout.
 def _pickplace(cfg, *, obs_bias=SIGMAS, obs_noise=None):
     return SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
                              xml_path="so101/scene_pickplace.xml",
                              obs_noise=obs_noise,
-                             obs_bias=obs_bias)
+                             obs_bias=obs_bias,
+                             marker_include_rot=True)
 
 
 def _zero_action():

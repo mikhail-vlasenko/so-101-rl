@@ -31,9 +31,11 @@ def _cfg():
     }
 
 
+# The obs-slice assertions below assume marker rotations are in the obs, so the
+# envs here pin the (non-default) marker_include_rot=True layout.
 @pytest.fixture(scope="module")
 def env():
-    return SO101LiftEnv(env_cfg=_cfg())
+    return SO101LiftEnv(env_cfg=_cfg(), marker_include_rot=True)
 
 
 # Obs layout: [qpos(6), qvel(6), pos_finger(3), rot_finger(3), pos_wrist(3),
@@ -90,7 +92,8 @@ def test_hidden_marker_zeroed_after_noise():
              "marker_rot_sigma": 0.02, "cube_sigma": 0.005}
     bias = {"qpos_sigma": 0.01, "marker_pos_sigma": 0.005,
             "marker_rot_sigma": 0.02, "cube_sigma": 0.005}
-    env = SO101LiftEnv(env_cfg=_cfg(), obs_noise=noise, obs_bias=bias)
+    env = SO101LiftEnv(env_cfg=_cfg(), obs_noise=noise, obs_bias=bias,
+                       marker_include_rot=True)
     env.reset(seed=0)
     checked = 0
     for _ in range(40):
@@ -130,7 +133,8 @@ def test_dropout_prob_bands(env):
 def test_dropout_one_zeroes_even_facing_tags():
     """marker_dropout near=far=1.0 zeroes every tag's obs, even ones facing the
     camera (the geometric-visibility path alone would leave them populated)."""
-    env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout={"near": 1.0, "far": 1.0})
+    env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout={"near": 1.0, "far": 1.0},
+                       marker_include_rot=True)
     env.reset(seed=0)
     for _ in range(10):
         obs, _, term, trunc, _ = env.step(np.zeros(6, dtype=np.float32))
@@ -160,7 +164,7 @@ def test_marker_always_visible_disables_zeroing():
     """marker_always_visible feeds every tag (no zeroing) even when geometry hides
     it and dropout would drop it — the easy-mode crutch for training from scratch."""
     env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout={"near": 1.0, "far": 1.0},
-                       marker_always_visible=True)
+                       marker_always_visible=True, marker_include_rot=True)
     env.reset(seed=0)
     roll_idx = 4  # sweep wrist_roll through poses that would hide the finger tag
     lo, hi = env.joint_low[roll_idx], env.joint_high[roll_idx]

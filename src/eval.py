@@ -51,6 +51,7 @@ def main(cfg: DictConfig):
     render_mode = "human" if cfg.render else None
     inner_env = make_env(env_cls, env_cfg, xml_path, render_mode=render_mode,
                          slow_factor=cfg.slow_factor,
+                         marker_include_rot=bool(cfg.marker_include_rot),
                          prev_actions_n=int(cfg.prev_actions_n))
     frame_stack = int(cfg.frame_stack)
     vec_env = DummyVecEnv([lambda: inner_env])

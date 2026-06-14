@@ -84,15 +84,16 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
 
 def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
               marker_rot: np.ndarray, cube_pos: np.ndarray,
-              prev_actions: np.ndarray) -> np.ndarray:
+              prev_actions: np.ndarray, marker_include_rot: bool) -> np.ndarray:
     """Match SO101LiftEnv._compute_obs: qpos+qvel+markers+cube+[0,0,0,task_id]+prev_actions.
 
     Marker poses come from FK on the lockstep sim (the same sites the policy saw
     in training) — a stand-in until the camera AprilTag pipeline feeds measured
-    poses here.
+    poses here. marker_include_rot mirrors the env: positions only when false.
     """
     extra = np.array([0.0, 0.0, 0.0, LIFT_TASK_ID], dtype=np.float32)
-    markers = np.hstack([marker_pos, marker_rot]).flatten()
+    markers = (np.hstack([marker_pos, marker_rot]).flatten()
+               if marker_include_rot else marker_pos.flatten())
     return np.concatenate([qpos.astype(np.float32),
                            qvel.astype(np.float32),
                            markers.astype(np.float32),
@@ -184,7 +185,7 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
 
 
 def main() -> int:
-    lift_cfg, prev_actions_n = load_env_cfg("lift")
+    lift_cfg, prev_actions_n, marker_include_rot = load_env_cfg("lift")
     action_scale = float(lift_cfg["action_scale"])
     n_substeps = int(lift_cfg["n_substeps"])
     cube_low = np.array(lift_cfg["cube_low"], dtype=np.float64)
@@ -214,7 +215,8 @@ def main() -> int:
     cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
     assert cube_geom_id >= 0, "geom 'cube_geom' not found in model"
 
-    policy = load_policy(args.model, LOG_DIR, obs_dim_for(prev_actions_n))
+    policy = load_policy(args.model, LOG_DIR,
+                         obs_dim_for(prev_actions_n, marker_include_rot))
 
     rng = np.random.default_rng(args.seed)
     cube_xy_init = rng.uniform(cube_low, cube_high)
@@ -275,7 +277,7 @@ def main() -> int:
                 marker_rot[hidden] = 0.0
 
             obs = build_obs(loop.qpos, loop.qvel, marker_pos, marker_rot,
-                            cube_pos, loop.prev_actions)
+                            cube_pos, loop.prev_actions, marker_include_rot)
             raw_action, _ = policy.predict(obs, deterministic=True)
             action = loop.tick(raw_action)
 

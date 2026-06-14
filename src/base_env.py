@@ -15,14 +15,17 @@ from src.servo_profile import ServoProfile
 from src.units import action_to_target
 
 
-def obs_dim_for(prev_actions_n: int) -> int:
-    """OBS_DIM = qpos(6) + qvel(6) + markers(2*6) + cube_pos(3) + extra(4) + prev_actions(N*6).
+def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
+    """OBS_DIM = qpos(6) + qvel(6) + markers(2*M) + cube_pos(3) + extra(4) + prev_actions(N*6).
 
-    Each marker contributes its world xyz plus a world rotation vector
-    (axis-angle, 3 dims) — the same quantities the camera pipeline recovers
-    for the physical AprilTags (real/pose.py rvec/tvec, camera->world mapped).
+    Each marker contributes its world xyz (M=3); when marker_include_rot is true it
+    also contributes a world rotation vector (axis-angle, +3 dims, M=6) — the same
+    quantities the camera pipeline recovers for the physical AprilTags (real/pose.py
+    rvec/tvec, camera->world mapped).
     """
-    return 31 + prev_actions_n * 6
+    marker_dim = 6 if marker_include_rot else 3
+    # 12 = qpos(6) + qvel(6); 7 = cube_pos(3) + extra(4)
+    return 12 + N_MARKERS * marker_dim + 7 + prev_actions_n * 6
 
 
 # AprilTags glued to the arm (ids per real/marker_spec.py ROLES): "finger" on
@@ -166,7 +169,7 @@ class SO101BaseEnv(gym.Env):
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
                  obs_noise=None, obs_latency=0, obs_bias=None, marker_dropout=None,
-                 marker_always_visible=False, prev_actions_n=2):
+                 marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
         super().__init__()
         self.render_mode = render_mode
         self.slow_factor = slow_factor
@@ -180,6 +183,9 @@ class SO101BaseEnv(gym.Env):
         # Easy-mode crutch: feed every tag to the policy regardless of camera angle
         # or dropout (no obs zeroing). See conf/config.yaml:marker_always_visible.
         self.marker_always_visible = bool(marker_always_visible)
+        # When false the marker rotation vectors are dropped from the obs (positions
+        # only). Changes obs dim — see obs_dim_for / conf/config.yaml:marker_include_rot.
+        self.marker_include_rot = bool(marker_include_rot)
         self._markers_detected = np.ones(N_MARKERS, dtype=bool)
         self.obs_latency = int(obs_latency)  # frames; agent sees obs from N steps ago
         self._obs_history: deque = deque()
@@ -192,7 +198,7 @@ class SO101BaseEnv(gym.Env):
         self._marker_rot_bias = np.zeros((N_MARKERS, 3))
         self._cube_bias = np.zeros(3)
         self.prev_actions_n = int(prev_actions_n)
-        self.obs_dim = obs_dim_for(self.prev_actions_n)
+        self.obs_dim = obs_dim_for(self.prev_actions_n, self.marker_include_rot)
 
         self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
         self.data = mujoco.MjData(self.model)
@@ -348,8 +354,12 @@ class SO101BaseEnv(gym.Env):
         marker_pos[hidden] = 0.0
         marker_rot[hidden] = 0.0
 
-        # hstack interleaves per marker: [pos_finger, rot_finger, pos_wrist, rot_wrist]
-        markers = np.hstack([marker_pos, marker_rot]).flatten()
+        if self.marker_include_rot:
+            # hstack interleaves per marker: [pos_finger, rot_finger, pos_wrist, rot_wrist]
+            markers = np.hstack([marker_pos, marker_rot]).flatten()
+        else:
+            # positions only: [pos_finger, pos_wrist]
+            markers = marker_pos.flatten()
         return np.concatenate([qpos, qvel, markers, cube_pos, self._obs_extra(cube_pos),
                                self._prev_actions.flatten()]).astype(np.float32)
 

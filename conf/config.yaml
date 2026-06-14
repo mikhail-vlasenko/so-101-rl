@@ -52,6 +52,13 @@ cube_smallest_face_only: false
 # policy infer velocity / action smoothness from its own recent commands.
 prev_actions_n: 1
 
+# Whether each AprilTag marker's world rotation vector (axis-angle, 3 dims) is fed
+# to the policy alongside its world xyz. Default false: marker positions alone are
+# enough to localize the gripper, and the rotation estimate is the noisiest part of
+# the real camera's pose recovery. Changes obs dim (markers go 2*6 -> 2*3), so it
+# must match across a resume and between training and real rollout.
+marker_include_rot: false
+
 # Number of consecutive observations stacked into the policy input.
 # 1 = no stacking (raw OBS_DIM). N>1 multiplies obs_dim by N via SB3's VecFrameStack.
 frame_stack: 1

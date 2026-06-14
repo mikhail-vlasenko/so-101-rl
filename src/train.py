@@ -67,25 +67,27 @@ ALGORITHM_REGISTRY = {
 
 def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1,
              obs_noise=None, obs_latency=0, obs_bias=None, marker_dropout=None,
-             marker_always_visible=False, prev_actions_n=2):
+             marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
     """Create an env instance from class, config, and XML path."""
     return env_cls(render_mode=render_mode, env_cfg=env_cfg,
                    slow_factor=slow_factor, xml_path=xml_path,
                    obs_noise=obs_noise, obs_latency=obs_latency, obs_bias=obs_bias,
                    marker_dropout=marker_dropout,
                    marker_always_visible=marker_always_visible,
+                   marker_include_rot=marker_include_rot,
                    prev_actions_n=prev_actions_n)
 
 
 def _make_env_fn(env_cls, env_cfg, xml_path, obs_noise=None, obs_latency=0,
                  obs_bias=None, marker_dropout=None, marker_always_visible=False,
-                 prev_actions_n=2):
+                 marker_include_rot=False, prev_actions_n=2):
     """Factory closure for SubprocVecEnv."""
     def _init():
         return Monitor(env_cls(env_cfg=env_cfg, xml_path=xml_path,
                                obs_noise=obs_noise, obs_latency=obs_latency,
                                obs_bias=obs_bias, marker_dropout=marker_dropout,
                                marker_always_visible=marker_always_visible,
+                               marker_include_rot=marker_include_rot,
                                prev_actions_n=prev_actions_n))
     return _init
 
@@ -116,6 +118,7 @@ def train(cfg: DictConfig):
     obs_bias = OmegaConf.to_container(cfg.obs_bias, resolve=True)
     marker_dropout = OmegaConf.to_container(cfg.marker_dropout, resolve=True)
     marker_always_visible = bool(cfg.marker_always_visible)
+    marker_include_rot = bool(cfg.marker_include_rot)
     prev_actions_n = int(cfg.prev_actions_n)
 
     if cfg.env_name == "multitask":
@@ -127,11 +130,13 @@ def train(cfg: DictConfig):
                          obs_latency=obs_latency, obs_bias=obs_bias,
                          marker_dropout=marker_dropout,
                          marker_always_visible=marker_always_visible,
+                         marker_include_rot=marker_include_rot,
                          prev_actions_n=prev_actions_n) if i < n_lift
             else _make_env_fn(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise,
                               obs_latency=obs_latency, obs_bias=obs_bias,
                               marker_dropout=marker_dropout,
                               marker_always_visible=marker_always_visible,
+                              marker_include_rot=marker_include_rot,
                               prev_actions_n=prev_actions_n)
             for i in range(n_envs)
         ]
@@ -140,6 +145,7 @@ def train(cfg: DictConfig):
                               obs_latency=obs_latency, obs_bias=obs_bias,
                               marker_dropout=marker_dropout,
                               marker_always_visible=marker_always_visible,
+                              marker_include_rot=marker_include_rot,
                               prev_actions_n=prev_actions_n)
     else:
         env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, cfg.env_name)
@@ -147,11 +153,13 @@ def train(cfg: DictConfig):
                                 obs_latency=obs_latency, obs_bias=obs_bias,
                                 marker_dropout=marker_dropout,
                                 marker_always_visible=marker_always_visible,
+                                marker_include_rot=marker_include_rot,
                                 prev_actions_n=prev_actions_n) for _ in range(n_envs)]
         eval_inner = make_env(env_cls, env_cfg, xml_path, obs_noise=obs_noise,
                               obs_latency=obs_latency, obs_bias=obs_bias,
                               marker_dropout=marker_dropout,
                               marker_always_visible=marker_always_visible,
+                              marker_include_rot=marker_include_rot,
                               prev_actions_n=prev_actions_n)
 
     frame_stack = int(cfg.frame_stack)
