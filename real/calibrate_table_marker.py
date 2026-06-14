@@ -185,13 +185,13 @@ def determine_quarter_turns(samples, model, data, qposadr, site_ids, R_cam_appro
     return quarter_turns, report
 
 
-def solve_camera(samples, model, data, qposadr, site_ids):
-    """Register T_base_cam from tag *centres* (Umeyama): pair each tag's camera-frame
-    position (tvec) with its base-frame FK position, across all poses/tags.
+def paired_points(samples, model, data, qposadr, site_ids):
+    """Pair every detected arm tag with its FK position across all poses.
 
-    Position-only, so it is immune to the glue rotation and to solvePnP's rvec
-    flips on the small arm tags — the failure modes that wreck an orientation
-    bridge. Returns (T_base_cam, rms_mm, tags, err_mm) with per-point residuals."""
+    Returns (src, dst, tags): `src[i]` is a tag centre in the camera frame (tvec),
+    `dst[i]` the same tag's base-frame position from FK on the sample's qpos, and
+    `tags[i]` its id. The qpos fed here is whatever the caller stored — pass
+    encoder-bias-corrected qpos to make `dst` the true base-frame placement."""
     src, dst, tags = [], [], []
     for qpos, poses in samples:
         data.qpos[qposadr] = qpos
@@ -202,7 +202,17 @@ def solve_camera(samples, model, data, qposadr, site_ids):
             src.append(poses[tag][1])               # tvec: tag centre in camera frame
             dst.append(data.site_xpos[sid].copy())  # tag centre in base frame (FK)
             tags.append(tag)
-    src, dst, tags = np.array(src), np.array(dst), np.array(tags)
+    return np.array(src), np.array(dst), np.array(tags)
+
+
+def solve_camera(samples, model, data, qposadr, site_ids):
+    """Register T_base_cam from tag *centres* (Umeyama): pair each tag's camera-frame
+    position (tvec) with its base-frame FK position, across all poses/tags.
+
+    Position-only, so it is immune to the glue rotation and to solvePnP's rvec
+    flips on the small arm tags — the failure modes that wreck an orientation
+    bridge. Returns (T_base_cam, rms_mm, tags, err_mm) with per-point residuals."""
+    src, dst, tags = paired_points(samples, model, data, qposadr, site_ids)
     T_base_cam, rms = rigid_register(src, dst)
     err_mm = np.linalg.norm(dst - (src @ T_base_cam[:3, :3].T + T_base_cam[:3, 3]), axis=1) * 1000.0
     return T_base_cam, rms * 1000.0, tags, err_mm

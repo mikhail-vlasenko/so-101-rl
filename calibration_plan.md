@@ -101,6 +101,28 @@ What we learned (C922 / UVC quirks — don't relitigate):
 
 ### Step 1 — qpos offsets
 
+**Implemented** by `real/calibrate_qpos.py` (self-driven, position-only). It
+supersedes the hand-posed `real/calibrate_table_marker.py` for this step: the arm
+drives *itself* to a spread of sim-generated poses (collision-free, in-limits,
+arm tag facing the camera), captures `(encoder qpos, arm-tag tvec)`, and solves
+`qpos_bias` *jointly* with `T_base_cam` so FK(θ_enc − b) lands the tags where the
+camera sees them. One run writes both `calibration.yaml` (`qpos_bias`) and
+`extrinsics.yaml` (`t_base_cam_fixed`, `t_base_table`, `quarter_turns`).
+
+Deviations from the orientation-based sketch below, deliberate for a first cut:
+- **Position-only** (tag centres), so it inherits immunity to solvePnP rvec flips
+  on the small arm tags — at the cost of weaker observability on axial joints.
+- **Tag mounts trusted** (`T_marker_in_gripper` taken from the XML sites, not
+  freed). Revisit if residuals stay structured.
+- **pan & gripper biases pinned to 0.** A pan bias is a base-z rotation that a
+  yaw of `T_base_cam` reproduces exactly (gauge-degenerate, unobservable); the
+  camera absorbs it and deployment stays self-consistent. The gripper joint moves
+  neither tag. The other four joints (lift/elbow/wrist_flex/wrist_roll) are solved.
+
+The orientation-based optimisation below is the fuller version (adds the axial
+observability and the freed mount), kept as the upgrade path if position-only
+residuals plateau above target.
+
 1. Mount the wrist tag rigidly on the gripper body and fix its pose in the
    gripper frame, `T_marker_in_gripper`. With a printed bracket this is known
    from CAD; with double-sided tape it is unknown, so add it as free variables

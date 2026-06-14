@@ -247,6 +247,22 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ),
     # ---- Sysid ----
     ScriptSpec(
+        id="calibrate_qpos", title="Calibrate encoder bias", page="sysid",
+        module="real.calibrate_qpos", arg_style="argparse",
+        description="Self-drive the arm through a Cartesian sweep and jointly solve "
+                    "encoder zero-offsets + camera extrinsics from the arm tags (writes "
+                    "calibration.yaml + extrinsics.yaml). The sim view shows the sweep "
+                    "preview on dry-run, and the live annotated camera feed while executing.",
+        args=(
+            ArgSpec("--execute", "flag", "Drive the arm and capture (default: preview sweep)"),
+            ArgSpec("--port", "str", "Serial port", default="/dev/ttyACM0"),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+        ),
+        resources=(Resource.CAMERA, Resource.SERIAL),
+        supports_stream=True,
+    ),
+    ScriptSpec(
         id="sysid_record", title="Record real trajectories", page="sysid",
         module="sysid.record_real", arg_style="argparse",
         description="Drive sysid trajectories on the real arm and record encoders. "
