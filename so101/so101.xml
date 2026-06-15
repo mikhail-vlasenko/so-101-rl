@@ -25,12 +25,16 @@
       <default class="collision">
         <geom group="3" condim="3"/>
       </default>
+      <!-- Sliding friction 1.5 (up from 0.6): the gripper geoms have priority=1,
+           so MuJoCo uses THEIR friction for the grasp contact, not the cube's.
+           1.5 models the high-friction dish-sponge target gripped by plastic jaws
+           and matches the cube's nominal sliding friction. Shared by every scene. -->
       <default class="collision_gripper">
-        <geom group="3" condim="6" friction="0.6 0.02 0.002" solref="0.01 1" priority="1"
+        <geom group="3" condim="6" friction="1.5 0.02 0.002" solref="0.01 1" priority="1"
          rgba="1.0 0 0 1.0" mass="0"/>
       </default>
       <default class="collision_gripper_mesh">
-        <geom group="4" condim="6" friction="0.6 0.02 0.002" solref="0.01 1" priority="1"
+        <geom group="4" condim="6" friction="1.5 0.02 0.002" solref="0.01 1" priority="1"
          rgba="1.0 0 0 1.0" mass="0"/>
       </default>
     </default>
