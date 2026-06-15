@@ -245,6 +245,12 @@ def main() -> int:
     if args.stream_port is not None:
         from panel.sim_stream import SimStreamPublisher
         publisher = SimStreamPublisher(model, args.stream_port)
+    # Overlay the camera's measured marker poses in the passive viewer too, beside
+    # the arm's own marker sites, so calibration drift is visible. The stream draws
+    # them itself inside publisher.publish; the viewer needs the helper directly.
+    draw_markers = None
+    if viewer is not None and marker_source is not None:
+        from panel.sim_stream import draw_detected_markers as draw_markers
     log_rows: list[dict] = []
     try:
         if marker_source is not None:
@@ -296,7 +302,10 @@ def main() -> int:
             data.qvel[joint_dofadr] = loop.qvel
             mujoco.mj_forward(model, data)
             if publisher is not None:
-                publisher.publish(data)
+                if marker_source is not None:
+                    publisher.publish(data, marker_pos, marker_rot, marker_include_rot)
+                else:
+                    publisher.publish(data)
 
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
             ee_pos = data.site_xpos[ee_site_id].copy()
@@ -315,6 +324,10 @@ def main() -> int:
             })
 
             if viewer is not None:
+                if draw_markers is not None:
+                    viewer.user_scn.ngeom = 0
+                    draw_markers(viewer.user_scn, marker_pos, marker_rot,
+                                 marker_include_rot)
                 viewer.sync()
                 if not viewer.is_running():
                     print("Viewer closed; stopping rollout.")

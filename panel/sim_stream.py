@@ -14,11 +14,60 @@ from __future__ import annotations
 
 import cv2
 import mujoco
+import numpy as np
 
 from panel.streamer import FrameBox, JpegStreamer
 
 WIDTH, HEIGHT = 960, 720
 JPEG_QUALITY = 92
+
+# Detected-marker overlay (drawn on top of the arm's own marker sites so the
+# camera's measured pose can be eyeballed against the FK geometry). Magenta, set
+# apart from the sites' green/red detected/hidden tint. Box matches the sites'
+# 20 mm tag half-edge (so101.xml marker_finger/marker_wrist size); the ball is a
+# touch larger so a position-only marker still reads clearly.
+DETECTED_MARKER_RGBA = (1.0, 0.0, 1.0, 0.9)
+_MARKER_BOX_HALF = np.array([0.01, 0.01, 0.001])
+_MARKER_BALL_RADIUS = np.array([0.012, 0.0, 0.0])
+
+
+def _rotvec_to_mat(rotvec: np.ndarray) -> np.ndarray:
+    """Axis-angle rotation vector -> row-major 9-vec for mjvGeom.mat."""
+    angle = float(np.linalg.norm(rotvec))
+    axis = rotvec / angle if angle > 0.0 else np.array([0.0, 0.0, 1.0])
+    quat = np.empty(4)
+    mujoco.mju_axisAngle2Quat(quat, axis, angle)
+    mat = np.empty(9)
+    mujoco.mju_quat2Mat(mat, quat)
+    return mat
+
+
+def draw_detected_markers(scn: mujoco.MjvScene, marker_pos: np.ndarray,
+                          marker_rot: np.ndarray, include_rot: bool) -> None:
+    """Append a decorative geom per detected marker to a built scene.
+
+    Used identically by the rollout's passive viewer (`viewer.user_scn`, whose
+    ngeom the caller resets each tick) and the MJPEG stream (the offscreen
+    Renderer's scene, reset every `update_scene`). Markers the camera couldn't
+    place are zeroed (real/marker_obs.py) and skipped. With orientation known
+    (`include_rot`) each marker is an oriented flat box — the tag square — else a
+    sphere, since only its position is known.
+    """
+    rgba = np.asarray(DETECTED_MARKER_RGBA, dtype=np.float32)
+    for pos, rot in zip(marker_pos, marker_rot):
+        if not np.any(pos):
+            continue
+        if scn.ngeom >= scn.maxgeom:
+            return
+        if include_rot:
+            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_BOX,
+                                _MARKER_BOX_HALF, np.asarray(pos, np.float64),
+                                _rotvec_to_mat(rot), rgba)
+        else:
+            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
+                                _MARKER_BALL_RADIUS, np.asarray(pos, np.float64),
+                                np.eye(3).flatten(), rgba)
+        scn.ngeom += 1
 
 
 class SimStreamPublisher:
@@ -41,8 +90,13 @@ class SimStreamPublisher:
         self._streamer.start()
         print(f"sim stream: http://0.0.0.0:{self._streamer.port}/stream")
 
-    def publish(self, data: mujoco.MjData) -> None:
+    def publish(self, data: mujoco.MjData, marker_pos: np.ndarray | None = None,
+                marker_rot: np.ndarray | None = None,
+                marker_include_rot: bool = False) -> None:
         self._renderer.update_scene(data, camera=self._camera)
+        if marker_pos is not None:
+            draw_detected_markers(self._renderer.scene, marker_pos, marker_rot,
+                                  marker_include_rot)
         rgb = self._renderer.render()
         ok, jpeg = cv2.imencode(".jpg", rgb[:, :, ::-1],
                                 [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
