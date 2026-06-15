@@ -8,6 +8,7 @@ Uses tiny dummy envs and real PPO to verify that:
 """
 
 import numpy as np
+import pytest
 import gymnasium as gym
 from gymnasium import spaces
 from stable_baselines3 import PPO
@@ -15,7 +16,7 @@ from stable_baselines3.common.logger import KVWriter, Logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.callbacks import EpisodeCountCallback
+from src.callbacks import EpisodeCountCallback, EpisodeLengthCallback, LiftSuccessCallback
 
 
 class _FixedLenEnv(gym.Env):
@@ -60,6 +61,30 @@ class _EarlyTermEnv(gym.Env):
         return np.zeros(4, dtype=np.float32), 0.0, terminated, False, {}
 
 
+class _LiftLikeEnv(gym.Env):
+    """Terminates after `ep_len` steps, emitting the lift task's done-info:
+    task_name + lift_success (True iff this episode is flagged a success)."""
+
+    def __init__(self, ep_len: int = 3, success: bool = True):
+        super().__init__()
+        self.observation_space = spaces.Box(-1, 1, shape=(4,), dtype=np.float32)
+        self.action_space = spaces.Box(-1, 1, shape=(2,), dtype=np.float32)
+        self.ep_len = ep_len
+        self.success = success
+        self._step_count = 0
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self._step_count = 0
+        return np.zeros(4, dtype=np.float32), {}
+
+    def step(self, action):
+        self._step_count += 1
+        terminated = self._step_count >= self.ep_len
+        info = {"task_name": "lift", "lift_success": self.success} if terminated else {}
+        return np.zeros(4, dtype=np.float32), 0.0, terminated, False, info
+
+
 class _CaptureWriter(KVWriter):
     def __init__(self):
         self.dumps: list[dict] = []
@@ -80,7 +105,7 @@ def _ep_len_dumps(dumps: list[dict]) -> list[float]:
 
 
 def _run_ppo(env_fns: list, n_steps: int, total_timesteps: int,
-             stats_window_size: int = 100) -> list[dict]:
+             stats_window_size: int = 100, callbacks=None) -> list[dict]:
     env = DummyVecEnv(env_fns)
     model = PPO("MlpPolicy", env, n_steps=n_steps,
                 batch_size=n_steps * len(env_fns),
@@ -89,7 +114,7 @@ def _run_ppo(env_fns: list, n_steps: int, total_timesteps: int,
     writer = _CaptureWriter()
     model.set_logger(Logger(folder=None, output_formats=[writer]))
 
-    cb = EpisodeCountCallback()
+    cb = callbacks if callbacks is not None else EpisodeCountCallback()
     model.learn(total_timesteps=total_timesteps, callback=cb, log_interval=1)
     env.close()
     return writer.dumps
@@ -182,3 +207,36 @@ def test_ep_len_mean_deque_saturates_when_long_env_doesnt_complete():
                      total_timesteps=36, stats_window_size=4)
     lens = _ep_len_dumps(dumps)
     assert 3.0 in lens, f"Expected deque saturation at 3.0, got {lens}"
+
+
+# --- EpisodeLengthCallback / LiftSuccessCallback (record_mean, batch-averaged) ---
+
+def _mean_ep_len_dumps(dumps: list[dict]) -> list[float]:
+    return [d["rollout/mean_ep_length"] for d in dumps if "rollout/mean_ep_length" in d]
+
+
+def _success_dumps(dumps: list[dict]) -> list[float]:
+    return [d["rollout/lift/success_rate"] for d in dumps if "rollout/lift/success_rate" in d]
+
+
+def test_mean_ep_length_blends_all_episodes_in_window():
+    """EpisodeLengthCallback averages every episode completed in the rollout via
+    record_mean — unlike SB3's deque-windowed ep_len_mean it does not saturate.
+
+    1 env ep_len=3, 1 env ep_len=9, n_steps=9: short env completes 3 eps (3,3,3),
+    long env completes 1 ep (9). True mean = (3+3+3+9)/4 = 4.5.
+    """
+    lens = _mean_ep_len_dumps(_run_ppo([_make_early(3), _make_early(9)], n_steps=9,
+                                       total_timesteps=9, callbacks=EpisodeLengthCallback()))
+    assert lens[0] == pytest.approx(4.5)
+
+
+def test_success_rate_is_fraction_of_successful_episodes():
+    """LiftSuccessCallback averages lift_success over episodes in the window.
+    One always-success env + one always-fail env, each completing one episode →
+    success_rate = 0.5."""
+    env_fns = [lambda: Monitor(_LiftLikeEnv(ep_len=4, success=True)),
+               lambda: Monitor(_LiftLikeEnv(ep_len=4, success=False))]
+    rates = _success_dumps(_run_ppo(env_fns, n_steps=4, total_timesteps=4,
+                                    callbacks=LiftSuccessCallback()))
+    assert rates[0] == pytest.approx(0.5)

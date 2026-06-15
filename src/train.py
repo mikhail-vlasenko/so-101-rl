@@ -11,10 +11,10 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecNormalize
 from src.callbacks import (
-    CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EvalStatsCallback,
-    EvalStatsTracker, FloorContactCallback, MarkerHiddenCallback, MaxCubeHeightCallback,
-    MeanReturnCallback, ReachStatsCallback, RingContactCallback, TimeLimitCallback,
-    XYProgressCallback,
+    CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EpisodeLengthCallback,
+    EvalStatsCallback, EvalStatsTracker, FloorContactCallback, LiftSuccessCallback,
+    MarkerHiddenCallback, MaxCubeHeightCallback, MeanReturnCallback, ReachStatsCallback,
+    RingContactCallback, TimeLimitCallback, XYProgressCallback,
 )
 from src.networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from src.lift_env import SO101LiftEnv
@@ -194,6 +194,8 @@ def train(cfg: DictConfig):
         )
 
     callbacks.append(MeanReturnCallback())
+    callbacks.append(EpisodeLengthCallback())
+    callbacks.append(LiftSuccessCallback())
     callbacks.append(MaxCubeHeightCallback())
     callbacks.append(FloorContactCallback())
     callbacks.append(RingContactCallback())

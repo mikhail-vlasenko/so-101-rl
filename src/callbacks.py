@@ -118,6 +118,39 @@ class MeanReturnCallback(BaseCallback):
         return True
 
 
+class EpisodeLengthCallback(BaseCallback):
+    """Log mean episode length (steps) across episodes in each log window.
+
+    Lower = the arm reaches a grasped lift sooner (the "lift on the first try"
+    objective). Batch-averaged via record_mean over the rollout window; SB3's
+    built-in rollout/ep_len_mean uses stats_window_size (1 here), so it only ever
+    reflects the most recent episode and is not comparable across runs."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "episode" in info:
+                ep_len = info["episode"]["l"]
+                self.logger.record_mean("rollout/mean_ep_length", ep_len)
+                if "task_name" in info:
+                    self.logger.record_mean(f"rollout/{info['task_name']}/mean_ep_length", ep_len)
+        return True
+
+
+class LiftSuccessCallback(BaseCallback):
+    """Log the fraction of lift episodes that ended in a grasped lift to target height.
+
+    Pairs with mean_ep_length: episode length only means "fast" if success is high,
+    so read the two together (a policy that never succeeds also runs the full 300)."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if done and "lift_success" in info:
+                self.logger.record_mean(
+                    f"rollout/{info['task_name']}/success_rate", float(info["lift_success"]),
+                )
+        return True
+
+
 class CompletionRateCallback(BaseCallback):
     """Log the fraction of episodes where the cube was successfully placed."""
 

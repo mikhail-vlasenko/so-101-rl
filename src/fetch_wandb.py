@@ -17,7 +17,14 @@ import pandas as pd
 
 ENTITY = "mvlasenko"
 PROJECT = "robot-arm"
-METRIC = "rollout/lift/mean_max_cube_height"
+# Primary objective: minimize mean episode length — the arm should reach a clean
+# grasped lift on the first try, not after many failed attempts. Episode length is
+# only meaningful alongside success_rate (a policy that never lifts also runs the
+# full 300 steps), so both are reported. Lift terminates on a grasped lift to
+# target height, so length is bounded [time-to-first-lift, max_steps].
+METRIC = "rollout/lift/mean_ep_length"          # LOWER is better
+SUCCESS_METRIC = "rollout/lift/success_rate"     # HIGHER is better (read together)
+HEIGHT_METRIC = "rollout/lift/mean_max_cube_height"  # diagnostic only
 CSV_DIR = "wandb"  # written here to keep the repo root clean (already gitignored)
 
 
@@ -75,29 +82,32 @@ def main():
 
     if METRIC not in df.columns:
         print(f"\nMetric '{METRIC}' not found in run.")
-        print(f"Available columns containing 'lift', 'cube', or 'height':")
+        print(f"Available columns containing 'lift', 'ep_length', or 'success':")
         for c in sorted(df.columns):
-            if any(s in c.lower() for s in ("lift", "cube", "height")):
+            if any(s in c.lower() for s in ("lift", "ep_length", "success", "height")):
                 print(f"  {c}")
         sys.exit(1)
 
-    # Filter to rows that have the metric logged
-    metric_df = df[df[METRIC].notna()].copy()
-    if "_timestamp" in metric_df.columns:
-        metric_df = metric_df.sort_values("_timestamp")
-        last_ts = metric_df["_timestamp"].iloc[-1]
-        last_minute = metric_df[metric_df["_timestamp"] >= last_ts - 60]
-    else:
-        last_minute = metric_df.tail(10)
-
-    avg = last_minute[METRIC].mean()
-    print(f"\n{METRIC} — last minute ({len(last_minute)} points):")
-    print(f"  Average: {avg:.4f}")
-    print(f"  Min:     {last_minute[METRIC].min():.4f}")
-    print(f"  Max:     {last_minute[METRIC].max():.4f}")
-
-    if args.trajectory:
-        print_per_minute_trajectory(metric_df, METRIC)
+    for metric, label in ((METRIC, "PRIMARY, lower=better"),
+                          (SUCCESS_METRIC, "higher=better"),
+                          (HEIGHT_METRIC, "diagnostic")):
+        if metric not in df.columns:
+            print(f"\n{metric}: not logged in this run.")
+            continue
+        metric_df = df[df[metric].notna()].copy()
+        if "_timestamp" in metric_df.columns:
+            metric_df = metric_df.sort_values("_timestamp")
+            last_ts = metric_df["_timestamp"].iloc[-1]
+            last_minute = metric_df[metric_df["_timestamp"] >= last_ts - 60]
+        else:
+            last_minute = metric_df.tail(10)
+        avg = last_minute[metric].mean()
+        print(f"\n{metric} ({label}) — last minute ({len(last_minute)} points):")
+        print(f"  Average: {avg:.4f}")
+        print(f"  Min:     {last_minute[metric].min():.4f}")
+        print(f"  Max:     {last_minute[metric].max():.4f}")
+        if args.trajectory:
+            print_per_minute_trajectory(metric_df, metric)
 
 
 if __name__ == "__main__":

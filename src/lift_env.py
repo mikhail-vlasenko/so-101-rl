@@ -81,11 +81,16 @@ class SO101LiftEnv(SO101BaseEnv):
                 self._min_arm_floor_dist(self.floor_proximity_thresh) < self.floor_proximity_thresh:
             reward += self.floor_proximity_penalty
 
-        terminated = cube_pos[2] >= self.target_height
+        # Success = a genuine grasped lift to target height. Requiring the grasp
+        # (not just the cube center crossing target_height) stops a violent flick
+        # or a knock-up from counting as a lift, and keeps mean episode length an
+        # honest "time to a clean first-try lift" signal.
+        terminated = grasped and cube_pos[2] >= self.target_height
 
         info = {
             "ee_cube_dist": ee_cube_dist,
             "grasped": grasped,
             "cube_height": cube_pos[2],
+            "lift_success": terminated,
         }
         return reward, terminated, info
