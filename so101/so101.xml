@@ -144,6 +144,10 @@
         <body name="upper_arm" pos="-0.0303992 -0.0182778 -0.0542" quat="1 -1 -1 -1">
           <!-- Joint from shoulder to upper_arm -->
           <joint axis="0 0 1" name="shoulder_lift" type="hinge" range="-1.7453293 1.7453293" class="sts3215"/>
+          <!-- Gear play: passive ±0.5° slack about the motor axis (link lags the encoder
+               within the backlash gap). Anchored at the same body origin/axis as the
+               motor joint, so the two compose into encoder + slack. -->
+          <joint axis="0 0 1" name="shoulder_lift_play" class="backlash"/>
           <inertial pos="-0.089847 -0.008382 0.018409" mass="0.103" fullinertia="4.08002e-05 0.000147318 0.000142487 -1.97819e-05 -4.03016e-08 8.97326e-09"/>
           <!-- Part sts3215_03a_v1_3 -->
           <geom type="mesh" class="visual" pos="-0.11257 -0.0155 0.0187" quat="0 -1 1 0" mesh="sts3215_03a_v1" material="sts3215_03a_v1_material"/>
@@ -156,6 +160,7 @@
             <!-- Joint from upper_arm to lower_arm -->
             <!-- Note: 5-degree calibration offset applied to joint range -->
             <joint axis="0 0 1" name="elbow_flex" type="hinge" range="-1.69 1.69" class="sts3215"/>
+            <joint axis="0 0 1" name="elbow_flex_play" class="backlash"/>
             <inertial pos="-0.098070 0.0032438 0.018283" mass="0.104" fullinertia="2.87438e-05 0.000159844 0.00014529 7.41152e-06 1.26409e-06 -4.90188e-08"/>
             <!-- Part under_arm_so101_v1 -->
             <geom type="mesh" class="visual" pos="-0.06485 -0.032 0.0182" quat="0 1 0 0" mesh="under_arm_so101_v1" material="under_arm_so101_v1_material"/>
@@ -169,6 +174,7 @@
             <body name="wrist" pos="-0.1349 0.0052 0" quat="1 0 0 -1">
               <!-- Joint from lower_arm to wrist -->
               <joint axis="0 0 1" name="wrist_flex" type="hinge" range="-1.658063 1.658063" class="sts3215"/>
+              <joint axis="0 0 1" name="wrist_flex_play" class="backlash"/>
               <inertial pos="-0.000103312 -0.0386143 0.0281156" mass="0.079" fullinertia="3.68263e-05 2.5391e-05 2.1e-05 1.7893e-08 -5.28128e-08 3.6412e-06"/>
               <!-- Part sts3215_03a_no_horn_v1 -->
               <geom type="mesh" class="visual" pos="0 -0.0424 0.0306" quat="1 1 1 -1" mesh="sts3215_03a_no_horn_v1" material="sts3215_03a_no_horn_v1_material"/>
@@ -193,6 +199,7 @@
                      reachable roll is ~5.6 deg wider in the positive direction. Matches
                      the actuator ctrlrange below. -->
                 <joint axis="0 0 1" name="wrist_roll" type="hinge" range="-2.7438473 2.8412063" class="sts3215"/>
+                <joint axis="0 0 1" name="wrist_roll_play" class="backlash"/>
                 <inertial pos="0.000214 0.000245 -0.025187" mass="0.087" fullinertia="2.75087e-05 4.33657e-05 3.45059e-05 -3.35241e-07 -5.7352e-06 -5.17847e-08"/>
                 <!-- Part sts3215_03a_v1_5 -->
                 <geom type="mesh" class="visual" pos="0.0077 0.0001 -0.0234" quat="1 -1 0 0" mesh="sts3215_03a_v1" material="sts3215_03a_v1_material"/>

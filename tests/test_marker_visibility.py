@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from src.base_env import (
-    MARKER_VIS_MAX_ANGLE_DEG, MARKER_VIS_NEAR_ANGLE_DEG, N_MARKERS,
-    marker_dropout_prob, markers_visible, tag_cam_world_pos,
+    MARKER_VIS_MAX_ANGLE_DEG, MARKER_VIS_MAX_HEIGHT_M, MARKER_VIS_NEAR_ANGLE_DEG,
+    N_MARKERS, marker_dropout_prob, markers_visible, tag_cam_world_pos,
 )
 from src.lift_env import SO101LiftEnv
 
@@ -42,10 +42,23 @@ def env():
 # rot_wrist(3), cube(3), extra(4), prev_actions]
 MARKER_OBS_START = 12
 
+# Geometric-visibility tests must pose the arm under the 0.23 m height ceiling: the
+# home pose puts marker_finger at ~0.275 m (above it), so the height cut-off would
+# mask the angle/dropout logic. This forward-low pose faces both tags at the camera
+# with the finger ~0.14 m up, and rolling wrist_roll from here still flips the
+# finger across the angle bound (height stays ~0.14 m, so the flip is purely angle).
+LOW_BOTH_VISIBLE = np.array([0.0, -0.2174, 0.3455, 1.5381, 0.6928, 0.5])
+
+
+def _pose_low(env):
+    env.data.qpos[env.joint_qposadr] = LOW_BOTH_VISIBLE
+    mujoco.mj_forward(env.model, env.data)
+
 
 def test_angle_threshold(env):
     """Visibility flips exactly at the 70° plane angle, per synthetic cam_pos."""
     env.reset(seed=0)
+    _pose_low(env)
     sid = env.marker_site_ids[0]
     site_pos = env.data.site_xpos[sid].copy()
     mat = env.data.site_xmat[sid].reshape(3, 3)
@@ -63,10 +76,31 @@ def test_angle_threshold(env):
     assert MARKER_VIS_MAX_ANGLE_DEG == 70.0
 
 
+def test_height_ceiling_hides_high_tag(env):
+    """A tag above MARKER_VIS_MAX_HEIGHT_M is undetected even when facing the camera
+    head-on — it has left the top of the real camera frame. The home pose puts
+    marker_finger above the ceiling, so reset(seed=0) gives a ready high tag."""
+    env.reset(seed=0)
+    sid = env.marker_site_ids[0]
+    assert env.data.site_xpos[sid][2] > MARKER_VIS_MAX_HEIGHT_M
+    normal = env.data.site_xmat[sid].reshape(3, 3)[:, 2]
+    cam_head_on = env.data.site_xpos[sid] + 0.4 * normal   # angle check passes
+    assert not markers_visible(env.data, [sid], cam_head_on)[0]
+    assert marker_dropout_prob(env.data, [sid], cam_head_on, 0.2, 0.05)[0] == 1.0
+    # The same tag, lowered under the ceiling and facing the camera, is visible.
+    _pose_low(env)
+    sid_low = env.marker_site_ids[0]
+    assert env.data.site_xpos[sid_low][2] <= MARKER_VIS_MAX_HEIGHT_M
+    normal = env.data.site_xmat[sid_low].reshape(3, 3)[:, 2]
+    assert markers_visible(env.data, [sid_low], env.data.site_xpos[sid_low] + 0.4 * normal)[0]
+    assert MARKER_VIS_MAX_HEIGHT_M == 0.23
+
+
 def test_wrist_roll_sweep_flips_finger_visibility(env):
     """Rolling the wrist must produce both visible and hidden finger-tag poses,
     and the finger marker obs slice must be zero exactly when hidden."""
     env.reset(seed=0)
+    _pose_low(env)
     roll_idx = 4  # wrist_roll in JOINT_NAMES
     lo, hi = env.joint_low[roll_idx], env.joint_high[roll_idx]
     seen = set()
@@ -113,6 +147,7 @@ def test_dropout_prob_bands(env):
     """marker_dropout_prob: 1.0 past MAX angle, p_near in the [NEAR, MAX] band,
     p_far for tags comfortably facing the camera."""
     env.reset(seed=0)
+    _pose_low(env)
     sid = env.marker_site_ids[0]
     site_pos = env.data.site_xpos[sid].copy()
     mat = env.data.site_xmat[sid].reshape(3, 3)
@@ -219,6 +254,7 @@ def test_marker_render_colors_track_detection(env):
     from src.base_env import MARKER_HIDDEN_RGBA, MARKER_VISIBLE_RGBA
 
     env.reset(seed=0)
+    _pose_low(env)
     roll_idx = 4  # wrist_roll in JOINT_NAMES
     lo, hi = env.joint_low[roll_idx], env.joint_high[roll_idx]
     saw_visible = saw_hidden = False

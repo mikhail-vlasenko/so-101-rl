@@ -11,13 +11,19 @@ anchor with the corrected kinematics. One pass writes both `extrinsics.yaml`
 (`qpos_bias`).
 
 Differences from the hand-posed table calibrator:
-  - The arm drives *itself* through a deterministic Cartesian sweep: a grid of
-    end-effector targets in front of and above the base at pan=middle, plus blocks
-    at panned angles (<=45 deg). Per target, IK over the four non-base joints both
-    reaches the point and aims *both* arm tags at the camera; that coupling moves
-    every joint between nearby poses, so all observable biases are excited. Each
-    pose is verified collision-free and both-tags-visible in sim before driving.
+  - The arm drives *itself* through a deterministic Cartesian sweep: a low grid of
+    end-effector targets in front of and above the base at pan=middle, blocks at
+    panned angles (<=35 deg — past that a tag leaves the camera frame), and a
+    wrist-up block of low targets with the gripper pitched skyward. Per target, IK
+    over the four non-base joints both reaches the point and aims *both* arm tags at
+    the camera; that coupling moves every joint between nearby poses, so all
+    observable biases are excited. Each pose is verified collision-free and
+    both-tags-visible in sim (including the marker_visible height ceiling that
+    models the real camera's top-of-frame cut-off) before driving.
   - It solves `qpos_bias`, not just the extrinsics.
+  - Before the final solve it rejects outlier arm-tag detections: a single tag
+    mis-detected at one pose (solvePnP fluke / motion blur) is dropped on a robust
+    residual cutoff and the bias+camera re-fit, so one bad point can't skew either.
 
 The dry-run (no --execute) previews the sweep in the sim viewer (one pose/second),
 so the trajectory can be eyeballed before any hardware moves. With --stream-port
@@ -60,10 +66,8 @@ from real.calibrate_camera import FOCUS_ABSOLUTE
 from real.calibrate_table_marker import (
     determine_quarter_turns,
     load_samples,
-    paired_points,
     save_samples,
     sim_cam_R_opencv,
-    solve_camera,
     solve_table,
 )
 from real.calibration import CALIBRATION_PATH, save_calibration
@@ -91,6 +95,19 @@ MIN_SAMPLES = 8
 # pinned to 0 (see module docstring on observability).
 OBSERVABLE_JOINTS = (1, 2, 3, 4)
 
+# Outlier rejection. The per-pose median-over-frames capture knocks down pixel
+# noise, but a single arm tag mis-detected at one pose (solvePnP corner fluke,
+# motion blur, partial occlusion) survives as a point whose post-fit residual sits
+# far above the few-mm bulk. Before the final solve we drop such points and re-fit,
+# so one bad detection can't tug the bias or the camera. Threshold is robust
+# (median + K * scaled-MAD of the residual) with a floor so a tight clean fit isn't
+# pruned. Only arm tags are rejected here; the table tag's repeatability is its own
+# gate in solve_table.
+OUTLIER_MAD_K = 3.5          # drop arm points past median + K * (1.4826*MAD) of the residual
+OUTLIER_FLOOR_MM = 6.0       # ...but never below this, so a clean fit isn't over-pruned
+OUTLIER_MAX_ITERS = 5        # re-fit after each cut; a gross outlier inflates the MAD
+OUTLIER_MAX_DROP_FRAC = 0.2  # past this the capture itself is suspect -> fail loud
+
 # Cartesian sweep (base frame). The arm visits a deterministic grid of
 # end-effector targets in front (+x) and above (+z) the base at pan=middle, then
 # extra blocks at panned angles. Per target, IK over the four non-base joints both
@@ -100,24 +117,35 @@ OBSERVABLE_JOINTS = (1, 2, 3, 4)
 POSE_MARGIN_RAD = 0.12     # keep IK targets off the joint hard limits
 GRIPPER_FIXED = 0.5        # gripper parked: it moves neither tag
 FREE_JOINTS = (1, 2, 3, 4)  # lift, elbow, wrist_flex, wrist_roll (pan & gripper fixed per block)
-GRID_X = np.linspace(0.20, 0.34, 8)   # forward reach, m
-# Height band tuned to sit in the camera frame. Bottom floored at 0.05 (not lower)
-# to keep ~3 cm fingertip-to-table clearance on the still-uncalibrated arm, where
+GRID_X = np.linspace(0.20, 0.37, 8)   # forward reach, m (pushed further out front)
+# Height band sits low in the camera frame: the marker_visible() height ceiling
+# (0.23 m) already culls anything that leaves the top of frame, so the band is
+# tuned down to where most poses land well inside it. Bottom floored at 0.04 to
+# keep ~2.5 cm fingertip-to-table clearance on the still-uncalibrated arm, where
 # the encoder bias we are measuring can put the real EE a couple cm off from sim.
-GRID_Z = np.linspace(0.05, 0.15, 4)   # height, m  (8x4 = 32 targets at pan=middle)
+GRID_Z = np.linspace(0.04, 0.13, 4)   # height, m  (8x4 = 32 targets at pan=middle)
 GRID_Z_DITHER = 0.012      # checkerboard height jitter -> lift & elbow both move between neighbours
 REACH_TOL = 0.02           # accept a pan=middle target only if the EE reaches within this, m
-PAN_OFFSETS_DEG = (-45.0, -22.5, 22.5, 45.0)   # extra blocks, <= 45 deg from middle
-OFF_X = np.linspace(0.22, 0.32, 6)
-OFF_Z = (0.07, 0.13)       # kept below the grid top so panned poses stay in the camera frame
+PAN_OFFSETS_DEG = (-35.0, -17.5, 17.5, 35.0)   # extra blocks; past ~35 deg a tag
+# leaves the 0.23 m frame ceiling so both-visible IK no longer solves
+OFF_X = np.linspace(0.22, 0.35, 6)
+OFF_Z = (0.05, 0.11)       # low, below the grid top so panned poses stay in the camera frame
 W_POS_GRID = 20.0          # IK position-vs-visibility weight at pan=middle (reach dominates)
 W_POS_OFF = 6.0            # panned blocks: trade some reach to keep both tags visible
 # Wrist decorrelation: nudge the wrist joints away from their visibility-optimal value
-# (alternating between neighbours) so they sweep a range instead of sitting still. The
-# roll sweep is the wide one — visibility barely constrains wrist_roll, so we push it
-# hard; wrist_flex is tightly constrained, so only a gentle nudge.
+# (alternating between neighbours) so they sweep a range instead of sitting still. Both
+# sweeps are pushed wide: roll because visibility barely constrains it, flex so the
+# grid includes low poses with the wrist pitched up (not just aimed flat at the camera).
 W_ROLL_DECORR, ROLL_SWEEP_AMP = 0.4, 0.6   # weight, alternating offset (rad) about the seed
-W_FLEX_DECORR, FLEX_SWEEP_AMP = 0.05, 0.12
+W_FLEX_DECORR, FLEX_SWEEP_AMP = 0.25, 0.5
+# Wrist-up block: a handful of low forward targets solved with the gripper pitched
+# to point skyward (W_UP pulls the gripper's approach axis toward world-up). Gives
+# the sweep low poses with the wrist pointing up — wrist_flex decorrelated from
+# height, the configuration position-only IK otherwise never visits.
+WRIST_UP_X = np.linspace(0.20, 0.30, 4)
+WRIST_UP_Z = (0.06, 0.12)
+W_POS_UP = 6.0             # reach weight (relaxed: pointing up trades some reach)
+W_UP = 3.0                # pull the gripper approach axis toward world-up
 IK_SEED = np.array([-0.6, 0.8, 0.6, 0.0])      # lift, elbow, wrist_flex, wrist_roll
 
 # Per-pose capture: median over several frames knocks down tvec pixel noise.
@@ -131,10 +159,12 @@ def _rotz(angle):
     return R
 
 
-def _ik_residual(x, pan, target, w_pos, roll_bias, flex_bias,
+def _ik_residual(x, pan, target, w_pos, roll_bias, flex_bias, up_weight,
                  model, data, qposadr, ee_id, marker_sids, cam_pos):
     """Least-squares residual: reach `target` (weighted) while pointing both tag
-    normals at the camera, with a weak wrist nudge for neighbour decorrelation."""
+    normals at the camera, with a weak wrist nudge for neighbour decorrelation.
+    `up_weight` > 0 additionally pitches the gripper's approach axis skyward (the
+    wrist-up block), decorrelating wrist_flex from height."""
     q = np.zeros(6)
     q[0], q[5] = pan, GRIPPER_FIXED
     q[list(FREE_JOINTS)] = x
@@ -147,6 +177,9 @@ def _ik_residual(x, pan, target, w_pos, roll_bias, flex_bias,
         r.append(1.0 - normal @ u / np.linalg.norm(u))   # 0 when the tag faces the camera
     r.append(W_FLEX_DECORR * (x[2] - flex_bias))
     r.append(W_ROLL_DECORR * (x[3] - roll_bias))
+    if up_weight:
+        grip_x_up = data.site_xmat[ee_id].reshape(3, 3)[2, 0]  # gripper x-axis, world z
+        r.append(up_weight * (1.0 - grip_x_up))   # 0 when the gripper points straight up
     return r
 
 
@@ -165,13 +198,13 @@ def generate_poses(model, data, jm):
                    for n in MARKER_SITE_NAMES]
     cam_pos = tag_cam_world_pos(model, data)
 
-    def attempt(pan, target, seed, w_pos, parity):
+    def attempt(pan, target, seed, w_pos, parity, up_weight=0.0):
         sign = 1.0 if parity else -1.0
         roll_bias = seed[3] + sign * ROLL_SWEEP_AMP
         flex_bias = seed[2] + sign * FLEX_SWEEP_AMP
         res = least_squares(
             _ik_residual, np.clip(seed, b_lo, b_hi), bounds=(b_lo, b_hi),
-            args=(pan, target, w_pos, roll_bias, flex_bias, model, data,
+            args=(pan, target, w_pos, roll_bias, flex_bias, up_weight, model, data,
                   qposadr, ee_id, marker_sids, cam_pos))
         q = np.zeros(6)
         q[0], q[5] = pan, GRIPPER_FIXED
@@ -204,6 +237,15 @@ def generate_poses(model, data, jm):
                     poses.append(q)
                     seed = q[list(FREE_JOINTS)]
                 p += 1
+
+    seed = IK_SEED.copy()
+    for i, x in enumerate(WRIST_UP_X):
+        for z in WRIST_UP_Z:
+            q, ok, _ = attempt(0.0, np.array([x, 0.0, z]), seed, W_POS_UP, i % 2,
+                               up_weight=W_UP)
+            if ok:
+                poses.append(q)
+                seed = q[list(FREE_JOINTS)]
     if len(poses) < MIN_SAMPLES:
         raise RuntimeError(
             f"sweep produced only {len(poses)} valid poses; need >= {MIN_SAMPLES}. "
@@ -382,6 +424,73 @@ def capture(args, jm, direction, poses, max_raw_delta):
     return samples
 
 
+def _backlash_dofs(model):
+    """(qposadr, dofadr, range) of the passive gear-play joints (names end `_play`).
+
+    Empty arrays if the model has none, so the solve degrades to rigid FK."""
+    jids = [j for j in range(model.njnt)
+            if (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or "").endswith("_play")]
+    return (model.jnt_qposadr[jids].copy(),
+            model.jnt_dofadr[jids].copy(),
+            model.jnt_range[jids].copy())
+
+
+def _apply_gravity_slack(model, data, play):
+    """Pose the gear-play joints where gravity loads them, given the motor joints are
+    already set in data.qpos. Quasi-static: the gap is tiny (±0.5°), so the link
+    rests against whichever side the gravitational generalized force pushes it to —
+    only the sign is pose-dependent (matches a dynamic settle, see tests). Leaves
+    data's kinematics updated for the settled pose. No-op if the model has no play
+    joints. Assumes qvel == 0 so qfrc_bias is the pure gravity term."""
+    qadr, dadr, rng = play
+    if len(qadr) == 0:
+        mujoco.mj_kinematics(model, data)
+        return
+    data.qpos[qadr] = 0.0
+    mujoco.mj_forward(model, data)               # qfrc_bias = gravity force at slack=0
+    g = data.qfrc_bias[dadr]
+    data.qpos[qadr] = np.where(-g >= 0.0, rng[:, 1], rng[:, 0])
+    mujoco.mj_kinematics(model, data)            # re-place the sites with slack applied
+
+
+def settled_site_xpos(model, data, qposadr, qpos, site_id):
+    """Base-frame position of `site_id` at motor pose `qpos`, gear-play settled under
+    gravity. Single source of the settled-FK forward model (the bias solve inverts
+    exactly this; the synthetic-data tests generate against it)."""
+    data.qpos[qposadr] = qpos
+    _apply_gravity_slack(model, data, _backlash_dofs(model))
+    return data.site_xpos[site_id].copy()
+
+
+def paired_points(samples, model, data, qposadr, site_ids):
+    """Like calibrate_table_marker.paired_points, but the FK settles the gear-play
+    joints under gravity per pose (the encoder pins the motor; the link sags within
+    the backlash gap toward the camera-measured position). Pairs each detected arm
+    tag's camera tvec (src) with its settled base-frame FK position (dst)."""
+    play = _backlash_dofs(model)
+    src, dst, tags = [], [], []
+    for qpos, poses in samples:
+        data.qpos[qposadr] = qpos
+        _apply_gravity_slack(model, data, play)
+        for tag, sid in site_ids.items():
+            if tag not in poses:
+                continue
+            src.append(poses[tag][1])               # tvec: tag centre in camera frame
+            dst.append(data.site_xpos[sid].copy())  # settled tag centre in base frame
+            tags.append(tag)
+    return np.array(src), np.array(dst), np.array(tags)
+
+
+def solve_camera(samples, model, data, qposadr, site_ids):
+    """T_base_cam (Umeyama) on the settled-FK tag centres; see paired_points. Position-
+    only, so immune to the glue rotation and solvePnP rvec flips on the small tags.
+    Returns (T_base_cam, rms_mm, tags, err_mm) with per-point residuals."""
+    src, dst, tags = paired_points(samples, model, data, qposadr, site_ids)
+    T_base_cam, rms = rigid_register(src, dst)
+    err_mm = np.linalg.norm(dst - (src @ T_base_cam[:3, :3].T + T_base_cam[:3, 3]), axis=1) * 1000.0
+    return T_base_cam, rms * 1000.0, tags, err_mm
+
+
 def bias_residuals(b4, samples, model, data, qposadr, site_ids):
     """Position residuals of FK(qpos - b) vs the optimally-aligned camera points.
 
@@ -404,8 +513,67 @@ def solve_bias(samples, model, data, qposadr, site_ids):
     return b_full
 
 
+def _arm_point_keys(samples, site_ids):
+    """(sample_idx, tag) per arm-tag point, in the exact order paired_points emits
+    them (sample-major, then site_ids order), so an err_mm index maps back to a
+    sample and tag."""
+    keys = []
+    for i, (_, poses) in enumerate(samples):
+        for tag in site_ids:
+            if tag in poses:
+                keys.append((i, tag))
+    return keys
+
+
+def reject_outliers(samples, model, data, qposadr, site_ids):
+    """Drop arm-tag observations whose post-fit residual is a robust outlier,
+    re-solving the bias+camera after each cut. Returns (kept_samples, dropped),
+    where dropped is a list of (sample_idx, tag, err_mm) on the original indices.
+
+    The table tag is never touched (solve_table needs it and gates it separately);
+    a sample that loses an arm tag is kept for its remaining tags. Fails loud if
+    more than OUTLIER_MAX_DROP_FRAC of the arm points would be discarded — that
+    points at a bad capture (camera bumped mid-run, wrong calibration json), not a
+    handful of flukes."""
+    samples = [(qpos, dict(poses)) for qpos, poses in samples]   # copy dicts; we mutate
+    n_points0 = len(_arm_point_keys(samples, site_ids))
+    dropped = []
+    for _ in range(OUTLIER_MAX_ITERS):
+        b_full = solve_bias(samples, model, data, qposadr, site_ids)
+        corrected = [(qpos - b_full, poses) for qpos, poses in samples]
+        _, _, _, err_mm = solve_camera(corrected, model, data, qposadr, site_ids)
+        keys = _arm_point_keys(samples, site_ids)
+        assert len(keys) == len(err_mm)
+        med = np.median(err_mm)
+        mad = np.median(np.abs(err_mm - med))
+        cutoff = max(OUTLIER_FLOOR_MM, med + OUTLIER_MAD_K * 1.4826 * mad)
+        worst = int(np.argmax(err_mm))
+        if err_mm[worst] <= cutoff:
+            break
+        # Drop only the single worst point, then re-fit: a gross outlier contaminates
+        # the bias, inflating otherwise-clean residuals, so cutting all-at-once would
+        # take collateral. One-at-a-time over the iterations isolates the real ones.
+        if len(dropped) + 1 > OUTLIER_MAX_DROP_FRAC * n_points0:
+            raise RuntimeError(
+                f"outlier rejection wants to drop more than "
+                f"{OUTLIER_MAX_DROP_FRAC:.0%} of {n_points0} arm points; the capture "
+                "is suspect (camera bumped mid-run, wrong calibration json, or a tag "
+                "glued askew).")
+        i, tag = keys[worst]
+        del samples[i][1][tag]
+        dropped.append((i, tag, float(err_mm[worst])))
+    return samples, dropped
+
+
 def report_and_save(args, samples, model, data, jm, site_ids):
     qposadr = jm.qposadr()
+    samples, dropped = reject_outliers(samples, model, data, qposadr, site_ids)
+    if dropped:
+        print(f"\ndiscarded {len(dropped)} outlier arm-tag detection(s) "
+              "(robust residual cutoff):")
+        for i, tag, e in sorted(dropped):
+            print(f"    sample {i + 1} tag {tag} ({ARM_TAG_TO_SITE[tag]}): "
+                  f"residual {e:.1f} mm")
     _, rms_before, _, _ = solve_camera(samples, model, data, qposadr, site_ids)
     b_full = solve_bias(samples, model, data, qposadr, site_ids)
     corrected = [(qpos - b_full, poses) for qpos, poses in samples]
@@ -471,7 +639,7 @@ def main():
     else:
         poses, n_grid = generate_poses(model, data, jm)
         print(f"generated {len(poses)} sweep poses "
-              f"({n_grid} at pan=middle, {len(poses) - n_grid} panned)")
+              f"({n_grid} pan=middle grid, {len(poses) - n_grid} panned + wrist-up)")
         if not args.execute:
             print("dry-run: previewing the sweep in sim "
                   "(pass --execute to drive the arm and capture).")

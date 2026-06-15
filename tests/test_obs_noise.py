@@ -134,7 +134,10 @@ def test_per_step_noise_magnitude_matches_sigmas(cfg):
         # visibility) — exclude them from the marker noise statistics.
         visible[i] = markers_visible(env_noisy.data, env_noisy.marker_site_ids,
                                      env_noisy.tag_cam_pos)
-    assert visible.all(axis=1).mean() > 0.1, "too few both-visible samples"
+    # Marker noise is measured per tag, so each tag (not both at once) just needs
+    # enough visible samples. Under the 0.23 m height ceiling both-visible is rare
+    # (~7%), but each tag alone clears this comfortably over the random poses.
+    assert visible[:, 0].sum() > 50 and visible[:, 1].sum() > 50, "too few tag-visible samples"
     marker_pos_diffs = np.concatenate([diffs[visible[:, 0], 12:15].ravel(),
                                        diffs[visible[:, 1], 18:21].ravel()])
     marker_rot_diffs = np.concatenate([diffs[visible[:, 0], 15:18].ravel(),

@@ -46,6 +46,11 @@ MARKER_VIS_MAX_ANGLE_DEG = 70.0
 MARKER_VIS_NEAR_ANGLE_DEG = 65.0
 _MARKER_VIS_COS_MIN = np.cos(np.radians(MARKER_VIS_MAX_ANGLE_DEG))
 _MARKER_VIS_COS_NEAR = np.cos(np.radians(MARKER_VIS_NEAR_ANGLE_DEG))
+# Field-of-view proxy: the plane-angle check above models grazing, not the camera
+# frame bounds. On the real rig the webcam clips tags near this height off the
+# ground, so a tag whose world z exceeds it has left the top of the image and
+# counts as undetected regardless of facing angle.
+MARKER_VIS_MAX_HEIGHT_M = 0.23
 
 # Render-only tints for the marker sites: green when the tag is detected this
 # frame, red when not (over-angle or dropped). Visual only — never read by obs.
@@ -83,21 +88,24 @@ def tag_cam_world_pos(model, data):
 
 
 def markers_visible(data, site_ids, cam_pos):
-    """Per-marker geometric visibility from cam_pos as a bool array (plane angle
-    under MARKER_VIS_MAX_ANGLE_DEG; see TAG_CAM_NAME doc). No stochastic dropout —
-    used by tests and the real-arm twin rollout."""
+    """Per-marker geometric visibility from cam_pos as a bool array: plane angle
+    under MARKER_VIS_MAX_ANGLE_DEG *and* world height under MARKER_VIS_MAX_HEIGHT_M
+    (see TAG_CAM_NAME doc). No stochastic dropout — used by tests and the real-arm
+    twin rollout."""
     visible = np.empty(len(site_ids), dtype=bool)
     for i, sid in enumerate(site_ids):
         normal = data.site_xmat[sid].reshape(3, 3)[:, 2]
         to_cam = cam_pos - data.site_xpos[sid]
-        visible[i] = normal @ to_cam >= _MARKER_VIS_COS_MIN * np.linalg.norm(to_cam)
+        facing = normal @ to_cam >= _MARKER_VIS_COS_MIN * np.linalg.norm(to_cam)
+        visible[i] = facing and data.site_xpos[sid][2] <= MARKER_VIS_MAX_HEIGHT_M
     return visible
 
 
 def marker_dropout_prob(data, site_ids, cam_pos, p_near, p_far):
     """Per-marker probability the tag is undetected this frame (its obs zeroed).
 
-    Past MARKER_VIS_MAX_ANGLE_DEG the camera can't see the tag at all -> 1.0.
+    Above MARKER_VIS_MAX_HEIGHT_M (out the top of frame) or past
+    MARKER_VIS_MAX_ANGLE_DEG the camera can't see the tag at all -> 1.0.
     In the near-boundary band [NEAR, MAX] the grazing view is flaky -> p_near.
     Comfortably facing the camera (angle < NEAR) -> p_far (rare detector miss).
     """
@@ -106,7 +114,7 @@ def marker_dropout_prob(data, site_ids, cam_pos, p_near, p_far):
         normal = data.site_xmat[sid].reshape(3, 3)[:, 2]
         to_cam = cam_pos - data.site_xpos[sid]
         cos = (normal @ to_cam) / np.linalg.norm(to_cam)
-        if cos < _MARKER_VIS_COS_MIN:
+        if data.site_xpos[sid][2] > MARKER_VIS_MAX_HEIGHT_M or cos < _MARKER_VIS_COS_MIN:
             prob[i] = 1.0
         elif cos < _MARKER_VIS_COS_NEAR:
             prob[i] = p_near
