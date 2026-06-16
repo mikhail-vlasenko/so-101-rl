@@ -29,9 +29,8 @@ import mujoco
 import numpy as np
 import seaborn as sns
 
+from real.calib_solve import load_samples, paired_points, solve_camera
 from real.calibrate_qpos import DEFAULT_CAL, DEFAULT_XML, SAMPLES_PATH, solve_bias
-from real.calibrate_table_marker import load_samples, paired_points, solve_camera
-from real.extrinsics import rigid_register
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import JOINT_NAMES, load_joint_maps
 from src.base_env import tag_cam_world_pos

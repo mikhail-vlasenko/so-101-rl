@@ -232,19 +232,6 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         resources=(Resource.CAMERA,),
         native_gui=True,
     ),
-    ScriptSpec(
-        id="calibrate_table_marker", title="Calibrate table marker", page="camera",
-        module="real.calibrate_table_marker", arg_style="argparse",
-        description="Solve the table tag's pose in the arm base frame from hand-posed "
-                    "arm-tag captures (native cv2 window; torque off, reads encoders).",
-        args=(
-            ArgSpec("--port", "str", "Serial port", default="/dev/ttyACM0"),
-            ArgSpec("--family", "choice", "Marker family", default="apriltag",
-                    choices=("apriltag", "aruco")),
-        ),
-        resources=(Resource.CAMERA, Resource.SERIAL),
-        native_gui=True,
-    ),
     # ---- Sysid ----
     ScriptSpec(
         id="calibrate_qpos", title="Calibrate encoder bias", page="sysid",

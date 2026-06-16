@@ -101,8 +101,7 @@ What we learned (C922 / UVC quirks — don't relitigate):
 
 ### Step 1 — qpos offsets
 
-**Implemented** by `real/calibrate_qpos.py` (self-driven, position-only). It
-supersedes the hand-posed `real/calibrate_table_marker.py` for this step: the arm
+**Implemented** by `real/calibrate_qpos.py` (self-driven, position-only). The arm
 drives *itself* to a spread of sim-generated poses (collision-free, in-limits,
 arm tag facing the camera), captures `(encoder qpos, arm-tag tvec)`, and solves
 `qpos_bias` *jointly* with `T_base_cam` so FK(θ_enc − b) lands the tags where the

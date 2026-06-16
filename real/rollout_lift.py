@@ -77,7 +77,7 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
                    help="Where marker observations come from: 'fk' (default) "
                         "fills them from the lockstep sim; 'camera' feeds measured "
                         "AprilTag poses mapped to the base frame via the calibrated "
-                        "extrinsics (real/calibrate_table_marker.py).")
+                        "extrinsics (real/calibrate_qpos.py).")
     p.add_argument("--family", default="apriltag", choices=["apriltag", "aruco"],
                    help="Marker family for --marker-source camera.")
     return p.parse_args()

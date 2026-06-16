@@ -2,7 +2,7 @@
 
 Replaces the FK stand-in in the rollout loop: a background thread detects the arm
 tags with the camera and maps them into the base frame through the calibrated
-extrinsics (`real/extrinsics.py`, produced by `real/calibrate_table_marker.py`),
+extrinsics (`real/extrinsics.py`, produced by `real/calibrate_qpos.py`),
 so the policy consumes *measured* tag poses in the exact `(xyz, axis-angle)` form
 it saw in sim (`src/base_env.py::marker_world_poses`).
 

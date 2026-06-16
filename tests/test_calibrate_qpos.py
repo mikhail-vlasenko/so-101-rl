@@ -13,6 +13,7 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from real.calibrate_qpos import (
+    MIN_EE_Z,
     OBSERVABLE_JOINTS,
     OUTLIER_FLOOR_MM,
     _apply_gravity_slack,
@@ -21,11 +22,12 @@ from real.calibrate_qpos import (
     reject_outliers,
     settled_site_xpos,
     solve_bias,
+    verify_drive_safe,
 )
 from real.calibration import load_calibration, save_calibration
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import load_joint_maps
-from src.base_env import markers_visible, tag_cam_world_pos
+from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_world_pos
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 XML = REPO_ROOT / "so101" / "scene.xml"
@@ -203,36 +205,60 @@ def test_generated_poses_are_valid(setup):
 
 
 def test_sweep_exercises_every_joint(setup):
-    """Each non-pinned joint must span a real range across the sweep, and within
-    the pan=middle grid no two neighbours may share the whole configuration."""
+    """Each non-pinned joint must span a real range across the sweep so its bias is
+    observable, and every consecutive (drive-order) move must touch a joint."""
     model, data, jm, site_ids = setup
-    poses, n_grid = generate_poses(model, data, jm)
+    poses, _ = generate_poses(model, data, jm)
     P = np.array(poses)
     for j in (1, 2, 3, 4):               # lift, elbow, wrist_flex, wrist_roll
         assert np.ptp(P[:, j]) > 0.2, f"joint {j} barely moves: span {np.ptp(P[:, j])}"
     assert np.ptp(P[:, 0]) > 1.0         # pan spans the panned blocks
-    assert np.ptp(P[:n_grid, 4]) > 0.5   # wrist_roll sweeps wide within the pan=middle grid
-    adj = np.abs(np.diff(P[:n_grid], axis=0))
+    assert np.ptp(P[:, 3]) > 0.8         # wrist_flex stays observable without the wrist-up block
+    assert np.ptp(P[:, 4]) > 1.0         # wrist_roll sweeps wide
+    adj = np.abs(np.diff(P, axis=0))
     assert np.all(adj[:, 1:5].max(axis=1) > 0.01)   # every neighbour move touches a joint
 
 
-def test_sweep_includes_wrist_up_poses(setup):
-    """The wrist-up block contributes low poses with the gripper pitched skyward
-    (approach axis toward world-up while the wrist tag stays low) — wrist_flex
-    decorrelated from height for axial-bias observability."""
+def test_sweep_hugs_the_table(setup):
+    """The sweep concentrates near the table (where the bias matters for a grasp):
+    every realized fingertip stays above the safety floor yet the band is low, and at
+    least one marker reaches the contact regime the old high band never sampled."""
     model, data, jm, site_ids = setup
     poses, _ = generate_poses(model, data, jm)
     qposadr = jm.qposadr()
     gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
-    wrist_sid = site_ids[2]   # marker_wrist
-    n_up = 0
+    marker_sids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, n)
+                   for n in MARKER_SITE_NAMES]
+    ee_z, min_marker_z = [], []
     for q in poses:
         data.qpos[qposadr] = q
         mujoco.mj_forward(model, data)
-        gripper_up = data.site_xmat[gid].reshape(3, 3)[2, 0]   # gripper x-axis, world z
-        if gripper_up > 0.5 and data.site_xpos[wrist_sid][2] < 0.18:
-            n_up += 1
-    assert n_up >= 3, f"expected several low wrist-up poses, got {n_up}"
+        ee_z.append(float(data.site_xpos[gid][2]))
+        min_marker_z.append(min(float(data.site_xpos[s][2]) for s in marker_sids))
+    ee_z, min_marker_z = np.array(ee_z), np.array(min_marker_z)
+
+    assert ee_z.min() >= MIN_EE_Z - 1e-9        # the fingertip floor holds for every pose
+    assert ee_z.max() < 0.12                    # nothing reaches up high (old band hit 0.27)
+    assert ee_z.mean() < 0.07                    # the band is concentrated low
+    assert min_marker_z.min() < 0.09             # a marker reaches the contact regime
+
+
+def test_sweep_is_drive_safe(setup):
+    """The straight-line interpolation drive_to ramps along between consecutive poses
+    must be collision-free in sim, and consecutive poses must stay close so it never
+    has to dive toward the table to get between two samples."""
+    model, data, jm, site_ids = setup
+    poses, _ = generate_poses(model, data, jm)
+    qposadr = jm.qposadr()
+    gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
+
+    # verify_drive_safe raises if any transition collides; the sag stays small.
+    sag = verify_drive_safe(model, data, qposadr, gid, poses)
+    assert sag < 0.02, f"interpolation sags {sag * 1000:.0f} mm below endpoints"
+
+    # No single transition swings a joint wildly (the old block boundaries hit ~180 deg).
+    jumps = np.abs(np.diff(np.array(poses), axis=0))
+    assert jumps.max() < np.radians(100), f"max joint jump {np.degrees(jumps.max()):.0f} deg"
 
 
 def test_calibration_io_roundtrip(tmp_path):

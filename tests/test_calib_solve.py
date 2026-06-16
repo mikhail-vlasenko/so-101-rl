@@ -1,4 +1,5 @@
-"""Integration test for the table-marker solve, no camera or servos.
+"""Integration test for the position-based calibration solve (real/calib_solve.py),
+no camera or servos.
 
 We pick a synthetic camera pose and table-tag pose, then *fabricate* exactly the
 measurements the camera would report (each tag expressed in the camera frame)
@@ -9,13 +10,14 @@ spins about its centre). `determine_quarter_turns` must still vote that glue bac
 for the rotation channel. These cover the position registration, the tag->site
 mapping, and the glue handling end to end.
 """
+from pathlib import Path
+
 import mujoco
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from real.calibrate_table_marker import (
-    DEFAULT_XML,
+from real.calib_solve import (
     determine_quarter_turns,
     site_mat,
     solve_camera,
@@ -24,6 +26,7 @@ from real.calibrate_table_marker import (
 from real.extrinsics import mat_inv, mat_to_rt, quarter_turn_mat
 from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_ID
 
+DEFAULT_XML = Path(__file__).resolve().parent.parent / "so101" / "scene_lift.xml"
 NO_TURNS = {tag: 0 for tag in ARM_TAG_TO_SITE}
 
 
