@@ -111,8 +111,16 @@ camera sees them. One run writes both `calibration.yaml` (`qpos_bias`) and
 Deviations from the orientation-based sketch below, deliberate for a first cut:
 - **Position-only** (tag centres), so it inherits immunity to solvePnP rvec flips
   on the small arm tags — at the cost of weaker observability on axial joints.
-- **Tag mounts trusted** (`T_marker_in_gripper` taken from the XML sites, not
-  freed). Revisit if residuals stay structured.
+- **Tag mounts freed (position-only).** Each arm tag's 3D centre offset in its
+  parent body frame is solved jointly with the bias, under a strong XML prior, so a
+  hand-taped tag a few mm off CAD isn't absorbed as a fake encoder bias. The mount
+  *rotation* is still trusted (position-only — a centre has no orientation; the glue
+  rotation is handled separately by `quarter_turns`). The offsets are nuisance params:
+  deployment reads camera-measured tags, not the FK site, so they're a hardware
+  diagnostic and discarded — only the cleaner bias and extrinsics are saved. The
+  finger offset is an exact gauge pair with the wrist_roll bias (roll is the last
+  joint before the finger's body and no other tag sees roll), which the prior resolves
+  in favour of the bias.
 - **pan & gripper biases pinned to 0.** A pan bias is a base-z rotation that a
   yaw of `T_base_cam` reproduces exactly (gauge-degenerate, unobservable); the
   camera absorbs it and deployment stays self-consistent. The gripper joint moves

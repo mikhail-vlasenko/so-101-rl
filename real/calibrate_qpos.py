@@ -49,6 +49,13 @@ What is and isn't observable (position-only, single fixed camera):
   - gripper bias moves neither tag (both sit on links proximal to the gripper
     joint) -> pinned to 0.
 
+Freed tag mounts: each arm tag's XML site position is a by-hand estimate of where the
+tag is taped, so its 3D centre offset is solved jointly with the bias (strong XML prior;
+see MOUNT_PRIOR_W) to keep a mis-taped tag from being absorbed as a fake encoder offset.
+The offsets are nuisance parameters — deployment reads the camera-measured tag, never the
+FK site — so they are printed as a hardware diagnostic and discarded; only the cleaner
+bias and extrinsics are saved.
+
 Run:
     conda run -n mujoco_env python -m real.calibrate_qpos --execute
     conda run -n mujoco_env python -m real.calibrate_qpos              # dry-run: preview poses
@@ -97,6 +104,25 @@ MIN_SAMPLES = 8
 # qpos_bias indices solved jointly with the camera; pan (0) and gripper (5) are
 # pinned to 0 (see module docstring on observability).
 OBSERVABLE_JOINTS = (1, 2, 3, 4)
+
+# Freed tag mounts. The arm-tag XML site positions are a CAD/by-hand estimate of where
+# the tags are physically taped, good to a few mm at best. Solving each tag's 3D centre
+# offset (in its parent body frame) jointly with the bias de-confounds a mis-taped tag
+# from a real encoder offset, so both the bias and the camera fit cleaner. The offsets
+# are nuisance parameters: deployment (real/marker_obs.py) reads the *camera-measured*
+# tag pose and maps it through T_base_cam, never the FK site, so they are reported as a
+# hardware diagnostic and discarded — only the (now-cleaner) bias and extrinsics are
+# saved. A strong prior toward the XML is mandatory and resolves a gauge: wrist_roll is
+# the last joint before the finger tag's body and marker_wrist is proximal to it, so the
+# finger tag is the *only* observer of roll — and a constant roll bias delta is exactly a
+# constant finger mount offset (Rz(delta)·p − p in the gripper frame). The two are
+# interchangeable; with the prior off the solver splits them arbitrarily (wrist_roll ran
+# to −151 deg in a synthetic check). The prior picks the gauge — trust the XML mount for
+# that one direction, leaving roll bias observable — while still letting the offset's two
+# non-degenerate directions (and the fully-observable wrist tag) move a few mm.
+MOUNT_PRIOR_W = 3.0          # L2 spring (per mount-offset metre) pulling each tag to XML
+MOUNT_OFFSET_WARN_MM = 12.0  # past this the prior can't be the whole story: a tag is
+#                              physically mis-stuck/peeling -> re-check the hardware
 
 # Outlier rejection. The per-pose median-over-frames capture knocks down pixel
 # noise, but a single arm tag mis-detected at one pose (solvePnP corner fluke,
@@ -568,6 +594,44 @@ def solve_bias(samples, model, data, qposadr, site_ids):
     return b_full
 
 
+def mount_bias_residuals(params, samples, model, data, qposadr, site_ids, nominal):
+    """Residual for the joint bias + per-tag mount-offset solve. `params` is the 4
+    observable-joint biases followed by 3 centre-offset components per tag (site_ids
+    order). Each offset shifts its tag's site to nominal+offset in the parent-body
+    frame before the settled FK, so dst is the mount-corrected base-frame tag centre;
+    the camera stays the closed-form Umeyama inner fit. The trailing MOUNT_PRIOR_W
+    terms are the XML prior, pulling every offset toward 0 so a near-degenerate
+    direction can't trade against a joint bias."""
+    n_b = len(OBSERVABLE_JOINTS)
+    b_full = np.zeros(6)
+    b_full[list(OBSERVABLE_JOINTS)] = params[:n_b]
+    offsets = params[n_b:].reshape(len(site_ids), 3)
+    for nom, off, sid in zip(nominal, offsets, site_ids.values()):
+        model.site_pos[sid] = nom + off
+    corrected = [(qpos - b_full, poses) for qpos, poses in samples]
+    src, dst, _ = paired_points(corrected, model, data, qposadr, site_ids)
+    T, _ = rigid_register(src, dst)
+    fit = (dst - (src @ T[:3, :3].T + T[:3, 3])).ravel()
+    return np.concatenate([fit, MOUNT_PRIOR_W * offsets.ravel()])
+
+
+def solve_bias_and_mounts(samples, model, data, qposadr, site_ids):
+    """Solve the 4 observable joint biases jointly with each arm tag's 3D mount-centre
+    offset (XML-prior-regularised; see MOUNT_PRIOR_W). Leaves model.site_pos at the
+    solved mounts so the caller's camera/table fit uses the same forward model, and
+    returns (b_full, offsets) with offsets {tag: 3-vector in the body frame, m}."""
+    nominal = np.array([model.site_pos[sid].copy() for sid in site_ids.values()])
+    n_b = len(OBSERVABLE_JOINTS)
+    res = least_squares(mount_bias_residuals, np.zeros(n_b + 3 * len(site_ids)),
+                        args=(samples, model, data, qposadr, site_ids, nominal))
+    b_full = np.zeros(6)
+    b_full[list(OBSERVABLE_JOINTS)] = res.x[:n_b]
+    offsets = res.x[n_b:].reshape(len(site_ids), 3)
+    for nom, off, sid in zip(nominal, offsets, site_ids.values()):
+        model.site_pos[sid] = nom + off       # leave the solved mounts applied
+    return b_full, dict(zip(site_ids, offsets))
+
+
 def _arm_point_keys(samples, site_ids):
     """(sample_idx, tag) per arm-tag point, in the exact order paired_points emits
     them (sample-major, then site_ids order), so an err_mm index maps back to a
@@ -630,9 +694,11 @@ def report_and_save(args, samples, model, data, jm, site_ids):
             print(f"    sample {i + 1} tag {tag} ({ARM_TAG_TO_SITE[tag]}): "
                   f"residual {e:.1f} mm")
     _, rms_before, _, _ = solve_camera(samples, model, data, qposadr, site_ids)
-    b_full = solve_bias(samples, model, data, qposadr, site_ids)
+    b_full, mount_offsets = solve_bias_and_mounts(samples, model, data, qposadr, site_ids)
     corrected = [(qpos - b_full, poses) for qpos, poses in samples]
 
+    # solve_bias_and_mounts left model.site_pos at the solved mounts, so the camera and
+    # table fits below use the same mount-corrected forward model.
     T_base_cam, rms_after, tags, err_mm = solve_camera(corrected, model, data, qposadr, site_ids)
     T_base_table, t_mm, t_deg = solve_table(corrected, T_base_cam)
     quarter_turns, _ = determine_quarter_turns(
@@ -647,9 +713,15 @@ def report_and_save(args, samples, model, data, jm, site_ids):
         e = err_mm[tags == tag]
         print(f"    tag {tag} ({ARM_TAG_TO_SITE[tag]}): mean {e.mean():.1f} mm "
               f"(max {e.max():.1f}) over {len(e)} points")
+    print("  freed tag mounts (XML-prior diagnostic — not deployed):")
+    for tag in site_ids:
+        d = mount_offsets[tag] * 1000.0
+        warn = "  <-- mis-stuck/peeling? re-tape" if np.linalg.norm(d) > MOUNT_OFFSET_WARN_MM else ""
+        print(f"    tag {tag} ({ARM_TAG_TO_SITE[tag]}) centre offset "
+              f"[{d[0]:+.1f} {d[1]:+.1f} {d[2]:+.1f}] mm  |d| {np.linalg.norm(d):.1f}{warn}")
     print(f"  table tag in base: {T_base_table[:3, 3].round(4).tolist()} m  "
           f"(detection repeatability {np.median(t_mm):.1f} mm / {np.median(t_deg):.2f} deg)")
-    print("  target a few mm. Worse => XML site placement off or a tag glued askew.")
+    print("  target a few mm. Worse => a tag glued askew beyond the prior, or bad capture.")
 
     save_extrinsics(args.out, T_base_table, T_base_cam, FOCUS_ABSOLUTE,
                     len(samples), rms_after, float(np.median(t_deg)), quarter_turns)

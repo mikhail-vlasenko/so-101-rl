@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
+import real.calibrate_qpos as cq
 from real.calibrate_qpos import (
     MIN_EE_Z,
     OBSERVABLE_JOINTS,
@@ -22,6 +23,7 @@ from real.calibrate_qpos import (
     reject_outliers,
     settled_site_xpos,
     solve_bias,
+    solve_bias_and_mounts,
     verify_drive_safe,
 )
 from real.calibration import load_calibration, save_calibration
@@ -98,6 +100,55 @@ def test_pan_bias_is_gauge_absorbed(setup):
     samples = synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n=12, seed=2)
     b_est = solve_bias(samples, model, data, jm.qposadr(), site_ids)
     assert np.allclose(b_est, 0.0, atol=1e-4)   # camera absorbs the pan, biases stay 0
+
+
+def test_recovers_planted_mount_offset(setup, monkeypatch):
+    """The joint solve recovers a planted *wrist*-tag centre offset together with the
+    lift/elbow/wrist_flex biases: clean data pins both to precision, so the bias+mount
+    math (offset tag site -> settled FK -> Umeyama camera) is correct. The wrist tag is
+    fully observable (the finger tag, distal to wrist_flex, breaks the wrist-offset/
+    wrist_flex degeneracy). Roll and the finger offset are *left at zero* here: they are
+    an exact gauge pair (see test_prior_keeps_wrist_roll_observable), so a tiny prior
+    pins that one flat direction without measurably shrinking the wrist offset."""
+    monkeypatch.setattr(cq, "MOUNT_PRIOR_W", 0.5)
+    model, data, jm, site_ids = setup
+    qposadr = jm.qposadr()
+    wrist_tag = 2
+    b_true = np.zeros(6)
+    b_true[1], b_true[2], b_true[3] = np.radians([-3.0, 9.0, 2.0])   # no roll bias
+    wrist_off = np.array([0.004, -0.006, 0.005])
+    nominal = model.site_pos[site_ids[wrist_tag]].copy()
+    model.site_pos[site_ids[wrist_tag]] = nominal + wrist_off        # plant the physical mount
+    T_base_cam = np.eye(4)
+    T_base_cam[:3, :3] = Rotation.from_euler("xyz", [10, -120, 5], degrees=True).as_matrix()
+    T_base_cam[:3, 3] = [0.12, -0.42, 0.15]
+    samples = synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n=20, seed=11)
+    model.site_pos[site_ids[wrist_tag]] = nominal                    # solver starts from XML
+
+    b_est, off_est = solve_bias_and_mounts(samples, model, data, qposadr, site_ids)
+    for i in OBSERVABLE_JOINTS:
+        assert abs(b_est[i] - b_true[i]) < 1e-3, f"joint {i}: {b_est[i]} vs {b_true[i]}"
+    assert np.linalg.norm(off_est[wrist_tag] - wrist_off) < 5e-4, off_est[wrist_tag]
+    assert np.linalg.norm(off_est[0]) < 5e-4         # finger offset stays at XML (none planted)
+
+
+def test_prior_keeps_wrist_roll_observable(setup):
+    """The finger offset is an exact gauge pair with wrist_roll bias. Freeing it with
+    the production prior must resolve that gauge in favour of the bias: a planted roll
+    bias is recovered and the offsets stay at ~XML (the prior trusts the mount)."""
+    model, data, jm, site_ids = setup
+    b_true = np.zeros(6)
+    b_true[1], b_true[2], b_true[4] = np.radians([-3.0, 9.0, -5.0])   # incl. wrist_roll
+    T_base_cam = np.eye(4)
+    T_base_cam[:3, :3] = Rotation.from_euler("xyz", [10, -120, 5], degrees=True).as_matrix()
+    T_base_cam[:3, 3] = [0.12, -0.42, 0.15]
+    samples = synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n=20, seed=12)
+
+    b_est, off_est = solve_bias_and_mounts(samples, model, data, jm.qposadr(), site_ids)
+    for i in OBSERVABLE_JOINTS:
+        assert abs(b_est[i] - b_true[i]) < 5e-3, f"joint {i}: {b_est[i]} vs {b_true[i]}"
+    for tag in site_ids:
+        assert np.linalg.norm(off_est[tag]) < 1e-3   # prior keeps a zero-offset fit at XML
 
 
 def test_gravity_slack_matches_dynamic_settle(setup):
