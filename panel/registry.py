@@ -263,6 +263,25 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         resources=(Resource.SERIAL,),
     ),
     ScriptSpec(
+        id="probe_backlash", title="Probe joint backlash", page="sysid",
+        module="sysid.probe_backlash", arg_style="argparse",
+        description="Approach identical targets from opposite directions and compare "
+                    "camera-measured link motion vs encoder motion: per-joint gear "
+                    "play in degrees. Dry-run previews the drive plan in the sim view; "
+                    "executing streams the annotated camera feed.",
+        args=(
+            ArgSpec("--execute", "flag", "Drive the arm and capture (default: preview plan)"),
+            ArgSpec("--n-poses", "int", "Base poses from the calibration sweep", default="3"),
+            ArgSpec("--approach-deg", "float", "Approach offset per joint (deg)", default="6"),
+            ArgSpec("--joints", "str", "Comma-separated joints (default: all but gripper)"),
+            ArgSpec("--port", "str", "Serial port", default="/dev/ttyACM0"),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+        ),
+        resources=(Resource.CAMERA, Resource.SERIAL),
+        supports_stream=True,
+    ),
+    ScriptSpec(
         id="sysid_replay", title="Replay in sim", page="sysid",
         module="sysid.replay_sim", arg_style="argparse",
         description="Replay recorded trajectories through the sim model.",
