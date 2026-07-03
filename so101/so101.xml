@@ -95,16 +95,18 @@
   </asset>
 
   <worldbody>
-    <!-- Sim stand-in for the physical webcam: to the right of the arm (-y, the
-         same "right" as the marker_wrist comment), ~45 cm away, aimed slightly
-         down and forward of the arm base (lookat ~(0.18, 0, 0.09); zaxis is the
-         camera's backward direction, pos - lookat). The pose lives on this fixed
-         mount body so the camera and its visible stand-in geoms share one source
-         of truth; src/base_env.tag_cam_world_pos resolves the world position via
-         cam_xpos. The marker-visibility check only consumes that position; the
-         orientation is for debug renders and the camera body's looks. Match it to
-         the real camera mount before real rollouts. -->
-    <body name="tag_cam_mount" pos="0.12 -0.42 0.154" zaxis="-0.06 -0.42 0.064">
+    <!-- Sim stand-in for the physical webcam, to the right of the arm (-y, the
+         same "right" as the marker_wrist comment). Pose is MEASURED: set from
+         extrinsics.yaml t_base_cam_fixed (real/calibrate_qpos.py solve), with the
+         OpenCV camera frame converted to MuJoCo's OpenGL convention (looks down
+         -z, +y up) — re-set it after moving the camera and recalibrating. The
+         pose lives on this fixed mount body so the camera and its visible
+         stand-in geoms share one source of truth; src/base_env.tag_cam_world_pos
+         resolves the world position via cam_xpos. The marker-visibility check
+         only consumes that position; the orientation is for debug renders and
+         the camera body's looks. -->
+    <body name="tag_cam_mount" pos="0.10835 -0.40545 0.18672"
+          quat="0.77488 0.62082 -0.081345 -0.086711">
       <camera name="tag_cam"/>
       <!-- Visible webcam stand-in (body + forward-facing lens). No collision
            (contype/conaffinity 0) and default group 0 so it renders but never
