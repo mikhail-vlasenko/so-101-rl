@@ -49,12 +49,13 @@ What is and isn't observable (position-only, single fixed camera):
   - gripper bias moves neither tag (both sit on links proximal to the gripper
     joint) -> pinned to 0.
 
-Freed tag mounts: each arm tag's XML site position is a by-hand estimate of where the
-tag is taped, so its 3D centre offset is solved jointly with the bias (strong XML prior;
-see MOUNT_PRIOR_W) to keep a mis-taped tag from being absorbed as a fake encoder offset.
-The offsets are nuisance parameters — deployment reads the camera-measured tag, never the
-FK site — so they are printed as a hardware diagnostic and discarded; only the cleaner
-bias and extrinsics are saved.
+Freed tag mounts: each arm tag's XML site position starts as a by-hand estimate of where
+the tag is taped, so its 3D centre offset is solved jointly with the bias (strong XML
+prior; see MOUNT_PRIOR_W) to keep a mis-taped tag from being absorbed as a fake encoder
+offset. The solved site centres are written back into so101/so101.xml: training's marker
+observations are FK of those sites (src/base_env.py), so a site that doesn't match the
+physical tag is a systematic sim-vs-real offset in the marker channels (measured ~1.5 mm
+mean / ~3 mm at the tails before this write-back existed).
 
 Run:
     conda run -n mujoco_env python -m real.calibrate_qpos --execute
@@ -62,6 +63,7 @@ Run:
     conda run -n mujoco_env python -m real.calibrate_qpos --from-samples <json>
 """
 import argparse
+import re
 import threading
 import time
 from pathlib import Path
@@ -97,6 +99,9 @@ from sysid.trajectories import SYSID_HZ
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
+# The marker sites are defined in the arm XML (included by DEFAULT_XML); the solved
+# mounts are written back there so training FK matches the physical tags.
+ARM_XML = REPO_ROOT / "so101" / "so101.xml"
 DEFAULT_CAL = REPO_ROOT / "real" / "follower_calibration.json"
 SAMPLES_PATH = REPO_ROOT / "real" / "qpos_calib_samples.json"
 MIN_SAMPLES = 8
@@ -105,14 +110,14 @@ MIN_SAMPLES = 8
 # pinned to 0 (see module docstring on observability).
 OBSERVABLE_JOINTS = (1, 2, 3, 4)
 
-# Freed tag mounts. The arm-tag XML site positions are a CAD/by-hand estimate of where
-# the tags are physically taped, good to a few mm at best. Solving each tag's 3D centre
-# offset (in its parent body frame) jointly with the bias de-confounds a mis-taped tag
-# from a real encoder offset, so both the bias and the camera fit cleaner. The offsets
-# are nuisance parameters: deployment (real/marker_obs.py) reads the *camera-measured*
-# tag pose and maps it through T_base_cam, never the FK site, so they are reported as a
-# hardware diagnostic and discarded — only the (now-cleaner) bias and extrinsics are
-# saved. A strong prior toward the XML is mandatory and resolves a gauge: wrist_roll is
+# Freed tag mounts. The arm-tag XML site positions start as a CAD/by-hand estimate of
+# where the tags are physically taped, good to a few mm at best. Solving each tag's 3D
+# centre offset (in its parent body frame) jointly with the bias de-confounds a mis-taped
+# tag from a real encoder offset, so both the bias and the camera fit cleaner. The solved
+# site centres are persisted into ARM_XML (write_marker_sites): deployment reads the
+# *camera-measured* tag pose, but training's marker obs are FK of the sites, so the XML
+# must track the physical tags or the policy sees a systematic sim-vs-real marker offset.
+# A strong prior toward the XML is mandatory and resolves a gauge: wrist_roll is
 # the last joint before the finger tag's body and marker_wrist is proximal to it, so the
 # finger tag is the *only* observer of roll — and a constant roll bias delta is exactly a
 # constant finger mount offset (Rz(delta)·p − p in the gripper frame). The two are
@@ -684,6 +689,28 @@ def reject_outliers(samples, model, data, qposadr, site_ids):
     return samples, dropped
 
 
+def write_marker_sites(xml_path, site_positions):
+    """Persist solved marker-site centres into the arm XML (textual pos= edit).
+
+    The sites feed training's marker observations, so the XML is the single source
+    of truth the physical tags must match. Fails loud if a site element or its pos
+    attribute isn't found exactly once — never a silent partial write."""
+    text = xml_path.read_text()
+    for name, pos in site_positions.items():
+        needle = f'<site name="{name}"'
+        start = text.find(needle)
+        assert start != -1, f"{xml_path}: site {name!r} not found"
+        assert text.find(needle, start + 1) == -1, f"{xml_path}: site {name!r} not unique"
+        end = text.index("/>", start)
+        element = text[start:end]
+        m = re.search(r'\bpos="[^"]*"', element)
+        assert m is not None, f"{xml_path}: site {name!r} has no pos attribute"
+        new_pos = " ".join(f"{v:.6g}" for v in pos)
+        text = (f'{text[:start]}{element[:m.start()]}pos="{new_pos}"'
+                f"{element[m.end():]}{text[end:]}")
+    xml_path.write_text(text)
+
+
 def report_and_save(args, samples, model, data, jm, site_ids):
     qposadr = jm.qposadr()
     samples, dropped = reject_outliers(samples, model, data, qposadr, site_ids)
@@ -713,7 +740,7 @@ def report_and_save(args, samples, model, data, jm, site_ids):
         e = err_mm[tags == tag]
         print(f"    tag {tag} ({ARM_TAG_TO_SITE[tag]}): mean {e.mean():.1f} mm "
               f"(max {e.max():.1f}) over {len(e)} points")
-    print("  freed tag mounts (XML-prior diagnostic — not deployed):")
+    print("  freed tag mounts (offset from previous XML, written back to the sites):")
     for tag in site_ids:
         d = mount_offsets[tag] * 1000.0
         warn = "  <-- mis-stuck/peeling? re-tape" if np.linalg.norm(d) > MOUNT_OFFSET_WARN_MM else ""
@@ -723,10 +750,24 @@ def report_and_save(args, samples, model, data, jm, site_ids):
           f"(detection repeatability {np.median(t_mm):.1f} mm / {np.median(t_deg):.2f} deg)")
     print("  target a few mm. Worse => a tag glued askew beyond the prior, or bad capture.")
 
+    write_marker_sites(ARM_XML, {ARM_TAG_TO_SITE[tag]: model.site_pos[sid].copy()
+                                 for tag, sid in site_ids.items()})
+    # The model was loaded from args.xml (which includes ARM_XML); reload and confirm
+    # the written mounts actually reach it, so a mismatched --xml can't desync sim FK
+    # from the calibration that was just saved.
+    check = mujoco.MjModel.from_xml_path(args.xml)
+    for tag, sid in site_ids.items():
+        name = ARM_TAG_TO_SITE[tag]
+        sid_check = mujoco.mj_name2id(check, mujoco.mjtObj.mjOBJ_SITE, name)
+        assert sid_check >= 0 and np.allclose(
+            check.site_pos[sid_check], model.site_pos[sid], atol=1e-6), (
+            f"site {name!r}: {args.xml} did not pick up the mount written to {ARM_XML} "
+            "(is --xml a model that doesn't include it?)")
+
     save_extrinsics(args.out, T_base_table, T_base_cam, FOCUS_ABSOLUTE,
                     len(samples), rms_after, float(np.median(t_deg)), quarter_turns)
     save_calibration(args.cal_out, b_full, len(samples), rms_before, rms_after)
-    print(f"\nwrote {args.out}\nwrote {args.cal_out}")
+    print(f"\nwrote {ARM_XML} (marker site mounts)\nwrote {args.out}\nwrote {args.cal_out}")
 
 
 def parse_args():

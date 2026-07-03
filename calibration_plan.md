@@ -115,9 +115,10 @@ Deviations from the orientation-based sketch below, deliberate for a first cut:
   parent body frame is solved jointly with the bias, under a strong XML prior, so a
   hand-taped tag a few mm off CAD isn't absorbed as a fake encoder bias. The mount
   *rotation* is still trusted (position-only — a centre has no orientation; the glue
-  rotation is handled separately by `quarter_turns`). The offsets are nuisance params:
-  deployment reads camera-measured tags, not the FK site, so they're a hardware
-  diagnostic and discarded — only the cleaner bias and extrinsics are saved. The
+  rotation is handled separately by `quarter_turns`). The solved site centres are
+  written back into `so101/so101.xml`: deployment reads camera-measured tags, but
+  *training's* marker observations are FK of the sites, so a site that doesn't match
+  the physical tag is a systematic sim-vs-real offset in the marker channels. The
   finger offset is an exact gauge pair with the wrist_roll bias (roll is the last
   joint before the finger's body and no other tag sees roll), which the prior resolves
   in favour of the bias.

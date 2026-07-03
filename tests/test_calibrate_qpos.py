@@ -5,6 +5,7 @@ the optimisation math is checked independent of real-rig noise: clean data must
 recover the planted biases to numerical precision. Pose generation and the
 calibration YAML round-trip are checked too.
 """
+import re
 from pathlib import Path
 
 import mujoco
@@ -25,6 +26,7 @@ from real.calibrate_qpos import (
     solve_bias,
     solve_bias_and_mounts,
     verify_drive_safe,
+    write_marker_sites,
 )
 from real.calibration import load_calibration, save_calibration
 from real.marker_spec import ARM_TAG_TO_SITE
@@ -317,3 +319,55 @@ def test_calibration_io_roundtrip(tmp_path):
     path = tmp_path / "calibration.yaml"
     save_calibration(path, qpos_bias, n_samples=12, rms_before_mm=11.3, rms_after_mm=2.8)
     assert np.allclose(load_calibration(path), qpos_bias)
+
+
+SITE_XML = """<mujoco>
+  <worldbody>
+    <body name="b">
+      <site name="marker_wrist" type="box" size="0.01 0.01 0.0005"
+            pos="0 -0.020 -0.0095" quat="0 1 0 0" rgba="0.9 0.1 0.1 1"/>
+      <site name="other" pos="1 2 3"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def test_write_marker_sites_updates_only_pos(tmp_path):
+    xml = tmp_path / "arm.xml"
+    xml.write_text(SITE_XML)
+    write_marker_sites(xml, {"marker_wrist": np.array([0.0017, -0.0221, -0.0099])})
+    text = xml.read_text()
+    assert 'pos="0.0017 -0.0221 -0.0099"' in text
+    assert 'quat="0 1 0 0"' in text                    # attributes around pos untouched
+    assert '<site name="other" pos="1 2 3"/>' in text  # other sites untouched
+
+
+def test_write_marker_sites_fails_loud(tmp_path):
+    xml = tmp_path / "arm.xml"
+    xml.write_text(SITE_XML)
+    with pytest.raises(AssertionError, match="not found"):
+        write_marker_sites(xml, {"marker_nope": np.zeros(3)})
+    xml.write_text(SITE_XML.replace('<site name="other" pos="1 2 3"/>',
+                                    '<site name="marker_wrist" pos="1 2 3"/>'))
+    with pytest.raises(AssertionError, match="not unique"):
+        write_marker_sites(xml, {"marker_wrist": np.zeros(3)})
+    xml.write_text(SITE_XML.replace('pos="0 -0.020 -0.0095" ', ""))
+    with pytest.raises(AssertionError, match="no pos attribute"):
+        write_marker_sites(xml, {"marker_wrist": np.zeros(3)})
+
+
+def test_write_marker_sites_handles_real_xml(tmp_path, setup):
+    """The production so101.xml's multi-line site elements round-trip: the written
+    positions parse back exactly and nothing outside the two pos attributes moves."""
+    model, _, _, site_ids = setup
+    xml = tmp_path / "so101.xml"
+    xml.write_text((REPO_ROOT / "so101" / "so101.xml").read_text())
+    new = {ARM_TAG_TO_SITE[tag]: model.site_pos[sid] + np.array([0.002, -0.0021, 0.0037])
+           for tag, sid in site_ids.items()}
+    write_marker_sites(xml, new)
+    text = xml.read_text()
+    for name, pos in new.items():
+        element = re.search(rf'<site name="{name}".*?/>', text, re.S).group(0)
+        written = [float(v) for v in re.search(r'pos="([^"]+)"', element).group(1).split()]
+        assert np.allclose(written, pos, atol=1e-6), f"{name}: {written} vs {pos}"

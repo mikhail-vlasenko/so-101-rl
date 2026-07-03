@@ -186,11 +186,12 @@
                    wrist (right = -y world when the arm points at the workspace),
                    on the flat region toward the arm base. Site frame matches the
                    tag pose convention in real/pose.py: +z out of the printed
-                   face, +x/+y along the tag edges. Placement is an estimate of
-                   the physical glue position — calibrate against the real tag
-                   before trusting absolute pose. -->
+                   face, +x/+y along the tag edges. pos is CALIBRATED — written
+                   by real/calibrate_qpos.py from the freed-mount solve; don't
+                   edit by hand. quat stays the by-hand estimate (in-plane glue
+                   turns live in extrinsics.yaml quarter_turns). -->
               <site name="marker_wrist" type="box" group="2" size="0.01 0.01 0.0005"
-                    pos="0 -0.020 -0.0095" quat="0 1 0 0" rgba="0.9 0.1 0.1 1"/>
+                    pos="0.00169658 -0.0220991 -0.00993431" quat="0 1 0 0" rgba="0.9 0.1 0.1 1"/>
               <!-- Link gripper -->
               <body name="gripper" pos="5.55112e-17 -0.0611 0.0181" quat="0.0172091 -0.0172091 0.706897 0.706897">
                 <!-- Joint from wrist to gripper -->
@@ -221,11 +222,11 @@
                 <!-- AprilTag id 0 ("finger", 20mm): glued below the static
                      finger on the flat outer wall of the gripper servo housing
                      (not the tilted jaw back). Same frame convention as
-                     marker_wrist: +z out of the printed face. Placement is an
-                     estimate — calibrate against the real tag before trusting
-                     absolute pose. -->
+                     marker_wrist: +z out of the printed face. pos is CALIBRATED
+                     — written by real/calibrate_qpos.py; don't edit by hand.
+                     quat stays the by-hand estimate (+ quarter_turns). -->
                 <site name="marker_finger" type="box" group="2" size="0.01 0.01 0.0005"
-                      pos="-0.0357 0 -0.021" quat="0.5 -0.5 -0.5 0.5"
+                      pos="-0.0336971 -1.61451e-10 -0.0246547" quat="0.5 -0.5 -0.5 0.5"
                       rgba="0.9 0.1 0.1 1"/>
                 <!-- Frame gripperframe -->
                 <site group="3" name="gripperframe" pos="0.012 -0.000218 -0.098127" quat="1 0 1 0"/>
