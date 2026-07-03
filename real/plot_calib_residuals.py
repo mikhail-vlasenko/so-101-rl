@@ -6,9 +6,11 @@ the *camera* actually saw it (`T_base_cam . tvec`, base frame). The arrow is pla
 at the model prediction and points to reality, so its length is the leftover error
 after calibration and its direction tells you *which way* the model is wrong there.
 
-The bias and camera pose are re-solved from the samples (not read from the saved
-YAMLs), so the picture is exactly the fit that calibrate_qpos committed — same
-single source of truth, no drift.
+The committed artifacts are evaluated as-is — bias from calibration.yaml, camera
+from extrinsics.yaml, marker sites (solved mounts included) from the XML — with the
+same gravity-settled FK the solve used. No re-solving, so the plot can never drift
+from the model deployment actually uses. Detections the calibration rejected as
+outliers are still plotted; they stick out, which is the point of a residual map.
 
 Two base-frame views (top X-Y and side X-Z) together carry all three error
 components; arrow colour is the full 3-D magnitude so hotspots show in either view.
@@ -29,8 +31,10 @@ import mujoco
 import numpy as np
 import seaborn as sns
 
-from real.calib_solve import load_samples, paired_points, solve_camera
-from real.calibrate_qpos import DEFAULT_CAL, DEFAULT_XML, SAMPLES_PATH, solve_bias
+from real.calib_solve import load_samples
+from real.calibrate_qpos import DEFAULT_CAL, DEFAULT_XML, SAMPLES_PATH, paired_points
+from real.calibration import load_calibration
+from real.extrinsics import load_extrinsics
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import JOINT_NAMES, load_joint_maps
 from src.base_env import tag_cam_world_pos
@@ -43,15 +47,16 @@ DPI = 220
 
 
 def compute_residuals(samples, model, data, qposadr, site_ids):
-    """Return (p_model, resid, tags): per detected tag, the calibrated-model base
-    position, the (camera - model) error vector, and the tag id. Same ordering and
-    solve as report_and_save, so magnitudes match the committed RMS."""
-    b_full = solve_bias(samples, model, data, qposadr, site_ids)
+    """Return (p_model, resid, tags, b_full): per detection, the committed-model
+    base position, the (camera - model) error vector, and the tag id. Pure
+    evaluation of the saved artifacts (calibration.yaml bias, extrinsics.yaml
+    camera, XML sites) through the settled FK — no re-solving."""
+    b_full = load_calibration()
+    _, T_base_cam, _, _ = load_extrinsics()
     corrected = [(qpos - b_full, poses) for qpos, poses in samples]
-    T_base_cam, _, _, _ = solve_camera(corrected, model, data, qposadr, site_ids)
     src, dst, tags = paired_points(corrected, model, data, qposadr, site_ids)
     R, t = T_base_cam[:3, :3], T_base_cam[:3, 3]
-    p_model = dst                       # FK(theta_enc - bias), base frame
+    p_model = dst                       # settled FK(theta_enc - bias), base frame
     p_obs = src @ R.T + t               # camera tag centre mapped into base frame
     return p_model, p_obs - p_model, tags, b_full
 
@@ -132,9 +137,10 @@ def main():
     p_model, resid, tags, b_full = compute_residuals(
         samples, model, data, jm.qposadr(), site_ids)
     rms_mm = np.sqrt(np.mean(np.sum(resid ** 2, axis=1))) * 1000.0
-    print("solved bias (deg): " + ", ".join(
+    print("committed bias (deg): " + ", ".join(
         f"{n}={np.degrees(b):+.2f}" for n, b in zip(JOINT_NAMES, b_full)))
-    print(f"residual RMS {rms_mm:.2f} mm over {len(tags)} detections")
+    print(f"residual RMS {rms_mm:.2f} mm over {len(tags)} detections "
+          "(all detections incl. any the solve rejected)")
     plot(p_model, resid, tags, tag_cam_world_pos(model, data), args.out, rms_mm)
 
 
