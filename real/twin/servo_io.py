@@ -169,10 +169,12 @@ class ServoBus:
 
     def read_pos_speed(self, servo_id: int) -> tuple[int, int]:
         """Read present position + present speed of ONE servo in a single bus
-        transaction. Much faster than the 6-servo sync read (~1 ms vs ~30 ms),
-        so diagnostics can sample a single joint at several hundred Hz —
-        enough to resolve mechanical resonances that alias at the 15 Hz
-        control rate. Speed is the servo's reported signed raw value."""
+        transaction, and return the speed too — which the position-only read_all
+        sync read does not. A single-servo round trip is a fraction of the full
+        6-servo sync read (the latter measures ~1.4 ms at 1 Mbaud in the rollout
+        loop), fast enough to sample one joint at several hundred Hz — enough to
+        resolve mechanical resonances that alias at the 15 Hz control rate. Speed
+        is the servo's reported signed raw value."""
         assert self.packet_handler is not None, "ServoBus not connected"
         pos, speed, result, error = self.packet_handler.ReadPosSpeed(servo_id)
         if result != scs.COMM_SUCCESS:

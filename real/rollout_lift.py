@@ -168,11 +168,29 @@ def plot_rollout(out_path: Path, rows: list[dict], target_height: float,
     plt.close(fig)
 
 
+def print_latency_summary(rows: list[dict]) -> None:
+    """Per-component latency breakdown over the rollout (ms). NaN-only components
+    (e.g. camera stats under --marker-source fk) print 'n/a'."""
+    keys = ["loop_ms", "predict_ms", "read_all_ms", "stream_ms",
+            "marker_age_ms", "cam_read_ms", "detect_ms"]
+    print("latency summary (ms):")
+    for key in keys:
+        v = np.array([r[key] for r in rows], dtype=float)
+        v = v[~np.isnan(v)]
+        if v.size == 0:
+            print(f"  {key:14s} n/a")
+        else:
+            print(f"  {key:14s} mean={v.mean():6.1f}  p95={np.percentile(v, 95):6.1f}  "
+                  f"max={v.max():6.1f}")
+
+
 def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
     header = (["step", "t_s"]
               + [f"action_{n}" for n in JOINT_NAMES]
               + [f"qpos_{n}" for n in JOINT_NAMES]
-              + ["ee_x", "ee_y", "ee_z", "cube_x", "cube_y", "cube_z", "grasped_sim"])
+              + ["ee_x", "ee_y", "ee_z", "cube_x", "cube_y", "cube_z", "grasped_sim",
+                 "loop_ms", "predict_ms", "read_all_ms", "stream_ms",
+                 "marker_age_ms", "cam_read_ms", "detect_ms"])
     with out_path.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
@@ -182,7 +200,11 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
                         *(f"{q:.6f}" for q in r["qpos"]),
                         f"{r['ee'][0]:.6f}", f"{r['ee'][1]:.6f}", f"{r['ee'][2]:.6f}",
                         f"{r['cube'][0]:.6f}", f"{r['cube'][1]:.6f}", f"{r['cube'][2]:.6f}",
-                        int(r["grasped"])])
+                        int(r["grasped"]),
+                        f"{r['loop_ms']:.2f}", f"{r['predict_ms']:.3f}",
+                        f"{r['read_all_ms']:.2f}", f"{r['stream_ms']:.2f}",
+                        f"{r['marker_age_ms']:.2f}", f"{r['cam_read_ms']:.2f}",
+                        f"{r['detect_ms']:.2f}"])
 
 
 def main() -> int:
@@ -270,12 +292,22 @@ def main() -> int:
 
         dwell_count = 0
         step = 0
+        prev_iter_t = None
         while not stopped["flag"] and step < args.max_steps:
+            iter_t = time.perf_counter()
+            # Realized control period (start-to-start of consecutive ticks).
+            loop_ms = (iter_t - prev_iter_t) * 1e3 if prev_iter_t is not None else float("nan")
+            prev_iter_t = iter_t
+
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
             if marker_source is not None:
                 # Measured AprilTag poses, already in the base frame and zeroed
                 # for tags the camera can't see (real/marker_obs.py).
                 marker_pos, marker_rot = marker_source.marker_poses()
+                # Latency of the frame those poses came from, sampled the instant
+                # the policy consumes it.
+                stale_s, cam_read_ms, detect_ms = marker_source.frame_stats()
+                marker_age_ms = stale_s * 1e3
             else:
                 marker_pos, marker_rot = marker_world_poses(data, marker_site_ids)
                 # Match training (base_env._compute_obs): a tag turned away from
@@ -283,10 +315,13 @@ def main() -> int:
                 hidden = ~markers_visible(data, marker_site_ids, tag_cam_pos)
                 marker_pos[hidden] = 0.0
                 marker_rot[hidden] = 0.0
+                marker_age_ms = cam_read_ms = detect_ms = float("nan")
 
             obs = build_obs(loop.qpos, loop.qvel, marker_pos, marker_rot,
                             cube_pos, loop.prev_actions, marker_include_rot)
+            t_pred = time.perf_counter()
             raw_action, _ = policy.predict(obs, deterministic=True)
+            predict_ms = (time.perf_counter() - t_pred) * 1e3
             action = loop.tick(raw_action)
 
             # Write the real arm's new state into the sim and step it so the
@@ -321,6 +356,10 @@ def main() -> int:
             log_rows.append({
                 "step": step, "action": action.copy(), "qpos": loop.qpos.copy(),
                 "ee": ee_pos.copy(), "cube": cube_pos.copy(), "grasped": grasped_sim,
+                "loop_ms": loop_ms, "predict_ms": predict_ms,
+                "read_all_ms": loop.last_read_ms, "stream_ms": loop.last_stream_ms,
+                "marker_age_ms": marker_age_ms, "cam_read_ms": cam_read_ms,
+                "detect_ms": detect_ms,
             })
 
             if viewer is not None:
@@ -336,6 +375,12 @@ def main() -> int:
             if step % 15 == 0:
                 print(f"step={step:3d}  ee-cube={ee_cube:.3f}m  "
                       f"cube_z={cube_pos[2]:.3f}m  grasped_sim={int(grasped_sim)}")
+                lat = (f"          lat[ms]: loop={loop_ms:.0f} predict={predict_ms:.2f} "
+                       f"read_all={loop.last_read_ms:.0f} stream={loop.last_stream_ms:.0f}")
+                if marker_source is not None:
+                    lat += (f" | cam age={marker_age_ms:.0f} "
+                            f"read={cam_read_ms:.0f} detect={detect_ms:.0f}")
+                print(lat)
             step += 1
 
             if dwell_count >= 5:
@@ -354,6 +399,7 @@ def main() -> int:
             publisher.close()
 
     if log_rows:
+        print_latency_summary(log_rows)
         out_dir = REPO_ROOT / "rollouts"
         out_dir.mkdir(parents=True, exist_ok=True)
         stem = f"rollout_lift_{int(time.time())}"

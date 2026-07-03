@@ -12,6 +12,7 @@ the table tag, where the camera can't be re-anchored at all — is zeroed, the s
 convention training used for undetected tags.
 """
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -45,6 +46,11 @@ class CameraMarkerSource:
         self.slot_tags = [site_to_tag[name] for name in MARKER_SITE_NAMES]
         self._wanted = set(ARM_TAG_TO_SITE) | {TABLE_TAG_ID}
         self._latest: dict = {}
+        # Latency telemetry for the most recent processed frame; written under
+        # _lock alongside _latest so a reader gets a consistent snapshot.
+        self._recv_t: float | None = None
+        self._read_ms = float("nan")
+        self._detect_ms = float("nan")
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._cap = None
@@ -57,14 +63,23 @@ class CameraMarkerSource:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            t_read = time.monotonic()
             ok, frame = self._cap.read()
+            t_recv = time.monotonic()
             if not ok:
                 continue
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            t_det = time.monotonic()
             poses = {d.id: self.estimator.estimate(d)
                      for d in self.detector.detect(gray) if d.id in self._wanted}
+            detect_ms = (time.monotonic() - t_det) * 1e3
             with self._lock:
-                self._latest = poses   # whole-dict swap; readers never see a partial update
+                # Whole-dict swap + matching telemetry: readers never see a
+                # partial update or stats from a different frame.
+                self._latest = poses
+                self._recv_t = t_recv
+                self._read_ms = (t_recv - t_read) * 1e3
+                self._detect_ms = detect_ms
 
     def marker_poses(self) -> tuple[np.ndarray, np.ndarray]:
         """(pos (N,3), rot (N,3)) in the base frame; undetected/un-anchored tags zeroed."""
@@ -81,6 +96,24 @@ class CameraMarkerSource:
                 T_cam_tag = rt_to_mat(*poses[tag]) @ quarter_turn_mat(-self.quarter_turns[tag])
                 pos[i], rot[i] = mat_to_pos_rotvec(T_base_cam @ T_cam_tag)
         return pos, rot
+
+    def frame_stats(self) -> tuple[float, float, float]:
+        """(staleness_s, read_ms, detect_ms) for the most recent processed frame.
+
+        staleness_s = now - the time cap.read() handed us the frame: how old the
+        pose the policy is about to consume is (detection compute plus however
+        long it then waited for the control loop to pick it up). read_ms is how
+        long cap.read() blocked — roughly one frame interval means we're pulling
+        fresh frames; near-zero while detect_ms is large means the driver queue
+        is feeding backlog and the buffer isn't draining. All NaN before the
+        first frame lands."""
+        with self._lock:
+            recv_t = self._recv_t
+            read_ms = self._read_ms
+            detect_ms = self._detect_ms
+        if recv_t is None:
+            return float("nan"), float("nan"), float("nan")
+        return time.monotonic() - recv_t, read_ms, detect_ms
 
     def stop(self) -> None:
         self._stop.set()

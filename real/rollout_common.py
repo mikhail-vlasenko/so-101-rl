@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import signal
+import time
 from pathlib import Path
 
 import mujoco
@@ -98,7 +99,10 @@ def load_policy(model_arg: str, log_dir: Path, expected_obs: int) -> PPO:
     """Resolve and load a checkpoint, failing loud on an obs-dim mismatch."""
     model_path = resolve_model_path(model_arg, str(log_dir))
     print(f"loading model: {model_path}")
-    policy = PPO.load(model_path)
+    # Force CPU: at batch size 1 this MLP infers in ~0.2 ms on CPU, faster than
+    # the GPU once the host<->device copy is counted, and it skips the one-time
+    # ~90 ms CUDA warmup. The rollout never benefits from the GPU at this size.
+    policy = PPO.load(model_path, device="cpu")
     assert policy.observation_space.shape[0] == expected_obs, (
         f"Obs dim mismatch: model expects {policy.observation_space.shape}, "
         f"env produces {expected_obs}-dim."
@@ -168,6 +172,9 @@ class ArmLoop:
         self.prev_raw_target: np.ndarray | None = None
         self.qpos: np.ndarray | None = None
         self.qvel: np.ndarray | None = None
+        # Per-tick latency telemetry (ms), set by tick(); NaN until first tick.
+        self.last_stream_ms = float("nan")
+        self.last_read_ms = float("nan")
 
     def describe(self) -> str:
         return (f"execute={self.execute} {self.control_hz:.1f}Hz "
@@ -233,11 +240,15 @@ class ArmLoop:
                                        self.xml_low, self.xml_high)
         target_raw = self._true_to_encoder_raw(target_qpos)
         target_raw = clamp_raw_delta(self.prev_raw_target, target_raw, self.max_raw_delta)
+        t0 = time.perf_counter()
         stream_sub_targets(self.prev_raw_target, target_raw, self.n_interp,
                            self.sub_dt, self._write_raw)
+        self.last_stream_ms = (time.perf_counter() - t0) * 1e3
         self.prev_raw_target = target_raw
 
+        t0 = time.perf_counter()
         raw = self.bus.read_all()
+        self.last_read_ms = (time.perf_counter() - t0) * 1e3
         new_qpos = self._encoder_to_true(raw)
         # Divide by the SIM tick, not the wall tick: under --slow the arm
         # covers the same per-tick delta in more wall time, and sim-time

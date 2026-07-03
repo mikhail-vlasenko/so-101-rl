@@ -70,6 +70,12 @@ def open_camera(device=DEVICE, width=WIDTH, height=HEIGHT, warmup=WARMUP_FRAMES,
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    # Keep only the newest frame in the V4L2 queue. The default depth (~4) means
+    # a consumer slower than the capture rate — AprilTag detection on a 720p
+    # frame is — always dequeues stale buffered frames, so measured poses lag
+    # reality by several frame intervals. Depth 1 makes cap.read() hand back the
+    # freshest frame instead of draining a backlog.
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if focus is not None:
         # Drive focus through v4l2-ctl: OpenCV's CAP_PROP_FOCUS silently no-ops on
         # this camera, so the lens would stay at the wrong position otherwise.
