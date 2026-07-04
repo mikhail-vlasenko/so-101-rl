@@ -31,7 +31,7 @@ CAM = {"frame_ms": 33.3, "delay_ms": [45.0, 45.0], "jitter_ms": 0.0}
 
 @pytest.fixture(scope="module")
 def cfg():
-    with initialize(config_path="../conf", version_base=None):
+    with initialize(config_path="../../conf", version_base=None):
         return compose(config_name="config", overrides=["env=pickplace"])
 
 

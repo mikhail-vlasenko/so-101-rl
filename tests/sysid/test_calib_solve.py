@@ -26,7 +26,7 @@ from real.calib_solve import (
 from real.extrinsics import mat_inv, mat_to_rt, quarter_turn_mat
 from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_ID
 
-DEFAULT_XML = Path(__file__).resolve().parent.parent / "so101" / "scene_lift.xml"
+DEFAULT_XML = Path(__file__).resolve().parent.parent.parent / "so101" / "scene_lift.xml"
 NO_TURNS = {tag: 0 for tag in ARM_TAG_TO_SITE}
 
 

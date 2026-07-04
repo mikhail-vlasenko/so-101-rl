@@ -10,10 +10,10 @@ lets `qpos` lag the commanded setpoint `self.pos`; if that lag exceeds
 setpoint backs off instead of pushing — the arm would be unable to drive into
 load no matter how long it's commanded.
 
-These tests don't assert a pass/fail contract; they print the numbers that
-tell us whether accel is even the right knob to tune. Run with `-s`:
+These routines don't assert a pass/fail contract; they print the numbers that
+tell us whether accel is even the right knob to tune:
 
-    pytest tests/test_profile_stall.py -s
+    python -m scripts.profile_stall
 """
 
 import os
@@ -53,7 +53,7 @@ def _drive(env, action, n_ticks):
     return np.array(qpos_log), np.array(set_log)
 
 
-def test_profile_divergence_under_gravity_load():
+def show_profile_divergence_under_gravity_load():
     """Lift the gravity-loaded shoulder/elbow up at full command; report the
     setpoint-vs-measured lag and whether the profile dist ever goes negative."""
     env = _make_env()
@@ -82,7 +82,7 @@ def test_profile_divergence_under_gravity_load():
     print(f"elbow_flex   qpos travel      : {qpos[-1, ELBOW_IDX] - qpos[0, ELBOW_IDX]:+.4f} rad")
 
 
-def test_achieved_vs_commanded_speed():
+def show_achieved_vs_commanded_speed():
     """Quantify authority loss: steady per-tick joint motion vs the commanded
     action_scale, free of cube contact (gripper open, arm sweeping a joint)."""
     env = _make_env()
@@ -104,7 +104,7 @@ def test_achieved_vs_commanded_speed():
           f"{_ticks_to_frac(per_tick, 0.9)}")
 
 
-def test_gripper_holding_force():
+def show_gripper_holding_force():
     """Is grip the bottleneck rather than accel? Close the gripper hard and
     report the actuator torque it can hold vs the cube weight it must support."""
     env = _make_env()
@@ -148,7 +148,7 @@ def _drive_raw(env, action, n_ticks):
     return np.array(qpos_log), np.array(ctrl_log)
 
 
-def test_profile_vs_raw_ctrl_ab():
+def show_profile_vs_raw_ctrl_ab():
     """Does the accel ramp itself change dynamics, or is the actuator fit
     (ctrl->qpos following error) the dominant slowdown? A/B the same commands
     with profile on vs. raw target straight to ctrl."""
@@ -179,7 +179,7 @@ def test_profile_vs_raw_ctrl_ab():
           f"raw={ql_raw[-1,ELBOW_IDX]-ql_raw[0,ELBOW_IDX]:+.3f}")
 
 
-def test_action_scale_sweep():
+def show_action_scale_sweep():
     """What does raising action_scale buy? Sweep it through the loaded-lift and
     unloaded-pan drives and report margin (scale - lag), authority %, and the
     real-arm peak-speed ceiling it implies (action_scale * control_hz)."""
@@ -229,7 +229,7 @@ def _run_seq(use_profile, phase1, phase2, n1=20, n2=25, accel=None):
     return switch_q, np.array(traj)
 
 
-def test_transient_overshoot_and_reversal():
+def show_transient_overshoot_and_reversal():
     """The steady-state probes miss the profile's setpoint momentum (self.vel
     persists). Drive up, then (a) command HOLD and (b) command REVERSE, and
     compare overshoot / reversal latency with profile on vs off (raw ctrl)."""
@@ -269,7 +269,7 @@ def _patch_old_sysid(env):
         env.model.dof_frictionloss[d] = 0.0
 
 
-def test_old_sysid_values_authority():
+def show_old_sysid_values_authority():
     """Keep the profile + everything; only swap actuator params back to the
     pre-sysid fit. Does authority recover? If so the refit, not the profile,
     is what broke lift."""
@@ -308,3 +308,13 @@ def _ticks_to_frac(per_tick, frac):
         if v >= frac * steady:
             return i + 1
     return len(per_tick)
+
+
+if __name__ == "__main__":
+    show_profile_divergence_under_gravity_load()
+    show_achieved_vs_commanded_speed()
+    show_gripper_holding_force()
+    show_profile_vs_raw_ctrl_ab()
+    show_action_scale_sweep()
+    show_transient_overshoot_and_reversal()
+    show_old_sysid_values_authority()

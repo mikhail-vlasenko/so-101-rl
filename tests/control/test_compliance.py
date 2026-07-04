@@ -16,7 +16,7 @@ from real.compliance import (
 )
 from real.twin.mapping import load_joint_maps
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 XML = REPO_ROOT / "so101" / "scene.xml"
 LIFT_XML = REPO_ROOT / "so101" / "scene_lift.xml"
 CAL = REPO_ROOT / "real" / "follower_calibration.json"

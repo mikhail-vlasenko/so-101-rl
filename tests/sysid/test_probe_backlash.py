@@ -23,7 +23,7 @@ from sysid.probe_backlash import (
     save_records,
 )
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 XML = REPO_ROOT / "so101" / "scene.xml"
 CAL = REPO_ROOT / "real" / "follower_calibration.json"
 

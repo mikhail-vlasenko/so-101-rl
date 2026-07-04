@@ -16,7 +16,7 @@ from omegaconf import OmegaConf
 from src.reach_env import SO101ReachEnv
 
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _load_reach_cfg():

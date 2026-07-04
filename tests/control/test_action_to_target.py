@@ -105,7 +105,7 @@ def test_raw_clamp_never_truncates_full_action(action_scale):
 def test_raw_clamp_covers_configured_action_scale():
     """Same invariant pinned to the *live* config, so raising action_scale in
     conf/config.yaml can never silently outgrow the real-arm clamp again."""
-    config_yaml = Path(__file__).resolve().parent.parent / "conf" / "config.yaml"
+    config_yaml = Path(__file__).resolve().parent.parent.parent / "conf" / "config.yaml"
     cfg_action_scale = float(OmegaConf.load(config_yaml)["action_scale"])
     assert max_raw_delta_per_step(cfg_action_scale) >= rad_to_raw_units(cfg_action_scale)
     # And a full-scale action still clears the stiction deadzone.

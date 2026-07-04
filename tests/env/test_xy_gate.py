@@ -14,7 +14,7 @@ from src.pickplace_env import SO101PickPlaceEnv, XY_PROGRESS_COEFF, GRASP_HOLD_R
 
 @pytest.fixture(scope="module")
 def cfg():
-    with initialize(config_path="../conf", version_base=None):
+    with initialize(config_path="../../conf", version_base=None):
         return compose(config_name="config", overrides=["env=pickplace"])
 
 

@@ -15,7 +15,7 @@ from panel.runner import ResourceBusyError, Runner
 
 DUMMY_SPEC = ScriptSpec(
     id="dummy", title="Dummy", page="sim",
-    module="tests.dummy_panel_script", arg_style="argparse",
+    module="tests.panel.dummy_panel_script", arg_style="argparse",
     description="test stand-in",
     args=(ArgSpec("--stubborn", "flag", "Ignore SIGINT"),),
     resources=(Resource.SERIAL,),
@@ -103,7 +103,7 @@ def test_external_holder_blocks_and_releases(runner):
 def test_stream_port_allocation_and_exhaustion(tmp_path):
     spec_free = ScriptSpec(
         id="dummy_free", title="Dummy (no hardware)", page="sim",
-        module="tests.dummy_panel_script", arg_style="argparse",
+        module="tests.panel.dummy_panel_script", arg_style="argparse",
         description="test stand-in", supports_stream=True)
     runner = Runner(log_dir=tmp_path / "panel_logs",
                     stream_ports=range(28801, 28803), stop_grace_s=1.0)

@@ -21,7 +21,7 @@ import pytest
 from src.base_env import JOINT_NAMES
 from sysid.trajectories import HOME, STRETCH, TRAJECTORIES
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 XML = REPO_ROOT / "so101" / "scene.xml"
 FLOOR_MARGIN = 0.03  # min clearance (m) of any arm geom above the floor
 

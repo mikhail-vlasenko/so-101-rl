@@ -26,7 +26,7 @@ MARKER_WRIST_ROT = slice(21, 24)
 
 @pytest.fixture(scope="module")
 def env():
-    with initialize(config_path="../conf", version_base=None):
+    with initialize(config_path="../../conf", version_base=None):
         cfg = compose(config_name="config", overrides=["env=lift"])
     # marker_include_rot=True so the MARKER_*_ROT obs slices below are populated.
     return SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
@@ -120,7 +120,7 @@ def test_default_obs_drops_marker_rotations():
     """The default (marker_include_rot=False) obs carries marker positions only:
     6 dims shorter than the rot-included layout, and the marker section equals the
     two FK positions back-to-back (cube_pos follows immediately, no rot dims)."""
-    with initialize(config_path="../conf", version_base=None):
+    with initialize(config_path="../../conf", version_base=None):
         cfg = compose(config_name="config", overrides=["env=lift"])
     # marker_always_visible so neither position is zeroed regardless of the spawn pose.
     env = SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",

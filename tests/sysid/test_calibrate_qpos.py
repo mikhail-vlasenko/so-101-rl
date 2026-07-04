@@ -35,7 +35,7 @@ from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import load_joint_maps
 from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_world_pos
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 XML = REPO_ROOT / "so101" / "scene.xml"
 CAL = REPO_ROOT / "real" / "follower_calibration.json"
 
