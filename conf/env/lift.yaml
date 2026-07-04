@@ -10,7 +10,7 @@ lift_env:
   cube_high: [0.30, 0.15]
   cube_smallest_face_only: ${cube_smallest_face_only}   # defined in config.yaml
   target_height: 0.10
-  # floor_contact_penalty / floor_proximity_* / poke_force_coeff / cube_tip_coeff are
+  # floor_contact_penalty / floor_proximity_* / floor_force_coeff / poke_force_coeff / cube_tip_coeff are
   # careful-behavior shaping, owned by the `shaping` config group
   # (conf/shaping/{full,light,none}.yaml) so they can be toggled off for stage 1.
   # AprilTag detector dropout (marker_dropout) lives in the `dr` group, not here.

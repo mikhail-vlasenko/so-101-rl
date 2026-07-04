@@ -48,6 +48,7 @@ class SO101LiftEnv(SO101BaseEnv):
         # is gated on its coefficient below, so `shaping=none` skips the extra work.
         self.floor_proximity_thresh = float(cfg["floor_proximity_thresh"])
         self.floor_proximity_penalty = float(cfg["floor_proximity_penalty"])
+        self.floor_force_coeff = float(cfg["floor_force_coeff"])
         self.poke_force_coeff = float(cfg["poke_force_coeff"])
         self.cube_tip_coeff = float(cfg["cube_tip_coeff"])
 
@@ -88,6 +89,15 @@ class SO101LiftEnv(SO101BaseEnv):
         if self.floor_proximity_penalty and \
                 self._min_arm_floor_dist(self.floor_proximity_thresh) < self.floor_proximity_thresh:
             reward += self.floor_proximity_penalty
+
+        # The contact/proximity penalties above are binary, so once the jaws are
+        # at the floor (unavoidable for a 1.5 cm sponge) pressing harder is free —
+        # policies learn to lean on the floor as a height reference, up to ~20 N
+        # in sim and a sustained servo push on the real arm. Penalizing the
+        # contact force restores the gradient; applies grasped or not (the
+        # observed presses happen during the grasp itself).
+        if self.floor_force_coeff:
+            reward += self.floor_force_coeff * self._arm_floor_contact_force()
 
         # Success = a genuine grasped lift to target height. Requiring the grasp
         # (not just the cube center crossing target_height) stops a violent flick

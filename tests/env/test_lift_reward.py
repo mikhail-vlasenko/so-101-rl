@@ -22,6 +22,7 @@ def _cfg():
         "floor_contact_penalty": -0.10,
         "floor_proximity_thresh": 0.003,
         "floor_proximity_penalty": -0.05,
+        "floor_force_coeff": 0.0,
         "poke_force_coeff": 0.0,
         "cube_tip_coeff": 0.0,
         "target_height": 0.10,
@@ -186,6 +187,24 @@ def test_poke_force_penalty_pregrasp(monkeypatch):
     assert reward == pytest.approx(TIME_PENALTY + env.poke_force_coeff * 20.0)
 
 
+def test_floor_force_penalty_applies_while_grasped(monkeypatch):
+    """Arm↔floor contact force is penalized proportionally, including during the
+    grasp — the binary contact/proximity terms alone let the policy lean on the
+    floor at ~20 N for free once contact is already paid for."""
+    env = SO101LiftEnv(env_cfg=_cfg())
+    env.reset(seed=0)
+    env.floor_force_coeff = -0.02
+    env.floor_proximity_penalty = 0.0
+    monkeypatch.setattr(env, "_arm_floor_contact_force", lambda: 15.0)
+    env._prev_cube_pos = np.array([0.20, 0.0, 0.05])
+    reward, _, _ = env._compute_step(
+        ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
+        ee_cube_dist=0.0, grasped=True, floor_contact=False,
+    )
+    assert reward == pytest.approx(
+        TIME_PENALTY + GRASP_HOLD_REWARD + env.floor_force_coeff * 15.0)
+
+
 def test_cube_tip_penalty_pregrasp(monkeypatch):
     """With shaping on, pre-grasp cube angular speed (rolling it over) is penalized."""
     env = SO101LiftEnv(env_cfg=_cfg())
@@ -207,7 +226,8 @@ def test_shaping_terms_skipped_when_zero(monkeypatch):
     env.reset(seed=0)
     env.floor_proximity_penalty = 0.0
     monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
-    for name in ("_arm_cube_contact_force", "_cube_angular_speed", "_min_arm_floor_dist"):
+    for name in ("_arm_cube_contact_force", "_cube_angular_speed", "_min_arm_floor_dist",
+                 "_arm_floor_contact_force"):
         monkeypatch.setattr(env, name, lambda *a, **k: (_ for _ in ()).throw(
             AssertionError(f"{name} should not be called when its shaping term is off")))
     env._prev_cube_pos = np.array([0.20, 0.0, 0.05])

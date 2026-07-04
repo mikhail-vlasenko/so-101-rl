@@ -540,6 +540,19 @@ class SO101BaseEnv(gym.Env):
                 min_dist = d
         return min_dist
 
+    def _arm_floor_contact_force(self):
+        """Sum of normal contact force magnitudes (N) between any arm geom and the floor."""
+        total = 0.0
+        wrench = np.zeros(6)
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            if (g1 == self.floor_geom_id and g2 in self.arm_geom_ids) or \
+                    (g2 == self.floor_geom_id and g1 in self.arm_geom_ids):
+                mujoco.mj_contactForce(self.model, self.data, i, wrench)
+                total += abs(wrench[0])
+        return total
+
     def _detect_grasp(self):
         """Grasp = cube close to EE + gripper closing + contact."""
         ee_pos = self._get_ee_pos()

@@ -44,6 +44,7 @@ def _cfg():
         "floor_contact_penalty": 0.0,
         "floor_proximity_thresh": 0.003,
         "floor_proximity_penalty": 0.0,
+        "floor_force_coeff": 0.0,
         "poke_force_coeff": 0.0,
         "cube_tip_coeff": 0.0,
         "target_height": 0.10,
