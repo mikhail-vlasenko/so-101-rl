@@ -20,8 +20,9 @@ obs_noise:
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
 # differentiating biased qpos has zero DC offset, so a velocity bias is non-physical.
 # Marker biases are drawn independently per tag (glue placement + camera extrinsics error
-# don't correlate between the two tags). qpos/cube bias stay disabled: see
-# calibration_plan.md — those are calibrated on the real rig and subtracted pre-policy.
+# don't correlate between the two tags). qpos/cube biases are the small residual
+# left after the real rig subtracts the bulk calibration offset pre-policy — see
+# calibration_plan.md.
 obs_bias:
   qpos_sigma: 0.01
   marker_pos_sigma: 0.005  # m,    tag glue placement + extrinsics offset

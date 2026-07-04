@@ -1,10 +1,11 @@
-"""Verify VecNormalize behavior: obs normalization is on by default.
+"""Pin down VecNormalize's obs behavior and why train.py disables it.
 
-train.py uses VecNormalize(env, norm_reward=True, gamma=gamma) which leaves
-norm_obs at its default value of True. This means observations are also
-normalized — not just rewards. These tests prove that and check that the eval
-env (a separate VecNormalize instance) has divergent obs statistics, making
-eval scores unreliable.
+VecNormalize defaults norm_obs=True, which normalizes observations with running
+stats that two independent instances (train vs. eval) accumulate differently —
+making eval scores unreliable. These tests demonstrate that divergence, which is
+why train.py sets norm_obs=False (obs normalization is handled by the fixed
+ObsNorm affine baked into the policy instead) and only uses VecNormalize for
+reward scaling.
 """
 
 import numpy as np
@@ -112,10 +113,10 @@ def test_reward_is_normalized():
 def test_separate_vec_normalize_has_different_obs_stats():
     """Two independent VecNormalize instances have divergent obs statistics.
 
-    This is what happens in train.py: the training env and eval env are
-    separate VecNormalize instances. The eval env (training=False) never
-    updates its running stats, so it normalizes with the initial (identity)
-    statistics while the training env accumulates real statistics.
+    The eval env (training=False) never updates its running stats, so it would
+    normalize with the initial (identity) statistics while the training env
+    accumulates real ones. This divergence is exactly why train.py keeps
+    norm_obs=False and normalizes obs via the baked ObsNorm affine instead.
     """
     # Training env: accumulate stats over many steps
     train_vec = DummyVecEnv([lambda: VaryingEnv()])

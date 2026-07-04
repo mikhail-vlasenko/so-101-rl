@@ -148,7 +148,7 @@
         <body name="upper_arm" pos="-0.0303992 -0.0182778 -0.0542" quat="1 -1 -1 -1">
           <!-- Joint from shoulder to upper_arm -->
           <joint axis="0 0 1" name="shoulder_lift" type="hinge" range="-1.7453293 1.7453293" class="sts3215"/>
-          <!-- Gear play: passive ±0.5° slack about the motor axis (link lags the encoder
+          <!-- Gear play: passive slack about the motor axis (link lags the encoder
                within the backlash gap). Anchored at the same body origin/axis as the
                motor joint, so the two compose into encoder + slack. -->
           <joint axis="0 0 1" name="shoulder_lift_play" class="backlash"/>

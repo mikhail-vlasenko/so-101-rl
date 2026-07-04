@@ -35,8 +35,9 @@ INTERP_HZ = 100.0
 # transfer — a constant-action authority probe missed it (only ~0.66x slower);
 # only the stop/reverse transients exposed it (see tests/test_profile_stall.py).
 # Higher accel collapses the momentum toward an instant setpoint: 40 halves the
-# reversal lag (4→2 ticks), 254 ≈ instant. Sim default is still profile-off
-# (conf/config.yaml:use_servo_profile) pending a real-arm transfer check.
+# reversal lag (4→2 ticks), 254 ≈ instant. Whether sim runs the profile is set
+# by conf/config.yaml:use_servo_profile; the baked so101.xml sysid fit was refit
+# with the profile carrying the lag.
 SERVO_ACCEL = 40
 
 # Position-loop P gain (Feetech SMS-STS register addr 21), per joint in

@@ -71,7 +71,7 @@ conda activate mujoco_env
 
 python -m src.train env=lift                     # train lift
 python -m src.train env=pickplace                # train pick-and-place (default)
-python -m src.train env=multitask                # train on both lift + pickplace (50/50)
+python -m src.train env=multitask                # train on both lift + pickplace (mix set by lift_ratio in multitask.yaml)
 python -m src.train env=lift wandb.enabled=false # without W&B
 python -m src.train train.total_timesteps=200000 # override params
 python -m src.eval env=lift                      # eval lift checkpoint
