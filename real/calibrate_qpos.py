@@ -26,7 +26,9 @@ How it works:
     sim, so the homing ramp between two low samples can never dive into the table.
   - Before the final solve it rejects outlier arm-tag detections: a single tag
     mis-detected at one pose (solvePnP fluke / motion blur) is dropped on a robust
-    residual cutoff and the bias+camera re-fit, so one bad point can't skew either.
+    residual cutoff (against the compliance-aware forward model, so a real per-pose
+    outlier can't hide in the looser bias-only field) and the fit re-run, so one bad
+    point can't skew it.
 
 The dry-run (no --execute) previews the sweep in the sim viewer (one pose/second),
 so the trajectory can be eyeballed before any hardware moves. With --stream-port
@@ -141,10 +143,13 @@ MOUNT_OFFSET_WARN_MM = 12.0  # past this the prior can't be the whole story: a t
 # noise, but a single arm tag mis-detected at one pose (solvePnP corner fluke,
 # motion blur, partial occlusion) survives as a point whose post-fit residual sits
 # far above the few-mm bulk. Before the final solve we drop such points and re-fit,
-# so one bad detection can't tug the bias or the camera. Threshold is robust
-# (median + K * scaled-MAD of the residual) with a floor so a tight clean fit isn't
-# pruned. Only arm tags are rejected here; the table tag's repeatability is its own
-# gate in solve_table.
+# so one bad detection can't tug the bias or the camera. The residual is scored
+# against the compliance-aware forward model (solve_bias_compliance), not bias-only:
+# the unmodelled load-deflection roughly doubles the bias-only spread, and a genuine
+# per-pose outlier can sit under the robust cutoff of that looser field while standing
+# clear of the tighter compliance-aware one. Threshold is robust (median + K *
+# scaled-MAD of the residual) with a floor so a tight clean fit isn't pruned. Only arm
+# tags are rejected here; the table tag's repeatability is its own gate in solve_table.
 OUTLIER_MAD_K = 3.5          # drop arm points past median + K * (1.4826*MAD) of the residual
 OUTLIER_FLOOR_MM = 6.0       # ...but never below this, so a clean fit isn't over-pruned
 OUTLIER_MAX_ITERS = 5        # re-fit after each cut; a gross outlier inflates the MAD
@@ -632,6 +637,34 @@ def _unpack_calibration(params, n_sites):
     return b_full, offsets, compliance
 
 
+def bias_compliance_residuals(params, samples, model, data, qposadr, site_ids):
+    """Position residuals of the settled FK of the bias+compliance-corrected pose vs
+    the optimally-aligned camera points (`params` = 4 observable biases then the
+    COMP_JOINTS compliance coefficients; layout is _unpack_calibration with 0 sites).
+    Mounts are held at their current XML values -- they shift a tag <0.5 mm, so they
+    don't change which point is an outlier, and leaving them fixed keeps this solve
+    cheap for the reject loop. The camera stays the closed-form Umeyama inner fit."""
+    b_full, _, compliance = _unpack_calibration(params, 0)
+    corrected = _true_poses(samples, model, data, qposadr, b_full, compliance)
+    src, dst, _ = paired_points(corrected, model, data, qposadr, site_ids)
+    T, _ = rigid_register(src, dst)
+    return (dst - (src @ T[:3, :3].T + T[:3, 3])).ravel()
+
+
+def solve_bias_compliance(samples, model, data, qposadr, site_ids):
+    """4 observable-joint biases + per-COMP_JOINTS gravity compliance (mounts fixed),
+    the forward model outlier rejection thresholds against. Solving compliance here too
+    matters: the bias-only field is ~2x looser (its unmodelled load-deflection inflates
+    the residual spread), so a real per-pose outlier hides under the robust cutoff that
+    the tighter compliance-aware field flags. Returns (b_full, compliance) as 6-vectors
+    padded with 0 on the pinned/rigid joints."""
+    n = len(OBSERVABLE_JOINTS) + len(COMP_JOINTS)
+    res = least_squares(bias_compliance_residuals, np.zeros(n),
+                        args=(samples, model, data, qposadr, site_ids))
+    b_full, _, compliance = _unpack_calibration(res.x, 0)
+    return b_full, compliance
+
+
 def mount_bias_residuals(params, samples, model, data, qposadr, site_ids, nominal):
     """Residual for the joint bias + per-tag mount-offset + gravity-compliance solve
     (`params` layout: see _unpack_calibration). Each offset shifts its tag's site to
@@ -683,7 +716,8 @@ def _arm_point_keys(samples, site_ids):
 
 def reject_outliers(samples, model, data, qposadr, site_ids):
     """Drop arm-tag observations whose post-fit residual is a robust outlier,
-    re-solving the bias+camera after each cut. Returns (kept_samples, dropped),
+    re-solving the bias, compliance & camera after each cut (see solve_bias_compliance
+    on why the reject model must carry compliance). Returns (kept_samples, dropped),
     where dropped is a list of (sample_idx, tag, err_mm) on the original indices.
 
     The table tag is never touched (solve_table needs it and gates it separately);
@@ -695,8 +729,8 @@ def reject_outliers(samples, model, data, qposadr, site_ids):
     n_points0 = len(_arm_point_keys(samples, site_ids))
     dropped = []
     for _ in range(OUTLIER_MAX_ITERS):
-        b_full = solve_bias(samples, model, data, qposadr, site_ids)
-        corrected = [(qpos - b_full, poses) for qpos, poses in samples]
+        b_full, compliance = solve_bias_compliance(samples, model, data, qposadr, site_ids)
+        corrected = _true_poses(samples, model, data, qposadr, b_full, compliance)
         _, _, _, err_mm = solve_camera(corrected, model, data, qposadr, site_ids)
         keys = _arm_point_keys(samples, site_ids)
         assert len(keys) == len(err_mm)

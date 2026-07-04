@@ -8,9 +8,11 @@ after calibration and its direction tells you *which way* the model is wrong the
 
 The committed artifacts are evaluated as-is — bias from calibration.yaml, camera
 from extrinsics.yaml, marker sites (solved mounts included) from the XML — with the
-same gravity-settled FK the solve used. No re-solving, so the plot can never drift
+same gravity-settled FK the solve used, so the plotted residual vectors can't drift
 from the model deployment actually uses. Detections the calibration rejected as
-outliers are still plotted; they stick out, which is the point of a residual map.
+outliers are excluded (the same reject_outliers pass the solve runs picks them out, so
+the plot shows the residual field the kept data actually produced) and their count is
+noted in the title.
 
 Two base-frame views (top X-Y and side X-Z) together carry all three error
 components; arrow colour is the full 3-D magnitude so hotspots show in either view.
@@ -32,7 +34,8 @@ import numpy as np
 import seaborn as sns
 
 from real.calib_solve import load_samples
-from real.calibrate_qpos import DEFAULT_CAL, DEFAULT_XML, SAMPLES_PATH, _true_poses, paired_points
+from real.calibrate_qpos import (
+    DEFAULT_CAL, DEFAULT_XML, SAMPLES_PATH, _true_poses, paired_points, reject_outliers)
 from real.calibration import load_calibration, load_compliance
 from real.extrinsics import load_extrinsics
 from real.marker_spec import ARM_TAG_TO_SITE
@@ -96,7 +99,7 @@ def _reference_arrow(ax):
             ha="center", va="bottom", color="0.25", fontsize=13)
 
 
-def plot(p_model, resid, tags, cam_pos, out_path, rms_mm):
+def plot(p_model, resid, tags, cam_pos, out_path, rms_mm, n_dropped):
     sns.set_theme(style="whitegrid", context="talk")
     mag_mm = np.linalg.norm(resid, axis=1) * 1000.0
     labels = ("x", "y", "z")
@@ -109,8 +112,10 @@ def plot(p_model, resid, tags, cam_pos, out_path, rms_mm):
     _reference_arrow(axes[0])
     fig.colorbar(q, ax=axes, shrink=0.8, label="error magnitude (mm)", pad=0.02)
     axes[0].legend(loc="upper left", fontsize=8)
+    dropped_note = (f", {n_dropped} outlier{'s' if n_dropped != 1 else ''} dropped"
+                    if n_dropped else "")
     fig.suptitle(f"calibrated model vs. reality — {len(tags)} tag detections, "
-                 f"RMS {rms_mm:.1f} mm  (arrows ×{EXAGGERATE:.0f})", fontsize=13)
+                 f"RMS {rms_mm:.1f} mm{dropped_note}  (arrows ×{EXAGGERATE:.0f})", fontsize=13)
     fig.savefig(out_path, dpi=DPI, bbox_inches="tight")
     print(f"wrote {out_path}")
 
@@ -135,14 +140,18 @@ def main():
 
     samples = load_samples(args.from_samples)
     print(f"loaded {len(samples)} samples from {args.from_samples}")
+    kept, dropped = reject_outliers(samples, model, data, jm.qposadr(), site_ids)
+    for i, tag, e in sorted(dropped):
+        print(f"  excluding rejected outlier: sample {i + 1} tag {tag} "
+              f"({ARM_TAG_TO_SITE[tag]}) residual {e:.1f} mm")
     p_model, resid, tags, b_full = compute_residuals(
-        samples, model, data, jm.qposadr(), site_ids)
+        kept, model, data, jm.qposadr(), site_ids)
     rms_mm = np.sqrt(np.mean(np.sum(resid ** 2, axis=1))) * 1000.0
     print("committed bias (deg): " + ", ".join(
         f"{n}={np.degrees(b):+.2f}" for n, b in zip(JOINT_NAMES, b_full)))
-    print(f"residual RMS {rms_mm:.2f} mm over {len(tags)} detections "
-          "(all detections incl. any the solve rejected)")
-    plot(p_model, resid, tags, tag_cam_world_pos(model, data), args.out, rms_mm)
+    print(f"residual RMS {rms_mm:.2f} mm over {len(tags)} kept detections "
+          f"({len(dropped)} outlier(s) dropped)")
+    plot(p_model, resid, tags, tag_cam_world_pos(model, data), args.out, rms_mm, len(dropped))
 
 
 if __name__ == "__main__":
