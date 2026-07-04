@@ -57,7 +57,7 @@ def compute_residuals(samples, model, data, qposadr, site_ids):
     corrected = _true_poses(samples, model, data, qposadr, b_full, compliance)
     src, dst, tags = paired_points(corrected, model, data, qposadr, site_ids)
     R, t = T_base_cam[:3, :3], T_base_cam[:3, 3]
-    p_model = dst                       # settled FK(theta_enc - bias), base frame
+    p_model = dst                       # settled FK of the bias+compliance-corrected pose
     p_obs = src @ R.T + t               # camera tag centre mapped into base frame
     return p_model, p_obs - p_model, tags, b_full
 
