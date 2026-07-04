@@ -40,10 +40,11 @@ use_servo_profile: true
 # frame_stack below do NOT (they change obs dim and must match across a resume).
 
 # Easy-mode crutch for training from scratch: when true, every AprilTag pose is
-# always fed to the policy — neither the >70° camera-physics occlusion nor the `dr`
-# group's stochastic marker_dropout zero it. Leave false (the default) for any policy
-# you'll deploy, where the real camera genuinely loses tags. Doesn't change obs dim,
-# so it's safe to flip between resume stages (e.g. on for stage 1, off when refining).
+# always fed fresh to the policy — neither the >70° camera-physics occlusion nor the
+# `dr` group's stochastic marker_dropout hide it (a hidden tag otherwise keeps its
+# last measured pose while its age channel grows). Leave false (the default) for any
+# policy you'll deploy, where the real camera genuinely loses tags. Doesn't change obs
+# dim, so it's safe to flip between resume stages (e.g. on for stage 1, off when refining).
 marker_always_visible: false
 
 # Simplified-starts crutch for training from scratch: when true, the cube always
@@ -72,8 +73,10 @@ frame_stack: 1
 train:
   time_limit_minutes: 20
   n_envs: 16
+  # Policy input is normalized by a fixed physically-derived affine
+  # (src/obs_norm.py) baked into the network — not configurable, and changing
+  # its constants invalidates checkpoints like an obs-dim change would.
   net_arch: [256, 256, 256, 256]
-  input_batchnorm: true
   total_timesteps: 40_000_000
   learning_rate: 3e-4
   lr_schedule: constant

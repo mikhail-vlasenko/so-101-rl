@@ -38,7 +38,9 @@ import numpy as np
 
 from src.base_env import (
     JOINT_NAMES,
+    MARKER_AGE_CAP_S,
     MARKER_SITE_NAMES,
+    N_MARKERS,
     marker_world_poses,
     markers_visible,
     obs_dim_for,
@@ -71,6 +73,11 @@ LIFT_TASK_ID = 0.0
 # frozen marker poses.
 MAX_MARKER_AGE_S = 0.25
 
+# Marker age fed for a freshly-visible tag under --marker-source fk: the FK
+# stand-in has no camera pipeline, so feed the middle of the training age
+# distribution (42-52 ms delay + 0-33 ms frame wait — conf/dr/full.yaml).
+FK_FRESH_AGE_S = 0.06
+
 
 def parse_args(lift_cfg: dict) -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -91,13 +98,14 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
 
 
 def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
-              marker_rot: np.ndarray, cube_pos: np.ndarray,
+              marker_rot: np.ndarray, marker_age: np.ndarray, cube_pos: np.ndarray,
               prev_actions: np.ndarray, marker_include_rot: bool) -> np.ndarray:
-    """Match SO101LiftEnv._compute_obs: qpos+qvel+markers+cube+[0,0,0,task_id]+prev_actions.
+    """Match SO101LiftEnv._compute_obs:
+    qpos+qvel+markers+marker_age+cube+[0,0,0,task_id]+prev_actions.
 
-    Marker poses come from FK on the lockstep sim (the same sites the policy saw
-    in training) — a stand-in until the camera AprilTag pipeline feeds measured
-    poses here. marker_include_rot mirrors the env: positions only when false.
+    Marker poses/ages come from the camera pipeline (--marker-source camera) or
+    the FK stand-in on the lockstep sim — held last-detected poses either way.
+    marker_include_rot mirrors the env: positions only when false.
     """
     extra = np.array([0.0, 0.0, 0.0, LIFT_TASK_ID], dtype=np.float32)
     markers = (np.hstack([marker_pos, marker_rot]).flatten()
@@ -105,6 +113,7 @@ def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
     return np.concatenate([qpos.astype(np.float32),
                            qvel.astype(np.float32),
                            markers.astype(np.float32),
+                           marker_age.astype(np.float32),
                            cube_pos.astype(np.float32),
                            extra,
                            prev_actions.flatten().astype(np.float32)]).astype(np.float32)
@@ -300,6 +309,12 @@ def main() -> int:
         dwell_count = 0
         step = 0
         prev_iter_t = None
+        # FK-branch hold-last state mirroring training (src/base_env.py): a tag
+        # turned away from tag_cam keeps its last visible pose while its age
+        # grows; never-yet-visible tags read zero with age at the cap.
+        fk_pos = np.zeros((N_MARKERS, 3))
+        fk_rot = np.zeros((N_MARKERS, 3))
+        fk_seen_t = np.full(N_MARKERS, -np.inf)
         while not stopped["flag"] and step < args.max_steps:
             iter_t = time.perf_counter()
             # Realized control period (start-to-start of consecutive ticks).
@@ -308,11 +323,11 @@ def main() -> int:
 
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
             if marker_source is not None:
-                # Measured AprilTag poses, already in the base frame and zeroed
-                # for tags the camera can't see (real/marker_obs.py).
-                marker_pos, marker_rot = marker_source.marker_poses()
-                # Latency of the frame those poses came from, sampled the instant
-                # the policy consumes it.
+                # Measured AprilTag poses in the base frame, held at the last
+                # detection per tag with their age (real/marker_obs.py).
+                marker_pos, marker_rot, marker_age = marker_source.marker_poses()
+                # Latency of the newest frame, sampled the instant the policy
+                # consumes it — the whole-pipeline stall guard.
                 stale_s, cam_read_ms, detect_ms = marker_source.frame_stats()
                 if stale_s > MAX_MARKER_AGE_S:
                     raise SystemExit(
@@ -321,16 +336,21 @@ def main() -> int:
                         f"pipeline stalled.")
                 marker_age_ms = stale_s * 1e3
             else:
-                marker_pos, marker_rot = marker_world_poses(data, marker_site_ids)
-                # Match training (base_env._compute_obs): a tag turned away from
-                # tag_cam is zeroed — the policy never saw FK-filled hidden tags.
-                hidden = ~markers_visible(data, marker_site_ids, tag_cam_pos)
-                marker_pos[hidden] = 0.0
-                marker_rot[hidden] = 0.0
+                # Match training (base_env._compute_obs): a tag turned away
+                # from tag_cam holds its last visible pose, age keeps growing.
+                now = time.monotonic()
+                pos_now, rot_now = marker_world_poses(data, marker_site_ids)
+                vis = markers_visible(data, marker_site_ids, tag_cam_pos)
+                fk_pos[vis] = pos_now[vis]
+                fk_rot[vis] = rot_now[vis]
+                fk_seen_t[vis] = now - FK_FRESH_AGE_S
+                marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
+                marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
                 marker_age_ms = cam_read_ms = detect_ms = float("nan")
 
             obs = build_obs(loop.qpos, loop.qvel, marker_pos, marker_rot,
-                            cube_pos, loop.prev_actions, marker_include_rot)
+                            marker_age, cube_pos, loop.prev_actions,
+                            marker_include_rot)
             t_pred = time.perf_counter()
             raw_action, _ = policy.predict(obs, deterministic=True)
             predict_ms = (time.perf_counter() - t_pred) * 1e3

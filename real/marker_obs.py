@@ -8,8 +8,10 @@ it saw in sim (`src/base_env.py::marker_world_poses`).
 
 Per frame the fixed table tag re-anchors the camera (`base_cam_from_table`), so a
 bumped camera self-corrects. A tag the camera can't see — or any frame missing
-the table tag, where the camera can't be re-anchored at all — is zeroed, the same
-convention training used for undetected tags.
+the table tag, where the camera can't be re-anchored at all — keeps its last
+measured pose while its age grows, the same hold-last-pose + age convention
+training used for undetected tags (src/base_env.py); a tag never seen this
+session reads all-zero with age pinned at MARKER_AGE_CAP_S.
 """
 import threading
 import time
@@ -28,7 +30,14 @@ from real.extrinsics import (
 )
 from real.marker_spec import ARM_TAG_TO_SITE, MARKER_EXPOSURE, MARKER_GAIN, TABLE_TAG_ID
 from real.pose import PoseEstimator, load_intrinsics
-from src.base_env import MARKER_SITE_NAMES, N_MARKERS
+from src.base_env import MARKER_AGE_CAP_S, MARKER_SITE_NAMES, N_MARKERS
+
+# The marker-age obs is consume-time minus *capture* time (src/camera_sim.py),
+# but the thread only knows when cap.read() returned; the probe
+# (sysid/probe_cam_latency.py, run probe_1783181402) measured the
+# capture -> cap.read() leg at 39.5 ms, so each frame's capture instant is
+# t_recv minus this.
+CAPTURE_TO_READ_S = 0.0395
 
 
 class CameraMarkerSource:
@@ -50,10 +59,14 @@ class CameraMarkerSource:
         # undetected tags zeroed. Lets a recorder (sysid/probe_cam_latency.py)
         # timestamp every frame instead of polling for the newest one.
         self._on_frame = on_frame
-        # Most recent base-frame poses + latency telemetry; written under _lock
-        # together so a reader gets a consistent snapshot of one frame.
+        # Hold-last-pose state (training convention, src/base_env.py): each
+        # tag's most recent detection and its capture time; -inf = never seen
+        # (zero pose, age pinned at MARKER_AGE_CAP_S). Written under _lock
+        # together with the frame telemetry so a reader gets a consistent
+        # snapshot.
         self._pos = np.zeros((N_MARKERS, 3))
         self._rot = np.zeros((N_MARKERS, 3))
+        self._last_capture_t = np.full(N_MARKERS, -np.inf)
         self._recv_t: float | None = None
         self._read_ms = float("nan")
         self._detect_ms = float("nan")
@@ -94,10 +107,11 @@ class CameraMarkerSource:
                 poses = {d.id: self.estimator.estimate(d)
                          for d in self.detector.detect(gray) if d.id in self._wanted}
                 detect_ms = (time.monotonic() - t_det) * 1e3
-                pos, rot = self._poses_to_base(poses)
+                pos, rot, detected = self._poses_to_base(poses)
                 with self._lock:
-                    self._pos = pos
-                    self._rot = rot
+                    self._pos[detected] = pos[detected]
+                    self._rot[detected] = rot[detected]
+                    self._last_capture_t[detected] = t_recv - CAPTURE_TO_READ_S
                     self._recv_t = t_recv
                     self._read_ms = (t_recv - t_read) * 1e3
                     self._detect_ms = detect_ms
@@ -106,29 +120,40 @@ class CameraMarkerSource:
         except Exception as exc:   # surface to the consumer thread; a dead camera
             self.error = exc       # must fail loud, not freeze the last poses
 
-    def _poses_to_base(self, poses: dict) -> tuple[np.ndarray, np.ndarray]:
-        """Camera-frame tag poses -> base-frame (pos (N,3), rot (N,3));
-        undetected/un-anchored tags zeroed."""
+    def _poses_to_base(self, poses: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Camera-frame tag poses -> raw per-frame base-frame
+        (pos (N,3), rot (N,3), detected (N,) bool); undetected/un-anchored tags
+        zeroed with detected=False. These are the per-frame values (used as-is
+        for _on_frame telemetry) — the held obs state only folds in the
+        detected ones."""
         pos = np.zeros((N_MARKERS, 3))
         rot = np.zeros((N_MARKERS, 3))
+        detected = np.zeros(N_MARKERS, dtype=bool)
         if TABLE_TAG_ID not in poses:
-            return pos, rot   # no table tag this frame -> can't re-anchor the camera
+            return pos, rot, detected   # no table tag this frame -> can't re-anchor the camera
         T_base_cam = base_cam_from_table(self.T_base_table, *poses[TABLE_TAG_ID])
         for i, tag in enumerate(self.slot_tags):
             if tag in poses:
                 # Un-rotate the glue offset so marker_rot matches the sim convention.
                 T_cam_tag = rt_to_mat(*poses[tag]) @ quarter_turn_mat(-self.quarter_turns[tag])
                 pos[i], rot[i] = mat_to_pos_rotvec(T_base_cam @ T_cam_tag)
-        return pos, rot
+                detected[i] = True
+        return pos, rot, detected
 
-    def marker_poses(self) -> tuple[np.ndarray, np.ndarray]:
-        """(pos (N,3), rot (N,3)) in the base frame for the most recent frame.
-        Re-raises any exception that killed the capture thread — otherwise a
-        dead camera would silently serve the last snapshot forever."""
+    def marker_poses(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(pos (N,3), rot (N,3), age_s (N,)) in the base frame: each tag's
+        most recent detection and its age at this instant, capped at
+        MARKER_AGE_CAP_S like training; never-seen tags are zero with age at
+        the cap. Re-raises any exception that killed the capture thread —
+        otherwise a dead camera would silently serve the held poses forever."""
         if self.error is not None:
             raise self.error
         with self._lock:
-            return self._pos.copy(), self._rot.copy()
+            pos = self._pos.copy()
+            rot = self._rot.copy()
+            last_capture_t = self._last_capture_t.copy()
+        age = np.minimum(MARKER_AGE_CAP_S, time.monotonic() - last_capture_t)
+        return pos, rot, age
 
     def frame_stats(self) -> tuple[float, float, float]:
         """(staleness_s, read_ms, detect_ms) for the most recent processed frame.

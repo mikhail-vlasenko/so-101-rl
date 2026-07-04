@@ -52,15 +52,18 @@ def _move_action():
 
 def _run_camera(cam, rng, n_ticks=30):
     """Drive a CameraSim like the env does — state = its own timestamp — and
-    return the consumed frame's capture time at each control tick."""
+    return the newest consumed frame (== its captured state's time) at each
+    control tick."""
+    _, frame = cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
     consumed = []
-    cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
     t = 0.0
     for _ in range(n_ticks):
         for _ in range(10):
             t += SUBSTEP
             cam.record(t, t)
-        consumed.append(cam.observe(t, rng, capture_fn=lambda s: s))
+        for _, new_frame in cam.observe(t, rng, capture_fn=lambda s: s):
+            frame = new_frame
+        consumed.append(frame)
     return np.array(consumed)
 
 
@@ -120,6 +123,22 @@ def test_camera_sim_delay_sampled_per_episode():
     assert delays.std() > 0.005, "per-episode delay draws should spread over the range"
 
 
+def test_camera_sim_reset_frame_ages_like_midstream():
+    """The initial frame's capture time extrapolates the schedule backward, so
+    its age at reset lies in [delay, delay + frame_s) — the same sawtooth a
+    mid-episode consumed frame has — instead of pretending zero latency."""
+    frame_s = CAM["frame_ms"] * 1e-3
+    delay_s = CAM["delay_ms"][0] * 1e-3
+    cam = CameraSim(frame_s=frame_s, delay_range_s=(delay_s, delay_s),
+                    jitter_s=0.0, control_dt=CONTROL_DT)
+    rng = np.random.default_rng(4)
+    t0 = 5.0
+    for _ in range(50):
+        capture_t, _ = cam.reset(rng, t0, 0.0, capture_fn=lambda s: s)
+        age = t0 - capture_t
+        assert delay_s - 1e-9 <= age < delay_s + frame_s + 1e-9, age
+
+
 # ---------------------------------------------------------------- env contract
 
 def test_default_config_has_cam_latency(cfg):
@@ -141,8 +160,10 @@ def test_synchronous_camera_markers_are_fresh(cfg):
         obs, *_ = env.step(_move_action())
         cur_pos, _ = marker_world_poses(env.data, env.marker_site_ids)
         np.testing.assert_allclose(obs[12:18].reshape(2, 3), cur_pos, atol=1e-6)
+        # Fresh synchronous frames: marker ages are zero.
+        np.testing.assert_allclose(obs[18:20], 0.0, atol=1e-6)
         cube = env.data.qpos[env.cube_qpos_idx:env.cube_qpos_idx + 3]
-        np.testing.assert_allclose(obs[18:21], cube, atol=1e-6)
+        np.testing.assert_allclose(obs[20:23], cube, atol=1e-6)
 
 
 def test_delayed_camera_markers_lag_current_state(cfg):
@@ -168,6 +189,25 @@ def test_delayed_camera_markers_lag_current_state(cfg):
         age = min(ages)
         assert delay_s - SUBSTEP <= age <= delay_s + frame_s + SUBSTEP, age
     assert lagged_steps >= 8, f"markers matched the live pose on {10 - lagged_steps}/10 moving steps"
+
+
+def test_marker_age_obs_matches_latency_window(cfg):
+    """The marker-age obs is obs-time minus the consumed frame's capture time:
+    with a fixed pipeline delay and always-visible tags it must stay inside the
+    [delay, delay + frame_ms) sawtooth — from the very first obs at reset on."""
+    env = _pickplace(cfg, cam_latency=CAM, marker_always_visible=True)
+    delay_s = CAM["delay_ms"][0] * 1e-3
+    frame_s = CAM["frame_ms"] * 1e-3
+    obs, _ = env.reset(seed=0)
+    ages = [obs[18:20].copy()]
+    for _ in range(20):
+        obs, *_ = env.step(_move_action())
+        ages.append(obs[18:20].copy())
+    ages = np.stack(ages)
+    assert np.all(ages >= delay_s - 1e-6), ages.min()
+    assert np.all(ages < delay_s + frame_s + 1e-6), ages.max()
+    # Always-visible tags consume the same frames: identical ages per step.
+    np.testing.assert_allclose(ages[:, 0], ages[:, 1], atol=1e-9)
 
 
 def test_qpos_is_fresh_under_camera_latency(cfg):
@@ -205,6 +245,8 @@ def test_reset_gives_fresh_initial_frame(cfg):
     obs, _ = env.reset(seed=1)
     cur_pos, _ = marker_world_poses(env.data, env.marker_site_ids)
     np.testing.assert_allclose(obs[12:18].reshape(2, 3), cur_pos, atol=1e-6)
+    # ...but the frame still ages like a real one: delay + sawtooth phase.
+    assert np.all(obs[18:20] >= CAM["delay_ms"][0] * 1e-3 - 1e-6)
 
 
 def test_reward_uses_true_state_under_latency(cfg):

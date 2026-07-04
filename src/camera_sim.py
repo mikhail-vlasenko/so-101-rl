@@ -17,12 +17,14 @@ CameraSim reproduces the timing skeleton while staying agnostic of what a
 substep (`record`), CameraSim captures frames from that history on a
 fixed-period schedule — per-episode random phase, per-episode pipeline delay
 sampled from `delay_range_s`, per-frame capture-time jitter whose random walk
-stands in for real clock drift — and `observe` returns the newest frame whose
-availability time has passed. Each frame is processed exactly once, at capture
-time, through the env's `capture_fn` (detector dropout and measurement noise
-freeze per frame, like a real detection).
+stands in for real clock drift — and `observe` returns every frame whose
+availability time has passed since the last call, each tagged with its capture
+time so the consumer can age it. Each frame is processed exactly once, at
+capture time, through the env's `capture_fn` (detector dropout and measurement
+noise freeze per frame, like a real detection).
 """
 
+import math
 from collections import deque
 
 
@@ -53,8 +55,7 @@ class CameraSim:
         self._keep_s = control_dt + frame_s
         self._random_phase = True
         self._hist: deque = deque()      # (t, state), t ascending
-        self._pending: deque = deque()   # (avail_t, frame), avail_t ascending
-        self._frame = None               # newest consumed frame
+        self._pending: deque = deque()   # (avail_t, capture_t, frame), avail_t ascending
         self._next_capture_t = 0.0
         self._delay = 0.0
 
@@ -70,19 +71,30 @@ class CameraSim:
 
     def reset(self, rng, t: float, state, capture_fn):
         """Start an episode at sim time `t` with the world in `state`. The
-        pre-episode world is static, so the frame in flight at reset shows
-        exactly the reset state: a fresh initial frame, returned as consumed."""
+        pre-episode world is static, so every frame captured before `t` shows
+        exactly the reset state. The schedule is extrapolated backward to
+        (a) the newest capture whose pipeline delay has elapsed by `t` —
+        returned as (capture_t, frame), aging exactly like a mid-episode one
+        (delay + sawtooth phase) — and (b) the captures still in the pipeline
+        at `t`, queued so they land during the first ticks like on a real
+        camera. Each frame is capture_fn-processed once, as always."""
         self._hist.clear()
         self._pending.clear()
         self._hist.append((t, state))
-        self._frame = capture_fn(state)
         if self._random_phase:
             self._delay = rng.uniform(self.delay_lo, self.delay_hi)
             self._next_capture_t = t + rng.uniform(0.0, self.frame_s)
         else:
             self._delay = 0.0
             self._next_capture_t = t + self.frame_s
-        return self._frame
+        phase = self._next_capture_t - t
+        n_back = math.ceil((phase + self._delay) / self.frame_s - self._EPS)
+        capture_t = self._next_capture_t - n_back * self.frame_s
+        for k in range(1, n_back):
+            in_flight_t = capture_t + k * self.frame_s
+            self._pending.append((in_flight_t + self._delay, in_flight_t,
+                                  capture_fn(state)))
+        return capture_t, capture_fn(state)
 
     def record(self, t: float, state) -> None:
         """Log the world state at sim time `t` (call once per physics substep)."""
@@ -97,16 +109,22 @@ class CameraSim:
         return min(self._hist, key=lambda entry: abs(entry[0] - t))[1]
 
     def observe(self, t: float, rng, capture_fn):
-        """Advance the schedule to sim time `t` and return the frame the policy
-        sees: the newest one whose capture time + pipeline delay has passed."""
+        """Advance the schedule to sim time `t` and return the frames that
+        became available since the last call, oldest first, as
+        (capture_t, frame) pairs — empty if no new frame is due yet. The
+        caller keeps the newest as its current frame and folds every one into
+        any per-tag held state, exactly like the real capture thread updates
+        per frame (real/marker_obs.py)."""
         while self._next_capture_t <= t + self._EPS:
             capture_t = self._next_capture_t
             frame = capture_fn(self._state_at(capture_t))
-            self._pending.append((capture_t + self._delay, frame))
+            self._pending.append((capture_t + self._delay, capture_t, frame))
             step = self.frame_s
             if self.jitter_s > 0.0:
                 step = max(self.frame_s / 2.0, step + rng.normal(0.0, self.jitter_s))
             self._next_capture_t = capture_t + step
+        available = []
         while self._pending and self._pending[0][0] <= t + self._EPS:
-            self._frame = self._pending.popleft()[1]
-        return self._frame
+            _, capture_t, frame = self._pending.popleft()
+            available.append((capture_t, frame))
+        return available

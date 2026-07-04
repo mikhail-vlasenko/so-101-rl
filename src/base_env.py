@@ -17,16 +17,20 @@ from src.units import action_to_target
 
 
 def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
-    """OBS_DIM = qpos(6) + qvel(6) + markers(2*M) + cube_pos(3) + extra(4) + prev_actions(N*6).
+    """OBS_DIM = qpos(6) + qvel(6) + markers(2*M) + marker_age(2) + cube_pos(3)
+    + extra(4) + prev_actions(N*6).
 
     Each marker contributes its world xyz (M=3); when marker_include_rot is true it
     also contributes a world rotation vector (axis-angle, +3 dims, M=6) — the same
     quantities the camera pipeline recovers for the physical AprilTags (real/pose.py
-    rvec/tvec, camera->world mapped).
+    rvec/tvec, camera->world mapped). marker_age is each tag's seconds since the
+    capture of the pose it is serving (capped at MARKER_AGE_CAP_S): pipeline
+    latency when freshly detected, growing while the tag is undetected and its
+    last pose is held.
     """
     marker_dim = 6 if marker_include_rot else 3
     # 12 = qpos(6) + qvel(6); 7 = cube_pos(3) + extra(4)
-    return 12 + N_MARKERS * marker_dim + 7 + prev_actions_n * 6
+    return 12 + N_MARKERS * marker_dim + N_MARKERS + 7 + prev_actions_n * 6
 
 
 # AprilTags glued to the arm (ids per real/marker_spec.py ROLES): "finger" on
@@ -34,6 +38,12 @@ def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
 # Sites of the same names in so101.xml mirror their placement.
 MARKER_SITE_NAMES = ["marker_finger", "marker_wrist"]
 N_MARKERS = len(MARKER_SITE_NAMES)
+
+# Undetected tags keep their last measured pose in the obs while their age
+# channel grows, capped here; a tag never detected this episode reads an
+# all-zero pose with age pinned at the cap. Shared with the real pipeline
+# (real/marker_obs.py) — the identical convention on both sides.
+MARKER_AGE_CAP_S = 1.0
 
 # Fixed camera in so101.xml standing in for the physical webcam that watches
 # the tags. A tag counts as visible when the angle between its outward normal
@@ -104,8 +114,8 @@ def markers_visible(data, site_ids, cam_pos):
 
 
 def marker_dropout_prob(pos, normals, cam_pos, p_near, p_far):
-    """Per-marker probability the tag is undetected this frame (its obs zeroed),
-    from the tags' world positions (N,3) and outward normals (N,3).
+    """Per-marker probability the tag is undetected this frame (its held pose
+    goes stale), from the tags' world positions (N,3) and outward normals (N,3).
 
     Above MARKER_VIS_MAX_HEIGHT_M (out the top of frame) or past
     MARKER_VIS_MAX_ANGLE_DEG the camera can't see the tag at all -> 1.0.
@@ -136,7 +146,8 @@ class CamState(NamedTuple):
 
 class CamFrame(NamedTuple):
     """One processed detection: dropout, bias, and noise frozen at capture time.
-    Undetected tags are already zeroed — the real-pipeline convention."""
+    marker_pos/rot entries are only meaningful where detected — _ingest_frame
+    folds the detected ones into the held per-tag state the obs serves."""
     marker_pos: np.ndarray  # (N_MARKERS, 3)
     marker_rot: np.ndarray  # (N_MARKERS, 3)
     detected: np.ndarray    # (N_MARKERS,) bool
@@ -211,7 +222,7 @@ class SO101BaseEnv(gym.Env):
         # vs comfortably-facing), or None for geometric visibility only.
         self.marker_dropout = marker_dropout
         # Easy-mode crutch: feed every tag to the policy regardless of camera angle
-        # or dropout (no obs zeroing). See conf/config.yaml:marker_always_visible.
+        # or dropout (no held/stale poses). See conf/config.yaml:marker_always_visible.
         self.marker_always_visible = bool(marker_always_visible)
         # When false the marker rotation vectors are dropped from the obs (positions
         # only). Changes obs dim — see obs_dim_for / conf/config.yaml:marker_include_rot.
@@ -315,6 +326,12 @@ class SO101BaseEnv(gym.Env):
                 jitter_s=float(self.cam_latency["jitter_ms"]) * 1e-3,
                 control_dt=self._step_dt)
         self._cam_frame: CamFrame | None = None
+        # Hold-last-pose marker state: the obs serves each tag's most recent
+        # detection plus its age; a last-capture time of -inf means never seen
+        # this episode (zero pose, age pinned at MARKER_AGE_CAP_S).
+        self._held_marker_pos = np.zeros((N_MARKERS, 3))
+        self._held_marker_rot = np.zeros((N_MARKERS, 3))
+        self._marker_last_capture_t = np.full(N_MARKERS, -np.inf)
         self._prev_qpos_obs = None
 
         self._parse_config(cfg)
@@ -346,9 +363,11 @@ class SO101BaseEnv(gym.Env):
 
     def _process_frame(self, state: CamState) -> CamFrame:
         """One simulated detection of a captured world state: roll the per-frame
-        dropout (geometric visibility + DR), apply bias and per-frame noise, zero
-        undetected tags. Runs exactly once per frame, at capture time — a real
-        frame is detected once, so consuming it twice re-reads the same values."""
+        dropout (geometric visibility + DR), apply bias and per-frame noise.
+        Runs exactly once per frame, at capture time — a real frame is detected
+        once, so consuming it twice re-reads the same values. Undetected tags
+        keep garbage pose entries; only the detected flags gate what
+        _ingest_frame folds into the held obs state."""
         if self.marker_always_visible:
             detected = np.ones(N_MARKERS, dtype=bool)
         else:
@@ -376,13 +395,20 @@ class SO101BaseEnv(gym.Env):
                                                  size=marker_rot.shape)
             cube_pos = cube_pos + rng.normal(0, self.obs_noise["cube_sigma"],
                                              size=cube_pos.shape)
-        # An undetected tag yields exactly zeros — after bias/noise, the
-        # convention the real camera pipeline follows for undetected tags.
-        hidden = ~detected
-        marker_pos[hidden] = 0.0
-        marker_rot[hidden] = 0.0
         return CamFrame(marker_pos=marker_pos, marker_rot=marker_rot,
                         detected=detected, cube_pos=cube_pos)
+
+    def _ingest_frame(self, capture_t, frame: CamFrame):
+        """Consume one camera frame: it becomes the current frame (cube obs,
+        render tint, hidden metric), and each detected tag's measurement
+        overwrites the held pose the marker obs serves — the same per-frame
+        update the real capture thread applies (real/marker_obs.py)."""
+        self._cam_frame = frame
+        det = frame.detected
+        self._held_marker_pos[det] = frame.marker_pos[det]
+        self._held_marker_rot[det] = frame.marker_rot[det]
+        self._marker_last_capture_t[det] = capture_t
+        self._set_marker_render_colors(det)
 
     def _get_cube_pos(self):
         return self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3].copy()
@@ -403,8 +429,9 @@ class SO101BaseEnv(gym.Env):
 
     def _compute_obs(self):
         """Build the policy observation. qpos/qvel take the encoder path (fresh;
-        qvel differenced like real/rollout_common.ArmLoop); markers and cube come
-        from the camera frame consumed this tick (self._cam_frame)."""
+        qvel differenced like real/rollout_common.ArmLoop); markers serve the
+        held per-tag detections with their age, cube comes from the newest
+        camera frame (self._cam_frame)."""
         qpos = self.data.qpos[self.joint_qposadr].copy()
         if self.obs_bias is not None:
             qpos = qpos + self._qpos_bias
@@ -421,15 +448,19 @@ class SO101BaseEnv(gym.Env):
             qvel = (qpos - self._prev_qpos_obs) / self._step_dt
         self._prev_qpos_obs = qpos
 
-        frame = self._cam_frame
         if self.marker_include_rot:
             # hstack interleaves per marker: [pos_finger, rot_finger, pos_wrist, rot_wrist]
-            markers = np.hstack([frame.marker_pos, frame.marker_rot]).flatten()
+            markers = np.hstack([self._held_marker_pos, self._held_marker_rot]).flatten()
         else:
             # positions only: [pos_finger, pos_wrist]
-            markers = frame.marker_pos.flatten()
-        cube_pos = frame.cube_pos
-        return np.concatenate([qpos, qvel, markers, cube_pos, self._obs_extra(cube_pos),
+            markers = self._held_marker_pos.flatten()
+        # Clip below at 0: the frame schedule's float slack (CameraSim._EPS)
+        # can put a capture an epsilon after the obs instant.
+        marker_age = np.clip(self.data.time - self._marker_last_capture_t,
+                             0.0, MARKER_AGE_CAP_S)
+        cube_pos = self._cam_frame.cube_pos
+        return np.concatenate([qpos, qvel, markers, marker_age, cube_pos,
+                               self._obs_extra(cube_pos),
                                self._prev_actions.flatten()]).astype(np.float32)
 
     def _n_jaw_contacts(self):
@@ -587,10 +618,13 @@ class SO101BaseEnv(gym.Env):
                                                size=(N_MARKERS, 3))
             self._cube_bias = rng.normal(0, self.obs_bias["cube_sigma"], size=3)
 
-        self._cam_frame = self._camera.reset(self.np_random, self.data.time,
-                                             self._capture_camera_state(),
-                                             self._process_frame)
-        self._set_marker_render_colors(self._cam_frame.detected)
+        self._held_marker_pos[:] = 0.0
+        self._held_marker_rot[:] = 0.0
+        self._marker_last_capture_t[:] = -np.inf
+        capture_t, frame = self._camera.reset(self.np_random, self.data.time,
+                                              self._capture_camera_state(),
+                                              self._process_frame)
+        self._ingest_frame(capture_t, frame)
 
         return self._compute_obs(), {}
 
@@ -646,14 +680,14 @@ class SO101BaseEnv(gym.Env):
         )
         info["task_name"] = self.TASK_NAME
 
-        # Advance the camera to the obs instant and take the newest available
-        # frame (dropout/noise were frozen into it at capture time). Undetected
-        # tags are already zeroed; track them for the hidden-ratio metric.
-        # Losing a tag's pose is the policy's own penalty — there is
-        # deliberately no reward term for it.
-        self._cam_frame = self._camera.observe(self.data.time, self.np_random,
-                                               self._process_frame)
-        self._set_marker_render_colors(self._cam_frame.detected)
+        # Advance the camera to the obs instant and ingest every frame that
+        # became available this tick (dropout/noise were frozen in at capture
+        # time): each detection refreshes the held marker poses; the newest
+        # frame provides the cube obs. Losing a tag freezes its pose while its
+        # age channel grows — there is deliberately no reward term for it.
+        for capture_t, frame in self._camera.observe(self.data.time, self.np_random,
+                                                     self._process_frame):
+            self._ingest_frame(capture_t, frame)
         self._markers_hidden_total += N_MARKERS - int(self._cam_frame.detected.sum())
 
         truncated = self.step_count >= self.max_steps

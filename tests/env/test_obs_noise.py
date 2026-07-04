@@ -26,15 +26,17 @@ SIGMAS = {
     "cube_sigma": 0.003,
 }
 
-# Obs layout: [qpos(6), qvel(6), markers(2*6), cube_pos(3), task_extra(4), prev_actions(2*6)]
+# Obs layout: [qpos(6), qvel(6), markers(2*6), marker_age(2), cube_pos(3),
+# task_extra(4), prev_actions(2*6)]
 QPOS = slice(0, 6)
 QVEL = slice(6, 12)
-CUBE = slice(24, 27)
-C2T = slice(27, 29)
-RING_H = 29
-TASK_ID = 30
-PREV_ACTIONS = slice(31, 43)
-OBS_DIM = 43
+MARKER_AGE = slice(24, 26)
+CUBE = slice(26, 29)
+C2T = slice(29, 31)
+RING_H = 31
+TASK_ID = 32
+PREV_ACTIONS = slice(33, 45)
+OBS_DIM = 45
 
 
 @pytest.fixture(scope="module")
@@ -104,6 +106,9 @@ def test_constant_obs_dims_are_not_noised(cfg):
     assert obs_clean[TASK_ID] == obs_noisy[TASK_ID]
     # Prev actions are commanded values, not measurements — must not be noised.
     assert np.array_equal(obs_clean[PREV_ACTIONS], obs_noisy[PREV_ACTIONS])
+    # Marker ages are frame-schedule timing, not measurements — identical too
+    # (detection here is geometric-only, so it matches across the two envs).
+    assert np.array_equal(obs_clean[MARKER_AGE], obs_noisy[MARKER_AGE])
 
 
 def test_cube_to_target_uses_noisy_cube_pos(cfg):
@@ -132,8 +137,9 @@ def test_per_step_noise_magnitude_matches_sigmas(cfg):
         oc, *_ = env_clean.step(_zero_action())
         on, *_ = env_noisy.step(_zero_action())
         diffs[i] = on - oc
-        # Hidden tags are zeroed in both envs (identical dynamics, so identical
-        # visibility) — exclude them from the marker noise statistics.
+        # Hidden tags hold a stale pose in both envs (identical dynamics, so
+        # identical visibility) — a tag hidden since reset is zero in both,
+        # so exclude hidden tags from the marker noise statistics.
         visible[i] = markers_visible(env_noisy.data, env_noisy.marker_site_ids,
                                      env_noisy.tag_cam_pos)
     # Marker noise is measured per tag, so each tag (not both at once) just needs
@@ -180,8 +186,8 @@ def test_lift_env_compatible_with_noise(lift_cfg):
                       obs_noise=SIGMAS, marker_include_rot=True)
     obs, _ = env.reset(seed=0)
     assert obs.shape == (OBS_DIM,)
-    # Lift's _obs_extra returns zeros + task_id, so [27:30] should be zero, [30]=lift TASK_ID=0.0
-    assert np.array_equal(obs[27:30], np.zeros(3, dtype=np.float32))
+    # Lift's _obs_extra returns zeros + task_id, so [29:32] should be zero, [32]=lift TASK_ID=0.0
+    assert np.array_equal(obs[29:32], np.zeros(3, dtype=np.float32))
     assert obs[TASK_ID] == 0.0
     # Prev actions are zero immediately after reset (no action has been taken yet).
     assert np.array_equal(obs[PREV_ACTIONS], np.zeros(12, dtype=np.float32))

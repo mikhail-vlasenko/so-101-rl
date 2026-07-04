@@ -48,8 +48,9 @@ def draw_detected_markers(scn: mujoco.MjvScene, marker_pos: np.ndarray,
 
     Used identically by the rollout's passive viewer (`viewer.user_scn`, whose
     ngeom the caller resets each tick) and the MJPEG stream (the offscreen
-    Renderer's scene, reset every `update_scene`). Markers the camera couldn't
-    place are zeroed (real/marker_obs.py) and skipped. With orientation known
+    Renderer's scene, reset every `update_scene`). Markers the camera has never
+    placed are all-zero (real/marker_obs.py) and skipped; a currently-hidden tag
+    draws at its held last pose, like the policy sees it. With orientation known
     (`include_rot`) each marker is an oriented flat box — the tag square — else a
     sphere, since only its position is known.
     """

@@ -86,8 +86,8 @@ def test_spawn_is_stable_and_at_rest_height(env):
 def test_marker_obs_match_site_poses(env):
     """Clean obs marker dims must equal FK world poses of the marker sites.
 
-    Seed 4 spawns the arm with both tags facing tag_cam — hidden tags are
-    zeroed instead (covered by tests/test_marker_visibility.py)."""
+    Seed 4 spawns the arm with both tags facing tag_cam — hidden tags would
+    hold their last detection instead (covered by test_marker_visibility.py)."""
     obs, _ = env.reset(seed=4)
     assert markers_visible(env.data, env.marker_site_ids, env.tag_cam_pos).all()
     marker_pos, marker_rot = marker_world_poses(env.data, env.marker_site_ids)
@@ -122,7 +122,7 @@ def test_default_obs_drops_marker_rotations():
     two FK positions back-to-back (cube_pos follows immediately, no rot dims)."""
     with initialize(config_path="../../conf", version_base=None):
         cfg = compose(config_name="config", overrides=["env=lift"])
-    # marker_always_visible so neither position is zeroed regardless of the spawn pose.
+    # marker_always_visible so neither pose goes stale regardless of the spawn pose.
     env = SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
                        marker_always_visible=True)
     assert env.marker_include_rot is False
@@ -132,7 +132,8 @@ def test_default_obs_drops_marker_rotations():
     obs, _ = env.reset(seed=0)
     assert obs.shape == (env.obs_dim,)
     marker_pos, _ = marker_world_poses(env.data, env.marker_site_ids)
-    # qpos(6)+qvel(6)=12, then pos_finger(3), pos_wrist(3), then cube_pos(3).
+    # qpos(6)+qvel(6)=12, then pos_finger(3), pos_wrist(3), marker_age(2),
+    # then cube_pos(3).
     np.testing.assert_allclose(obs[12:15], marker_pos[0], atol=1e-6)
     np.testing.assert_allclose(obs[15:18], marker_pos[1], atol=1e-6)
-    np.testing.assert_allclose(obs[18:21], env._get_cube_pos(), atol=1e-6)
+    np.testing.assert_allclose(obs[20:23], env._get_cube_pos(), atol=1e-6)

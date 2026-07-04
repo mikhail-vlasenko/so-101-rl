@@ -17,6 +17,7 @@ from src.callbacks import (
     RingContactCallback, TimeLimitCallback, XYProgressCallback,
 )
 from src.networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
+from src.obs_norm import build_obs_norm, build_reach_obs_norm
 from src.lift_env import SO101LiftEnv
 from src.pickplace_env import SO101PickPlaceEnv
 from src.reach_env import SO101ReachEnv
@@ -170,6 +171,9 @@ def train(cfg: DictConfig):
                               marker_always_visible=marker_always_visible,
                               marker_include_rot=marker_include_rot,
                               prev_actions_n=prev_actions_n)
+        assert int(lift_cfg["n_substeps"]) == int(pp_cfg["n_substeps"]), \
+            "multitask envs must share a control rate for one obs_norm qvel scale"
+        n_substeps = int(lift_cfg["n_substeps"])
     else:
         env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, cfg.env_name)
         env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, obs_noise=obs_noise,
@@ -184,8 +188,22 @@ def train(cfg: DictConfig):
                               marker_always_visible=marker_always_visible,
                               marker_include_rot=marker_include_rot,
                               prev_actions_n=prev_actions_n)
+        n_substeps = int(env_cfg["n_substeps"])
 
     frame_stack = int(cfg.frame_stack)
+
+    # Fixed input normalization constants (src/obs_norm.py), tiled across
+    # stacked frames. Passed as plain lists inside policy_kwargs so they
+    # save/load cleanly with the checkpoint and real rollouts inherit the
+    # identical transform through the loaded policy.
+    if cfg.env_name == "reach":
+        obs_center, obs_scale = build_reach_obs_norm(
+            prev_actions_n, len(cfg.reach_env.waypoints),
+            float(cfg.action_scale), n_substeps)
+    else:
+        obs_center, obs_scale = build_obs_norm(
+            prev_actions_n, marker_include_rot, float(cfg.action_scale), n_substeps)
+    obs_norm = (obs_center.tolist() * frame_stack, obs_scale.tolist() * frame_stack)
 
     vec_env = SubprocVecEnv(env_fns)
     if frame_stack > 1:
@@ -270,7 +288,7 @@ def train(cfg: DictConfig):
             gamma=cfg.train.gamma,
             policy_kwargs={
                 "net_arch": list(cfg.train.net_arch),
-                "input_batchnorm": cfg.train.input_batchnorm,
+                "obs_norm": obs_norm,
             },
             stats_window_size=1,
             verbose=1,

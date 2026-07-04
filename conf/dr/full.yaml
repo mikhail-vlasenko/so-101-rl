@@ -49,10 +49,11 @@ cam_latency:
   jitter_ms: 1.5
 
 # AprilTag detector dropout: per-frame probability a geometrically-visible tag is
-# missed, so its obs goes to all-zeros (same convention as a tag turned away).
-# `near` applies in the grazing 65-70° boundary band (flakier detection), `far`
-# to tags comfortably facing the camera. Tags past 70° are always zeroed (camera
-# physics, not this knob). Losing the pose is its own cost — there is no reward term.
+# missed, so its obs freezes at the last detected pose while its age channel grows
+# (same convention as a tag turned away). `near` applies in the grazing 65-70°
+# boundary band (flakier detection), `far` to tags comfortably facing the camera.
+# Tags past 70° are always missed (camera physics, not this knob). Losing the pose
+# is its own cost — there is no reward term.
 marker_dropout:
   near: 0.02
   far: 0.01

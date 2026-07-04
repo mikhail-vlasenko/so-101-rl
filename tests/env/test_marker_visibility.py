@@ -1,15 +1,17 @@
 """Marker-visibility contract: a tag turned >70° from the tag camera, or dropped
-by the DR detector (marker_dropout), is zeroed in the obs. There is no reward
-term — losing the tag's pose is the policy's own penalty."""
+by the DR detector (marker_dropout), keeps its last detected pose in the obs
+while its per-tag age channel grows (a tag never detected since reset reads
+zero with age pinned at MARKER_AGE_CAP_S). There is no reward term — losing
+fresh pose data is the policy's own penalty."""
 
 import mujoco
 import numpy as np
 import pytest
 
 from src.base_env import (
-    MARKER_VIS_MAX_ANGLE_DEG, MARKER_VIS_MAX_HEIGHT_M, MARKER_VIS_NEAR_ANGLE_DEG,
-    N_MARKERS, marker_dropout_prob, marker_world_normals, marker_world_poses,
-    markers_visible, tag_cam_world_pos,
+    MARKER_AGE_CAP_S, MARKER_VIS_MAX_ANGLE_DEG, MARKER_VIS_MAX_HEIGHT_M,
+    MARKER_VIS_NEAR_ANGLE_DEG, N_MARKERS, marker_dropout_prob,
+    marker_world_normals, marker_world_poses, markers_visible, tag_cam_world_pos,
 )
 from src.lift_env import SO101LiftEnv
 
@@ -22,11 +24,12 @@ def _prob(data, site_ids, cam_pos, p_near, p_far):
 
 
 def _refresh_detection(env):
-    """Re-roll a camera detection of the env's current (manually posed) state —
-    what the synchronous camera does at each obs instant — and return the frame."""
-    env._cam_frame = env._process_frame(env._capture_camera_state())
-    env._set_marker_render_colors(env._cam_frame.detected)
-    return env._cam_frame
+    """Re-roll a camera detection of the env's current (manually posed) state
+    and ingest it — what the synchronous camera does at each obs instant —
+    returning the frame."""
+    frame = env._process_frame(env._capture_camera_state())
+    env._ingest_frame(env.data.time, frame)
+    return frame
 
 
 def _cfg():
@@ -113,13 +116,15 @@ def test_height_ceiling_hides_high_tag(env):
 
 
 def test_wrist_roll_sweep_flips_finger_visibility(env):
-    """Rolling the wrist must produce both visible and hidden finger-tag poses,
-    and the finger marker obs slice must be zero exactly when hidden."""
+    """Rolling the wrist must produce both visible and hidden finger-tag poses;
+    the finger obs slice must track the live pose while visible and freeze at
+    the last visible pose while hidden."""
     env.reset(seed=0)
     _pose_low(env)
     roll_idx = 4  # wrist_roll in JOINT_NAMES
     lo, hi = env.joint_low[roll_idx], env.joint_high[roll_idx]
     seen = set()
+    held = None  # expected finger slice while hidden (last visible detection)
     for roll in np.linspace(lo, hi, 25):
         env.data.qpos[env.joint_qposadr[roll_idx]] = roll
         mujoco.mj_forward(env.model, env.data)
@@ -129,15 +134,20 @@ def test_wrist_roll_sweep_flips_finger_visibility(env):
         seen.add(bool(visible[0]))
         obs = env._compute_obs()
         finger_slice = obs[MARKER_OBS_START:MARKER_OBS_START + 6]
+        pos, rot = marker_world_poses(env.data, env.marker_site_ids)
         if visible[0]:
-            assert np.any(finger_slice != 0.0)
-        else:
-            assert np.all(finger_slice == 0.0)
+            np.testing.assert_allclose(finger_slice,
+                                       np.concatenate([pos[0], rot[0]]), atol=1e-6)
+            held = finger_slice.copy()
+        elif held is not None:
+            np.testing.assert_array_equal(finger_slice, held)
     assert seen == {True, False}, "wrist_roll sweep should cover both visibility states"
 
 
-def test_hidden_marker_zeroed_after_noise():
-    """An undetected tag yields exactly zeros even with obs noise/bias active."""
+def test_hidden_marker_holds_last_measurement():
+    """An undetected tag's obs slice stays frozen at its last measured value —
+    noise and bias included, no re-noising of held poses — while its age
+    channel grows; a freshly detected tag reads age 0 (synchronous camera)."""
     noise = {"qpos_sigma": 0.01, "marker_pos_sigma": 0.005,
              "marker_rot_sigma": 0.02, "cube_sigma": 0.005}
     bias = {"qpos_sigma": 0.01, "marker_pos_sigma": 0.005,
@@ -145,17 +155,25 @@ def test_hidden_marker_zeroed_after_noise():
     env = SO101LiftEnv(env_cfg=_cfg(), obs_noise=noise, obs_bias=bias,
                        marker_include_rot=True)
     env.reset(seed=0)
+    age_start = MARKER_OBS_START + 6 * N_MARKERS
+    prev = None
     checked = 0
     for _ in range(40):
         obs, _, term, trunc, _ = env.step(env.action_space.sample())
         visible = markers_visible(env.data, env.marker_site_ids, env.tag_cam_pos)
         for i in range(N_MARKERS):
             sl = obs[MARKER_OBS_START + 6 * i:MARKER_OBS_START + 6 * (i + 1)]
-            if not visible[i]:
-                assert np.all(sl == 0.0)
+            if visible[i]:
+                assert obs[age_start + i] < 1e-4
+            elif prev is not None:
+                np.testing.assert_array_equal(
+                    sl, prev[MARKER_OBS_START + 6 * i:MARKER_OBS_START + 6 * (i + 1)])
+                assert obs[age_start + i] > 0.0
                 checked += 1
+        prev = obs
         if term or trunc:
             env.reset()
+            prev = None
     assert checked > 0, "random rollout never hid a marker; weaken the test setup"
 
 
@@ -181,16 +199,21 @@ def test_dropout_prob_bands(env):
     assert MARKER_VIS_NEAR_ANGLE_DEG == 65.0
 
 
-def test_dropout_one_zeroes_even_facing_tags():
-    """marker_dropout near=far=1.0 zeroes every tag's obs, even ones facing the
-    camera (the geometric-visibility path alone would leave them populated)."""
+def test_dropout_one_starves_even_facing_tags():
+    """marker_dropout near=far=1.0 means no tag is ever detected, even ones
+    facing the camera (the geometric-visibility path alone would detect them):
+    never-seen tags read all-zero poses with ages pinned at MARKER_AGE_CAP_S."""
     env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout={"near": 1.0, "far": 1.0},
                        marker_include_rot=True)
     env.reset(seed=0)
+    age_start = MARKER_OBS_START + 6 * N_MARKERS
     for _ in range(10):
         obs, _, term, trunc, _ = env.step(np.zeros(6, dtype=np.float32))
         markers = obs[MARKER_OBS_START:MARKER_OBS_START + 6 * N_MARKERS]
         assert np.all(markers == 0.0)
+        np.testing.assert_array_equal(obs[age_start:age_start + N_MARKERS],
+                                      np.full(N_MARKERS, MARKER_AGE_CAP_S,
+                                              dtype=np.float32))
         if term or trunc:
             break
 
@@ -211,12 +234,14 @@ def test_dropout_rate_matches_prob():
     np.testing.assert_allclose(drops / n, expected, atol=0.03)
 
 
-def test_marker_always_visible_disables_zeroing():
-    """marker_always_visible feeds every tag (no zeroing) even when geometry hides
-    it and dropout would drop it — the easy-mode crutch for training from scratch."""
+def test_marker_always_visible_disables_staleness():
+    """marker_always_visible feeds every tag fresh (never held) even when
+    geometry hides it and dropout would drop it — the easy-mode crutch for
+    training from scratch."""
     env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout={"near": 1.0, "far": 1.0},
                        marker_always_visible=True, marker_include_rot=True)
     env.reset(seed=0)
+    age_start = MARKER_OBS_START + 6 * N_MARKERS
     roll_idx = 4  # sweep wrist_roll through poses that would hide the finger tag
     lo, hi = env.joint_low[roll_idx], env.joint_high[roll_idx]
     for roll in np.linspace(lo, hi, 25):
@@ -224,8 +249,11 @@ def test_marker_always_visible_disables_zeroing():
         mujoco.mj_forward(env.model, env.data)
         assert _refresh_detection(env).detected.all()
         obs = env._compute_obs()
-        markers = obs[MARKER_OBS_START:MARKER_OBS_START + 6 * N_MARKERS]
-        assert np.any(markers != 0.0)
+        pos, rot = marker_world_poses(env.data, env.marker_site_ids)
+        expected = np.hstack([pos, rot]).flatten()
+        np.testing.assert_allclose(obs[MARKER_OBS_START:MARKER_OBS_START + 6 * N_MARKERS],
+                                   expected, atol=1e-6)
+        assert np.all(obs[age_start:age_start + N_MARKERS] < 1e-4)
 
 
 def test_marker_hidden_ratio_in_info():

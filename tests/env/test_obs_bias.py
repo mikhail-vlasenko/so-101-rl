@@ -36,8 +36,8 @@ MARKER_FINGER_POS = slice(12, 15)
 MARKER_FINGER_ROT = slice(15, 18)
 MARKER_WRIST_POS = slice(18, 21)
 MARKER_WRIST_ROT = slice(21, 24)
-CUBE = slice(24, 27)
-C2T = slice(27, 29)
+CUBE = slice(26, 29)
+C2T = slice(29, 31)
 
 
 @pytest.fixture(scope="module")

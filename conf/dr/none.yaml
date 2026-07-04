@@ -22,7 +22,7 @@ obs_bias:
 # observation pipeline, not a DR knob.)
 cam_latency: null
 
-# No stochastic detector dropout (tags past 70° are still zeroed — camera physics).
+# No stochastic detector dropout (tags past 70° still go stale — camera physics).
 marker_dropout:
   near: 0.0
   far: 0.0
