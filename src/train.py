@@ -65,6 +65,28 @@ ALGORITHM_REGISTRY = {
 }
 
 
+def resume_overrides(cfg: DictConfig) -> dict:
+    """Hyperparameters to force onto a loaded checkpoint, as load() kwargs.
+
+    SB3's load() restores every hyperparameter from the zip, so without these
+    a stage-2 curriculum override (lr, gamma, ppo.*) would be silently ignored
+    on resume. load() applies **kwargs on top of the restored attributes
+    before _setup_model(), which then rebuilds the lr schedule, clip-range
+    wrapper, and rollout/replay buffer from the new values — while the policy
+    weights still come from the checkpoint. Architecture-affecting settings
+    (policy_kwargs, obs/action spaces) must keep matching the checkpoint and
+    are deliberately absent.
+    """
+    _, algo_kwargs_fn, _ = ALGORITHM_REGISTRY[cfg.algorithm]
+    return {
+        "learning_rate": make_lr_schedule(cfg.train.lr_schedule,
+                                          cfg.train.learning_rate, cfg.train.lr_min),
+        "batch_size": cfg.train.batch_size,
+        "gamma": cfg.train.gamma,
+        **algo_kwargs_fn(cfg),
+    }
+
+
 def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1,
              obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
              marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
@@ -230,11 +252,14 @@ def train(cfg: DictConfig):
         checkpoint_path = cfg.resume
         if not os.path.isabs(checkpoint_path):
             checkpoint_path = os.path.join(orig_dir, checkpoint_path)
-        print(f"Loading checkpoint from {checkpoint_path}")
+        overrides = resume_overrides(cfg)
+        print(f"Loading checkpoint from {checkpoint_path} "
+              f"(hyperparameters re-applied from config: {sorted(overrides)})")
         model = algo_cls.load(
             checkpoint_path,
             env=env,
             tensorboard_log=os.path.join(orig_dir, "logs"),
+            **overrides,
         )
     else:
         model = algo_cls(

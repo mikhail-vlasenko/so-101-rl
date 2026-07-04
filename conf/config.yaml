@@ -5,6 +5,11 @@ defaults:
   - shaping: full     # lift careful-behavior shaping: full (default) | none (curriculum stage 1)
 
 algorithm: ppo
+# Checkpoint .zip to resume from. The composed config's hyperparameters (lr,
+# gamma, batch_size, ppo.*/sac.*) are re-applied onto the loaded model — SB3's
+# load() would otherwise silently restore the zip's values (see
+# src/train.py:resume_overrides). Obs-dim settings (prev_actions_n,
+# frame_stack, marker_include_rot) and net_arch must still match the checkpoint.
 resume: null
 deterministic: true
 seed: null
