@@ -7,7 +7,10 @@ policy code is identical sim→real; only a thin wrapper applies the calibration
 
 ## What we measure
 
-- `qpos_bias[6]` — per-joint encoder zero-offset, rad. `θ_true = θ_encoder − b_i`.
+- `qpos_bias[6]` — per-joint encoder zero-offset, rad.
+- `compliance[6]` — per-joint elastic deflection under gravity load, rad per N·m
+  (lift/elbow/wrist_flex; 0 on the rigid joints). Together:
+  `θ_true = θ_encoder − b_i − compliance_i · τ_grav,i`.
 - `cube_pos_bias[3]` — vision pipeline systematic offset in base frame, m.
 
 EE bias is *not* measured separately: EE position is computed via forward
@@ -105,8 +108,8 @@ What we learned (C922 / UVC quirks — don't relitigate):
 drives *itself* to a spread of sim-generated poses (collision-free, in-limits,
 arm tag facing the camera), captures `(encoder qpos, arm-tag tvec)`, and solves
 `qpos_bias` *jointly* with `T_base_cam` so FK(θ_enc − b) lands the tags where the
-camera sees them. One run writes both `calibration.yaml` (`qpos_bias`) and
-`extrinsics.yaml` (`t_base_cam_fixed`, `t_base_table`, `quarter_turns`).
+camera sees them. One run writes both `calibration.yaml` (`qpos_bias`, `compliance`)
+and `extrinsics.yaml` (`t_base_cam_fixed`, `t_base_table`, `quarter_turns`).
 
 Deviations from the orientation-based sketch below, deliberate for a first cut:
 - **Position-only** (tag centres), so it inherits immunity to solvePnP rvec flips
@@ -126,6 +129,14 @@ Deviations from the orientation-based sketch below, deliberate for a first cut:
   yaw of `T_base_cam` reproduces exactly (gauge-degenerate, unobservable); the
   camera absorbs it and deployment stays self-consistent. The gripper joint moves
   neither tag. The other four joints (lift/elbow/wrist_flex/wrist_roll) are solved.
+- **Gravity compliance solved too.** On top of the constant bias, the lift/elbow/
+  wrist_flex links flex elastically under gravity, so a per-joint coefficient
+  `compliance_i` (rad per N·m) is solved jointly with the bias and mounts and applied
+  as `θ_true = θ_enc − b − compliance·τ_grav(θ_enc − b)` at both solve and deployment
+  time (`real/compliance.py`). It roughly halves the residual (committed run 8.2 → 2.4
+  mm RMS; cross-validated held-out 3.6 → 2.0 mm mean, 8.2 → 4.7 mm max). The backlash
+  probe (`sysid/probe_backlash.py`) confirmed the mechanism is elastic flex, not gear
+  play (link-vs-motor hysteresis ≤0.2°).
 
 The orientation-based optimisation below is the fuller version (adds the axial
 observability and the freed mount), kept as the upgrade path if position-only
@@ -166,18 +177,22 @@ Save results to `calibration.yaml`:
 
 ```yaml
 qpos_bias:     [b1, b2, b3, b4, b5, b6]   # rad
+compliance:    [c1, c2, c3, c4, c5, c6]   # rad per N·m (0 on rigid joints)
 cube_pos_bias: [x, y, z]                   # m, base frame
 ```
 
-The real-robot wrapper, before each `policy.predict(obs)`:
+The real-robot wrapper (`ArmLoop`, `real/rollout_common.py`), on every encoder read,
+maps raw → true joint angle through the bias *and* the gravity compliance:
 
 ```python
-obs[:6]                          -= qpos_bias
-obs[cube_idx:cube_idx + 3]       -= cube_pos_bias
+q_bc   = raw_to_rad(raw) - qpos_bias
+qpos   = q_bc - compliance * τ_grav(q_bc)      # real/compliance.py
+obs[cube_idx:cube_idx + 3] -= cube_pos_bias
 ```
 
-`qvel`, `ee_pos`, and `cube_to_target` are derived: `qvel` from differentiating
-calibrated qpos, `ee_pos` from FK on calibrated qpos, `cube_to_target` from
+and inverts it on every write (fixed-point, so a hold command doesn't creep). `qvel`,
+`ee_pos`, and `cube_to_target` are derived: `qvel` from differentiating calibrated
+qpos, `ee_pos` from FK on calibrated qpos, `cube_to_target` from
 `(cube_pos − cube_pos_bias) − target`. No extra subtractions needed there.
 
 ## When to recalibrate

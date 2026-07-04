@@ -32,8 +32,8 @@ import numpy as np
 import seaborn as sns
 
 from real.calib_solve import load_samples
-from real.calibrate_qpos import DEFAULT_CAL, DEFAULT_XML, SAMPLES_PATH, paired_points
-from real.calibration import load_calibration
+from real.calibrate_qpos import DEFAULT_CAL, DEFAULT_XML, SAMPLES_PATH, _true_poses, paired_points
+from real.calibration import load_calibration, load_compliance
 from real.extrinsics import load_extrinsics
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import JOINT_NAMES, load_joint_maps
@@ -49,11 +49,12 @@ DPI = 220
 def compute_residuals(samples, model, data, qposadr, site_ids):
     """Return (p_model, resid, tags, b_full): per detection, the committed-model
     base position, the (camera - model) error vector, and the tag id. Pure
-    evaluation of the saved artifacts (calibration.yaml bias, extrinsics.yaml
-    camera, XML sites) through the settled FK — no re-solving."""
+    evaluation of the saved artifacts (calibration.yaml bias + compliance,
+    extrinsics.yaml camera, XML sites) through the settled FK — no re-solving."""
     b_full = load_calibration()
+    compliance = load_compliance()
     _, T_base_cam, _, _ = load_extrinsics()
-    corrected = [(qpos - b_full, poses) for qpos, poses in samples]
+    corrected = _true_poses(samples, model, data, qposadr, b_full, compliance)
     src, dst, tags = paired_points(corrected, model, data, qposadr, site_ids)
     R, t = T_base_cam[:3, :3], T_base_cam[:3, 3]
     p_model = dst                       # settled FK(theta_enc - bias), base frame

@@ -60,15 +60,17 @@ def _mid_raw(jm):
 
 
 def _make_loop(model, jm, bus, execute=True, slow=1.0, ema_alpha=1.0,
-               prev_actions_n=1, action_scale=0.07, qpos_bias=None):
+               prev_actions_n=1, action_scale=0.07, qpos_bias=None, compliance=None):
     # interp_hz = control rate -> one sub-target per tick, so each test tick
     # sleeps only one wall tick.
     if qpos_bias is None:
         qpos_bias = np.zeros(len(jm.items))
+    if compliance is None:
+        compliance = np.zeros(len(jm.items))
     return ArmLoop(model=model, n_substeps=10, jm=jm, bus=bus,
                    action_scale=action_scale, prev_actions_n=prev_actions_n,
                    execute=execute, ema_alpha=ema_alpha, slow=slow,
-                   interp_hz=15.0, qpos_bias=qpos_bias)
+                   interp_hz=15.0, qpos_bias=qpos_bias, compliance=compliance)
 
 
 def test_dry_run_never_writes_or_torques(model, jm):
@@ -174,6 +176,34 @@ def test_qpos_bias_subtracted_on_read_and_added_on_write(model, jm):
 
     # A below-deadzone (hold) action: target_true == qpos0, so adding the bias
     # back must round-trip to the original raw — no spurious motion from the bias.
+    loop.tick(np.zeros(6))
+    assert np.array_equal(bus.writes[-1], raw0)
+
+
+def test_compliance_applied_on_read_and_inverted_on_write(model, jm):
+    """With a non-zero gravity compliance the read subtracts the load-dependent
+    deflection (so the policy sees the deflected true angle, distinct from the
+    bias-only reading) and a hold action still round-trips to the present raw — the
+    read/write mapping stays an exact inverse to first order, so the arm doesn't drift.
+    """
+    from real.compliance import COMP_JOINTS, gravity_deflection
+
+    raw0 = _mid_raw(jm)
+    direction = np.ones(len(jm.items), dtype=np.int8)
+    bias = np.array([0.0, -0.03, 0.16, -0.08, 0.01, 0.0])
+    compliance = np.zeros(6)
+    compliance[list(COMP_JOINTS)] = [0.15, 0.07, -0.30]   # rad per N.m
+    bus = FakeBus(raw0)
+    loop = _make_loop(model, jm, bus, qpos_bias=bias, compliance=compliance)
+    qpos0 = loop.boot()
+
+    # obs qpos = (encoder angle - bias) - deflection, and the deflection is non-trivial.
+    q_bc = raw_to_rad(raw0, jm, direction) - bias
+    defl = gravity_deflection(model, loop._grav_data, jm.qposadr(), q_bc, compliance)
+    np.testing.assert_allclose(qpos0, q_bc - defl)
+    assert np.abs(defl[list(COMP_JOINTS)]).max() > np.radians(0.1)   # deflection matters
+
+    # A hold action must still command the present raw (round-trips through the inverse).
     loop.tick(np.zeros(6))
     assert np.array_equal(bus.writes[-1], raw0)
 

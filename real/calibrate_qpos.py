@@ -34,6 +34,13 @@ so the trajectory can be eyeballed before any hardware moves. With --stream-port
 --execute run streams the live annotated camera feed — same MJPEG endpoint, so the
 panel's sim-view slot shows whichever is running.
 
+Gravity compliance: on top of the constant encoder bias, the lift/elbow/wrist_flex
+links flex elastically under gravity load, so the true joint angle lags the encoder by
+`compliance * tau_grav` (per-joint, rad per N.m). Those three coefficients are solved
+jointly with the bias and mounts (see real/compliance.py, COMP_JOINTS) and written to
+calibration.yaml; deployment applies the same correction. It roughly halves the
+held-out marker residual (cross-validated 3.6 -> 2.0 mm mean, 8.2 -> 4.7 mm max).
+
 Position-only throughout (tag centres / tvec), so the solve is immune to solvePnP
 rvec flips on the small arm tags.
 
@@ -84,6 +91,7 @@ from real.calib_solve import (
 )
 from real.calibration import CALIBRATION_PATH, save_calibration
 from real.camera import open_camera
+from real.compliance import COMP_JOINTS, gravity_deflection
 from real.detect import make_detector
 from real.extrinsics import EXTRINSICS_PATH, rigid_register, save_extrinsics
 from real.marker_spec import ARM_TAG_TO_SITE, MARKER_EXPOSURE, MARKER_GAIN, TABLE_TAG_ID
@@ -567,6 +575,17 @@ def paired_points(samples, model, data, qposadr, site_ids):
     return np.array(src), np.array(dst), np.array(tags)
 
 
+def _true_poses(samples, model, data, qposadr, b_full, compliance):
+    """Map each sample's encoder qpos to the true motor pose -- subtract the constant
+    bias, then the load-dependent gravity deflection (real/compliance.py) -- leaving the
+    tag dict untouched. The settled FK in paired_points then applies gear play on top."""
+    out = []
+    for qpos, poses in samples:
+        q = qpos - b_full
+        out.append((q - gravity_deflection(model, data, qposadr, q, compliance), poses))
+    return out
+
+
 def solve_camera(samples, model, data, qposadr, site_ids):
     """T_base_cam (Umeyama) on the settled-FK tag centres; see paired_points. Position-
     only, so immune to the glue rotation and solvePnP rvec flips on the small tags.
@@ -599,42 +618,55 @@ def solve_bias(samples, model, data, qposadr, site_ids):
     return b_full
 
 
-def mount_bias_residuals(params, samples, model, data, qposadr, site_ids, nominal):
-    """Residual for the joint bias + per-tag mount-offset solve. `params` is the 4
-    observable-joint biases followed by 3 centre-offset components per tag (site_ids
-    order). Each offset shifts its tag's site to nominal+offset in the parent-body
-    frame before the settled FK, so dst is the mount-corrected base-frame tag centre;
-    the camera stays the closed-form Umeyama inner fit. The trailing MOUNT_PRIOR_W
-    terms are the XML prior, pulling every offset toward 0 so a near-degenerate
-    direction can't trade against a joint bias."""
-    n_b = len(OBSERVABLE_JOINTS)
+def _unpack_calibration(params, n_sites):
+    """Split the solver's flat parameter vector into (b_full, offsets, compliance):
+    4 observable-joint biases, then 3 centre-offset components per tag, then one
+    gravity-compliance coefficient per COMP_JOINTS joint. offsets is (n_sites, 3);
+    b_full and compliance are 6-vectors padded with 0 on the pinned/rigid joints."""
+    n_b, n_off = len(OBSERVABLE_JOINTS), 3 * n_sites
     b_full = np.zeros(6)
     b_full[list(OBSERVABLE_JOINTS)] = params[:n_b]
-    offsets = params[n_b:].reshape(len(site_ids), 3)
+    offsets = params[n_b:n_b + n_off].reshape(n_sites, 3)
+    compliance = np.zeros(6)
+    compliance[list(COMP_JOINTS)] = params[n_b + n_off:]
+    return b_full, offsets, compliance
+
+
+def mount_bias_residuals(params, samples, model, data, qposadr, site_ids, nominal):
+    """Residual for the joint bias + per-tag mount-offset + gravity-compliance solve
+    (`params` layout: see _unpack_calibration). Each offset shifts its tag's site to
+    nominal+offset in the parent-body frame and the compliance bends the motor pose
+    (real/compliance.py) before the settled FK, so dst is the fully-corrected base-frame
+    tag centre; the camera stays the closed-form Umeyama inner fit. The trailing
+    MOUNT_PRIOR_W terms are the XML prior, pulling every offset toward 0 so a
+    near-degenerate direction can't trade against a joint bias. Compliance carries no
+    prior -- it is well-observed (its per-pose torque signature is distinct from a
+    constant bias) and cross-validates."""
+    b_full, offsets, compliance = _unpack_calibration(params, len(site_ids))
     for nom, off, sid in zip(nominal, offsets, site_ids.values()):
         model.site_pos[sid] = nom + off
-    corrected = [(qpos - b_full, poses) for qpos, poses in samples]
+    corrected = _true_poses(samples, model, data, qposadr, b_full, compliance)
     src, dst, _ = paired_points(corrected, model, data, qposadr, site_ids)
     T, _ = rigid_register(src, dst)
     fit = (dst - (src @ T[:3, :3].T + T[:3, 3])).ravel()
     return np.concatenate([fit, MOUNT_PRIOR_W * offsets.ravel()])
 
 
-def solve_bias_and_mounts(samples, model, data, qposadr, site_ids):
+def solve_calibration(samples, model, data, qposadr, site_ids):
     """Solve the 4 observable joint biases jointly with each arm tag's 3D mount-centre
-    offset (XML-prior-regularised; see MOUNT_PRIOR_W). Leaves model.site_pos at the
+    offset (XML-prior-regularised; see MOUNT_PRIOR_W) and the per-joint gravity
+    compliance (COMP_JOINTS; see real/compliance.py). Leaves model.site_pos at the
     solved mounts so the caller's camera/table fit uses the same forward model, and
-    returns (b_full, offsets) with offsets {tag: 3-vector in the body frame, m}."""
+    returns (b_full, offsets, compliance) with offsets {tag: 3-vector in the body
+    frame, m} and compliance a 6-vector (rad per N.m, 0 on the rigid joints)."""
     nominal = np.array([model.site_pos[sid].copy() for sid in site_ids.values()])
-    n_b = len(OBSERVABLE_JOINTS)
-    res = least_squares(mount_bias_residuals, np.zeros(n_b + 3 * len(site_ids)),
+    n = len(OBSERVABLE_JOINTS) + 3 * len(site_ids) + len(COMP_JOINTS)
+    res = least_squares(mount_bias_residuals, np.zeros(n),
                         args=(samples, model, data, qposadr, site_ids, nominal))
-    b_full = np.zeros(6)
-    b_full[list(OBSERVABLE_JOINTS)] = res.x[:n_b]
-    offsets = res.x[n_b:].reshape(len(site_ids), 3)
+    b_full, offsets, compliance = _unpack_calibration(res.x, len(site_ids))
     for nom, off, sid in zip(nominal, offsets, site_ids.values()):
         model.site_pos[sid] = nom + off       # leave the solved mounts applied
-    return b_full, dict(zip(site_ids, offsets))
+    return b_full, dict(zip(site_ids, offsets)), compliance
 
 
 def _arm_point_keys(samples, site_ids):
@@ -721,10 +753,10 @@ def report_and_save(args, samples, model, data, jm, site_ids):
             print(f"    sample {i + 1} tag {tag} ({ARM_TAG_TO_SITE[tag]}): "
                   f"residual {e:.1f} mm")
     _, rms_before, _, _ = solve_camera(samples, model, data, qposadr, site_ids)
-    b_full, mount_offsets = solve_bias_and_mounts(samples, model, data, qposadr, site_ids)
-    corrected = [(qpos - b_full, poses) for qpos, poses in samples]
+    b_full, mount_offsets, compliance = solve_calibration(samples, model, data, qposadr, site_ids)
+    corrected = _true_poses(samples, model, data, qposadr, b_full, compliance)
 
-    # solve_bias_and_mounts left model.site_pos at the solved mounts, so the camera and
+    # solve_calibration left model.site_pos at the solved mounts, so the camera and
     # table fits below use the same mount-corrected forward model.
     T_base_cam, rms_after, tags, err_mm = solve_camera(corrected, model, data, qposadr, site_ids)
     T_base_table, t_mm, t_deg = solve_table(corrected, T_base_cam)
@@ -735,7 +767,9 @@ def report_and_save(args, samples, model, data, jm, site_ids):
     print(f"  arm-tag RMS {rms_before:.1f} mm -> {rms_after:.1f} mm over {len(tags)} points")
     for i, name in enumerate(JOINT_NAMES):
         pinned = " (pinned)" if i not in OBSERVABLE_JOINTS else ""
-        print(f"    {name:13s} bias {np.degrees(b_full[i]):+6.2f} deg{pinned}")
+        comp = (f"  compliance {np.degrees(compliance[i]):+7.2f} deg/N.m"
+                if i in COMP_JOINTS else "")
+        print(f"    {name:13s} bias {np.degrees(b_full[i]):+6.2f} deg{pinned}{comp}")
     for tag in site_ids:
         e = err_mm[tags == tag]
         print(f"    tag {tag} ({ARM_TAG_TO_SITE[tag]}): mean {e.mean():.1f} mm "
@@ -766,7 +800,7 @@ def report_and_save(args, samples, model, data, jm, site_ids):
 
     save_extrinsics(args.out, T_base_table, T_base_cam, FOCUS_ABSOLUTE,
                     len(samples), rms_after, float(np.median(t_deg)), quarter_turns)
-    save_calibration(args.cal_out, b_full, len(samples), rms_before, rms_after)
+    save_calibration(args.cal_out, b_full, compliance, len(samples), rms_before, rms_after)
     print(f"\nwrote {ARM_XML} (marker site mounts)\nwrote {args.out}\nwrote {args.cal_out}")
 
 

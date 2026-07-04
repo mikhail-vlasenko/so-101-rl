@@ -105,8 +105,8 @@
          resolves the world position via cam_xpos. The marker-visibility check
          only consumes that position; the orientation is for debug renders and
          the camera body's looks. -->
-    <body name="tag_cam_mount" pos="0.10835 -0.40545 0.18672"
-          quat="0.77488 0.62082 -0.081345 -0.086711">
+    <body name="tag_cam_mount" pos="0.109401 -0.405319 0.184598"
+          quat="0.776559 0.617584 -0.0487418 -0.114762">
       <camera name="tag_cam"/>
       <!-- Visible webcam stand-in (body + forward-facing lens). No collision
            (contype/conaffinity 0) and default group 0 so it renders but never
@@ -193,7 +193,7 @@
                    edit by hand. quat stays the by-hand estimate (in-plane glue
                    turns live in extrinsics.yaml quarter_turns). -->
               <site name="marker_wrist" type="box" group="2" size="0.01 0.01 0.0005"
-                    pos="0.00169658 -0.0220991 -0.00993431" quat="0 1 0 0" rgba="0.9 0.1 0.1 1"/>
+                    pos="0.00118019 -0.0222961 -0.0101091" quat="0 1 0 0" rgba="0.9 0.1 0.1 1"/>
               <!-- Link gripper -->
               <body name="gripper" pos="5.55112e-17 -0.0611 0.0181" quat="0.0172091 -0.0172091 0.706897 0.706897">
                 <!-- Joint from wrist to gripper -->
@@ -228,7 +228,7 @@
                      — written by real/calibrate_qpos.py; don't edit by hand.
                      quat stays the by-hand estimate (+ quarter_turns). -->
                 <site name="marker_finger" type="box" group="2" size="0.01 0.01 0.0005"
-                      pos="-0.0336971 -1.61451e-10 -0.0246547" quat="0.5 -0.5 -0.5 0.5"
+                      pos="-0.0344573 -8.59398e-07 -0.0247934" quat="0.5 -0.5 -0.5 0.5"
                       rgba="0.9 0.1 0.1 1"/>
                 <!-- Frame gripperframe -->
                 <site group="3" name="gripperframe" pos="0.012 -0.000218 -0.098127" quat="1 0 1 0"/>

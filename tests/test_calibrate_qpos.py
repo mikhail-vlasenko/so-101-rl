@@ -20,15 +20,17 @@ from real.calibrate_qpos import (
     OUTLIER_FLOOR_MM,
     _apply_gravity_slack,
     _backlash_dofs,
+    _true_poses,
     generate_poses,
     reject_outliers,
     settled_site_xpos,
     solve_bias,
-    solve_bias_and_mounts,
+    solve_calibration,
     verify_drive_safe,
     write_marker_sites,
 )
-from real.calibration import load_calibration, save_calibration
+from real.calibration import load_calibration, load_compliance, save_calibration
+from real.compliance import COMP_JOINTS, gravity_deflection
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import load_joint_maps
 from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_world_pos
@@ -68,6 +70,28 @@ def synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n, seed):
             p_base = fk_site(model, data, qposadr, qpos - b_true, sid)
             p_cam = R.T @ (p_base - t)          # invert T_base_cam: base -> camera
             poses[tag] = (np.zeros(3), p_cam)   # rvec unused by the position solve
+        samples.append((qpos, poses))
+    return samples
+
+
+def synth_samples_compliant(model, data, jm, site_ids, b_true, comp_true,
+                            T_base_cam, n, seed):
+    """Like synth_samples but the true link pose also carries a known gravity
+    compliance: q_true = (q_enc - b_true) - deflection(q_enc - b_true), so the solve
+    must recover both b_true and comp_true to invert the full forward model."""
+    rng = np.random.default_rng(seed)
+    qposadr = jm.qposadr()
+    lo, hi = jm.xml_low(), jm.xml_high()
+    R, t = T_base_cam[:3, :3], T_base_cam[:3, 3]
+    samples = []
+    for _ in range(n):
+        qpos = rng.uniform(lo, hi)
+        q_bc = qpos - b_true
+        q_true = q_bc - gravity_deflection(model, data, qposadr, q_bc, comp_true)
+        poses = {}
+        for tag, sid in site_ids.items():
+            p_base = fk_site(model, data, qposadr, q_true, sid)
+            poses[tag] = (np.zeros(3), R.T @ (p_base - t))
         samples.append((qpos, poses))
     return samples
 
@@ -127,11 +151,12 @@ def test_recovers_planted_mount_offset(setup, monkeypatch):
     samples = synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n=20, seed=11)
     model.site_pos[site_ids[wrist_tag]] = nominal                    # solver starts from XML
 
-    b_est, off_est = solve_bias_and_mounts(samples, model, data, qposadr, site_ids)
+    b_est, off_est, comp_est = solve_calibration(samples, model, data, qposadr, site_ids)
     for i in OBSERVABLE_JOINTS:
         assert abs(b_est[i] - b_true[i]) < 1e-3, f"joint {i}: {b_est[i]} vs {b_true[i]}"
     assert np.linalg.norm(off_est[wrist_tag] - wrist_off) < 5e-4, off_est[wrist_tag]
     assert np.linalg.norm(off_est[0]) < 5e-4         # finger offset stays at XML (none planted)
+    assert np.allclose(comp_est, 0.0, atol=2e-3)     # no compliance planted -> fits ~0
 
 
 def test_prior_keeps_wrist_roll_observable(setup):
@@ -146,11 +171,46 @@ def test_prior_keeps_wrist_roll_observable(setup):
     T_base_cam[:3, 3] = [0.12, -0.42, 0.15]
     samples = synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n=20, seed=12)
 
-    b_est, off_est = solve_bias_and_mounts(samples, model, data, jm.qposadr(), site_ids)
+    b_est, off_est, comp_est = solve_calibration(samples, model, data, jm.qposadr(), site_ids)
     for i in OBSERVABLE_JOINTS:
         assert abs(b_est[i] - b_true[i]) < 5e-3, f"joint {i}: {b_est[i]} vs {b_true[i]}"
     for tag in site_ids:
         assert np.linalg.norm(off_est[tag]) < 1e-3   # prior keeps a zero-offset fit at XML
+    assert np.allclose(comp_est, 0.0, atol=2e-3)     # no compliance planted -> fits ~0
+
+
+def test_recovers_planted_compliance(setup):
+    """Clean data generated WITH a known per-joint gravity compliance recovers both the
+    biases and the compliance coefficients, and a bias-only fit -- which cannot absorb
+    the load-dependent deflection -- leaves a much larger residual. Pins the
+    bias+compliance forward model and its inverse in the solve."""
+    model, data, jm, site_ids = setup
+    qposadr = jm.qposadr()
+    b_true = np.zeros(6)
+    b_true[1], b_true[2], b_true[4] = np.radians([-3.0, 9.0, -5.0])
+    comp_true = np.zeros(6)
+    comp_true[list(COMP_JOINTS)] = [0.10, 0.05, -0.20]   # rad per N.m
+    T_base_cam = np.eye(4)
+    T_base_cam[:3, :3] = Rotation.from_euler("xyz", [10, -120, 5], degrees=True).as_matrix()
+    T_base_cam[:3, 3] = [0.12, -0.42, 0.15]
+    samples = synth_samples_compliant(model, data, jm, site_ids, b_true, comp_true,
+                                      T_base_cam, n=30, seed=21)
+
+    b_est, off_est, comp_est = solve_calibration(samples, model, data, qposadr, site_ids)
+    for i in OBSERVABLE_JOINTS:
+        assert abs(b_est[i] - b_true[i]) < 5e-3, f"bias joint {i}: {b_est[i]} vs {b_true[i]}"
+    for j in COMP_JOINTS:
+        assert abs(comp_est[j] - comp_true[j]) < 5e-3, \
+            f"compliance joint {j}: {comp_est[j]} vs {comp_true[j]}"
+
+    # Compliance genuinely mattered: a bias-only fit can't explain the deflection.
+    from real.calibrate_qpos import solve_camera
+    b_only = solve_bias(samples, model, data, qposadr, site_ids)
+    corr_only = [(qpos - b_only, poses) for qpos, poses in samples]
+    _, rms_only, _, _ = solve_camera(corr_only, model, data, qposadr, site_ids)
+    corr_full = _true_poses(samples, model, data, qposadr, b_est, comp_est)
+    _, rms_full, _, _ = solve_camera(corr_full, model, data, qposadr, site_ids)
+    assert rms_full < 0.3 * rms_only, f"full {rms_full:.2f} vs bias-only {rms_only:.2f} mm"
 
 
 def test_gravity_slack_matches_dynamic_settle(setup):
@@ -316,9 +376,12 @@ def test_sweep_is_drive_safe(setup):
 
 def test_calibration_io_roundtrip(tmp_path):
     qpos_bias = np.array([0.0, -0.05, 0.16, 0.03, -0.09, 0.0])
+    compliance = np.array([0.0, 0.15, 0.07, -0.55, 0.0, 0.0])
     path = tmp_path / "calibration.yaml"
-    save_calibration(path, qpos_bias, n_samples=12, rms_before_mm=11.3, rms_after_mm=2.8)
+    save_calibration(path, qpos_bias, compliance, n_samples=12,
+                     rms_before_mm=11.3, rms_after_mm=2.8)
     assert np.allclose(load_calibration(path), qpos_bias)
+    assert np.allclose(load_compliance(path), compliance)
 
 
 SITE_XML = """<mujoco>
