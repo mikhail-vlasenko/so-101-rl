@@ -150,8 +150,18 @@ MOUNT_OFFSET_WARN_MM = 12.0  # past this the prior can't be the whole story: a t
 # clear of the tighter compliance-aware one. Threshold is robust (median + K *
 # scaled-MAD of the residual) with a floor so a tight clean fit isn't pruned. Only arm
 # tags are rejected here; the table tag's repeatability is its own gate in solve_table.
+#
+# When a tag is flagged, both arm tags at that pose share one encoder qpos and one
+# camera frame, so a pose-level fault (arm not settled, motion blur, camera bump)
+# corrupts *both* even if only one crosses the cutoff. So we also drop any co-tag at
+# the flagged pose whose residual clears a looser *companion* bar (COMPANION_K < MAD_K,
+# same median/MAD) -- corroborated as pose-level by its flagged sibling. A co-tag near
+# the clean bulk stays, so a lone-tag fluke (finger occlusion / peel, wrist fine) still
+# keeps the good tag. Companion drops fire only at an already-flagged pose, never on
+# clean data.
 OUTLIER_MAD_K = 3.5          # drop arm points past median + K * (1.4826*MAD) of the residual
 OUTLIER_FLOOR_MM = 6.0       # ...but never below this, so a clean fit isn't over-pruned
+OUTLIER_COMPANION_K = 2.0    # at a flagged pose, also drop co-tags past median + this*(1.4826*MAD)
 OUTLIER_MAX_ITERS = 5        # re-fit after each cut; a gross outlier inflates the MAD
 OUTLIER_MAX_DROP_FRAC = 0.2  # past this the capture itself is suspect -> fail loud
 
@@ -720,8 +730,10 @@ def reject_outliers(samples, model, data, qposadr, site_ids):
     on why the reject model must carry compliance). Returns (kept_samples, dropped),
     where dropped is a list of (sample_idx, tag, err_mm) on the original indices.
 
-    The table tag is never touched (solve_table needs it and gates it separately);
-    a sample that loses an arm tag is kept for its remaining tags. Fails loud if
+    A flagged tag also condemns any co-tag at the same pose that clears the looser
+    companion bar (OUTLIER_COMPANION_K), since both tags share the pose's qpos/frame;
+    a clean co-tag is kept, so a lone-tag fluke doesn't lose the good tag. The table
+    tag is never touched (solve_table needs it and gates it separately). Fails loud if
     more than OUTLIER_MAX_DROP_FRAC of the arm points would be discarded — that
     points at a bad capture (camera bumped mid-run, wrong calibration json), not a
     handful of flukes."""
@@ -740,18 +752,25 @@ def reject_outliers(samples, model, data, qposadr, site_ids):
         worst = int(np.argmax(err_mm))
         if err_mm[worst] <= cutoff:
             break
-        # Drop only the single worst point, then re-fit: a gross outlier contaminates
-        # the bias, inflating otherwise-clean residuals, so cutting all-at-once would
-        # take collateral. One-at-a-time over the iterations isolates the real ones.
-        if len(dropped) + 1 > OUTLIER_MAX_DROP_FRAC * n_points0:
+        # Drop the worst point's whole pose-level fault, then re-fit: the flagged tag
+        # plus any co-tag at that pose past the looser companion bar (both share the
+        # pose's qpos/frame). Only one pose per iteration — a gross outlier contaminates
+        # the bias, inflating otherwise-clean residuals elsewhere, so re-fitting between
+        # poses keeps the cut from taking collateral on unrelated points.
+        i = keys[worst][0]
+        companion = med + OUTLIER_COMPANION_K * 1.4826 * mad
+        condemned = sorted(
+            (keys[j][1], float(err_mm[j])) for j in range(len(keys))
+            if keys[j][0] == i and err_mm[j] > companion)   # includes worst (> cutoff > companion)
+        if len(dropped) + len(condemned) > OUTLIER_MAX_DROP_FRAC * n_points0:
             raise RuntimeError(
                 f"outlier rejection wants to drop more than "
                 f"{OUTLIER_MAX_DROP_FRAC:.0%} of {n_points0} arm points; the capture "
                 "is suspect (camera bumped mid-run, wrong calibration json, or a tag "
                 "glued askew).")
-        i, tag = keys[worst]
-        del samples[i][1][tag]
-        dropped.append((i, tag, float(err_mm[worst])))
+        for tag, e in condemned:
+            del samples[i][1][tag]
+            dropped.append((i, tag, e))
     return samples, dropped
 
 
