@@ -175,6 +175,13 @@ class ArmLoop:
         # so slower rollouts stream proportionally more, smaller sub-targets.
         self.n_interp = max(1, int(round(interp_hz * self.wall_tick)))
         self.sub_dt = self.wall_tick / self.n_interp
+        # Absolute end-of-streaming deadline (monotonic clock) for the current
+        # tick, anchored on the first tick and advanced by wall_tick each tick.
+        # Streaming paces only up to it, so the work between ticks (encoder
+        # read, predict, lockstep sim, logging) shrinks the next streaming
+        # window instead of stretching the start-to-start period — the
+        # realized control rate holds control_hz instead of drifting slow.
+        self._stream_deadline: float | None = None
 
         self._prev_actions_n = int(prev_actions_n)
         self.prev_actions = np.zeros((self._prev_actions_n, self.n_joints), dtype=np.float32)
@@ -185,6 +192,9 @@ class ArmLoop:
         # Per-tick latency telemetry (ms), set by tick(); NaN until first tick.
         self.last_stream_ms = float("nan")
         self.last_read_ms = float("nan")
+        # Streaming window this tick actually got (wall_tick minus the
+        # inter-tick overhead) — the headroom gauge before the loop saturates.
+        self.last_window_ms = float("nan")
 
     def describe(self) -> str:
         return (f"execute={self.execute} {self.control_hz:.1f}Hz "
@@ -236,9 +246,10 @@ class ArmLoop:
             self.bus.write_all(raw, SERVO_SPEED, SERVO_ACCEL)
 
     def tick(self, action: np.ndarray) -> np.ndarray:
-        """Shape and execute one policy action; paces the full wall tick via
-        sub-target streaming, then reads the arm back into qpos/qvel. Returns
-        the (clipped, EMA-smoothed) action actually applied — log this one."""
+        """Shape and execute one policy action; paces sub-target streaming to
+        an absolute per-tick deadline (start-to-start period = wall tick),
+        then reads the arm back into qpos/qvel. Returns the (clipped,
+        EMA-smoothed) action actually applied — log this one."""
         action = np.clip(action.astype(np.float64), -1.0, 1.0)
         if self._action_ema is None:
             self._action_ema = action.copy()
@@ -257,10 +268,27 @@ class ArmLoop:
                                        self.xml_low, self.xml_high)
         target_raw = self._true_to_encoder_raw(target_qpos)
         target_raw = clamp_raw_delta(self.prev_raw_target, target_raw, self.max_raw_delta)
+        now = time.monotonic()
+        if self._stream_deadline is None:
+            # First tick: anchor the schedule; stream over the full wall tick.
+            self._stream_deadline = now + self.wall_tick
+        elif now >= self._stream_deadline:
+            # The work between ticks overran the entire streaming window (a
+            # stall, not normal overhead). Re-anchor at `now` and drop the
+            # schedule debt instead of bursting to catch up: back-to-back
+            # ticks would move the arm a full per-tick raw delta in far less
+            # than a tick of wall time.
+            self._stream_deadline = now
+        window = self._stream_deadline - now
+        # On a zero window, one immediate write of the final target — not
+        # n_interp back-to-back bus writes.
+        n_interp = self.n_interp if window > 0.0 else 1
         t0 = time.perf_counter()
-        stream_sub_targets(self.prev_raw_target, target_raw, self.n_interp,
-                           self.sub_dt, self._write_raw)
+        stream_sub_targets(self.prev_raw_target, target_raw, n_interp,
+                           window / n_interp, self._write_raw)
         self.last_stream_ms = (time.perf_counter() - t0) * 1e3
+        self.last_window_ms = window * 1e3
+        self._stream_deadline += self.wall_tick
         self.prev_raw_target = target_raw
 
         t0 = time.perf_counter()

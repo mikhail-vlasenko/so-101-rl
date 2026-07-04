@@ -4,6 +4,8 @@ training (action_to_target quantization + deadzone), gate all writes on
 execute, and report sim-time velocities regardless of --slow.
 """
 
+import time
+
 import mujoco
 import numpy as np
 import pytest
@@ -60,9 +62,10 @@ def _mid_raw(jm):
 
 
 def _make_loop(model, jm, bus, execute=True, slow=1.0, ema_alpha=1.0,
-               prev_actions_n=1, action_scale=0.07, qpos_bias=None, compliance=None):
-    # interp_hz = control rate -> one sub-target per tick, so each test tick
-    # sleeps only one wall tick.
+               prev_actions_n=1, action_scale=0.07, qpos_bias=None, compliance=None,
+               interp_hz=15.0):
+    # Default interp_hz = control rate -> one sub-target per tick, so each
+    # test tick sleeps only one wall tick.
     if qpos_bias is None:
         qpos_bias = np.zeros(len(jm.items))
     if compliance is None:
@@ -70,7 +73,7 @@ def _make_loop(model, jm, bus, execute=True, slow=1.0, ema_alpha=1.0,
     return ArmLoop(model=model, n_substeps=10, jm=jm, bus=bus,
                    action_scale=action_scale, prev_actions_n=prev_actions_n,
                    execute=execute, ema_alpha=ema_alpha, slow=slow,
-                   interp_hz=15.0, qpos_bias=qpos_bias, compliance=compliance)
+                   interp_hz=interp_hz, qpos_bias=qpos_bias, compliance=compliance)
 
 
 def test_dry_run_never_writes_or_torques(model, jm):
@@ -218,3 +221,50 @@ def test_boot_aborts_on_pose_outside_calibration(model, jm):
     with pytest.raises(SystemExit):
         loop.boot()
     assert not bus.torque_on
+
+
+def test_tick_period_absorbs_inter_tick_overhead(model, jm):
+    """The start-to-start period must hold wall_tick: the work between ticks
+    (encoder read, predict, lockstep sim, logging) shrinks the streaming
+    window instead of stretching the period."""
+    bus = FakeBus(_mid_raw(jm))
+    loop = _make_loop(model, jm, bus, execute=True)
+    loop.boot()
+    overhead = 0.020  # ~3x the overhead measured on real rollouts
+    starts = []
+    for _ in range(4):
+        starts.append(time.monotonic())
+        loop.tick(np.full(6, 0.2))
+        time.sleep(overhead)  # stand-in for the inter-tick work
+    periods = np.diff(starts)
+    # The first period is stretched (the schedule anchors at the first tick
+    # with a full window); steady state must hold wall_tick, not
+    # wall_tick + overhead.
+    np.testing.assert_allclose(periods[1:], loop.wall_tick, atol=0.010)
+    # The telemetry shows the overhead eaten out of the streaming window.
+    assert loop.last_window_ms < loop.wall_tick * 1e3 - overhead * 1e3 / 2
+
+
+def test_stall_reanchors_without_burst(model, jm):
+    """After a stall longer than a whole tick the late action must be written
+    through immediately (one write, not n_interp back-to-back), and the
+    schedule must re-anchor so the next tick spans a full wall tick again —
+    never a burst of back-to-back per-tick deltas."""
+    bus = FakeBus(_mid_raw(jm))
+    loop = _make_loop(model, jm, bus, execute=True, interp_hz=100.0)
+    assert loop.n_interp > 1
+    loop.boot()
+    action = np.full(6, 0.2)
+    loop.tick(action)                    # anchors; paces a full wall tick
+    n_writes_paced = len(bus.writes)
+    assert n_writes_paced == loop.n_interp
+    time.sleep(loop.wall_tick + 0.030)   # stall: overran the whole window
+    t0 = time.monotonic()
+    loop.tick(action)                    # late: immediate write-through
+    t1 = time.monotonic()
+    assert len(bus.writes) == n_writes_paced + 1
+    assert t1 - t0 < 0.5 * loop.wall_tick
+    loop.tick(action)                    # re-anchored: full window again
+    t2 = time.monotonic()
+    assert len(bus.writes) == n_writes_paced + 1 + loop.n_interp
+    np.testing.assert_allclose(t2 - t0, loop.wall_tick, atol=0.010)

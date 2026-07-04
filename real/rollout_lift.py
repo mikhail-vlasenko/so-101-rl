@@ -187,7 +187,7 @@ def plot_rollout(out_path: Path, rows: list[dict], target_height: float,
 def print_latency_summary(rows: list[dict]) -> None:
     """Per-component latency breakdown over the rollout (ms). NaN-only components
     (e.g. camera stats under --marker-source fk) print 'n/a'."""
-    keys = ["loop_ms", "predict_ms", "read_all_ms", "stream_ms",
+    keys = ["loop_ms", "predict_ms", "read_all_ms", "stream_ms", "window_ms",
             "marker_age_ms", "cam_read_ms", "detect_ms"]
     print("latency summary (ms):")
     for key in keys:
@@ -205,7 +205,7 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
               + [f"action_{n}" for n in JOINT_NAMES]
               + [f"qpos_{n}" for n in JOINT_NAMES]
               + ["ee_x", "ee_y", "ee_z", "cube_x", "cube_y", "cube_z", "grasped_sim",
-                 "loop_ms", "predict_ms", "read_all_ms", "stream_ms",
+                 "loop_ms", "predict_ms", "read_all_ms", "stream_ms", "window_ms",
                  "marker_age_ms", "cam_read_ms", "detect_ms"])
     with out_path.open("w", newline="") as f:
         w = csv.writer(f)
@@ -219,6 +219,7 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
                         int(r["grasped"]),
                         f"{r['loop_ms']:.2f}", f"{r['predict_ms']:.3f}",
                         f"{r['read_all_ms']:.2f}", f"{r['stream_ms']:.2f}",
+                        f"{r['window_ms']:.2f}",
                         f"{r['marker_age_ms']:.2f}", f"{r['cam_read_ms']:.2f}",
                         f"{r['detect_ms']:.2f}"])
 
@@ -390,6 +391,7 @@ def main() -> int:
                 "ee": ee_pos.copy(), "cube": cube_pos.copy(), "grasped": grasped_sim,
                 "loop_ms": loop_ms, "predict_ms": predict_ms,
                 "read_all_ms": loop.last_read_ms, "stream_ms": loop.last_stream_ms,
+                "window_ms": loop.last_window_ms,
                 "marker_age_ms": marker_age_ms, "cam_read_ms": cam_read_ms,
                 "detect_ms": detect_ms,
             })
@@ -408,7 +410,8 @@ def main() -> int:
                 print(f"step={step:3d}  ee-cube={ee_cube:.3f}m  "
                       f"cube_z={cube_pos[2]:.3f}m  grasped_sim={int(grasped_sim)}")
                 lat = (f"          lat[ms]: loop={loop_ms:.0f} predict={predict_ms:.2f} "
-                       f"read_all={loop.last_read_ms:.0f} stream={loop.last_stream_ms:.0f}")
+                       f"read_all={loop.last_read_ms:.0f} stream={loop.last_stream_ms:.0f} "
+                       f"window={loop.last_window_ms:.0f}")
                 if marker_source is not None:
                     lat += (f" | cam age={marker_age_ms:.0f} "
                             f"read={cam_read_ms:.0f} detect={detect_ms:.0f}")
