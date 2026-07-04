@@ -24,7 +24,7 @@ from src.base_env import JOINT_NAMES
 from src.servo_profile import ServoProfile
 from src.units import max_raw_delta_per_step, raw_units_to_rad
 from sysid.io import OUT_DIR_SIM, REPO_ROOT, write_log
-from sysid.trajectories import SYSID_DT, SYSID_HZ, TRAJECTORIES
+from sysid.trajectories import SETTLE_S, SYSID_DT, SYSID_HZ, TRAJECTORIES
 
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 CONFIG_YAML = REPO_ROOT / "conf" / "config.yaml"
@@ -74,6 +74,13 @@ def run_one(model: mujoco.MjModel, data: mujoco.MjData, traj: np.ndarray,
         assert model.na == n_joints, f"na={model.na} but n_joints={n_joints}"
         data.act[:] = traj[0]
     mujoco.mj_forward(model, data)
+
+    # Settle at traj[0] for SETTLE_S like record_real does on the bus: the
+    # real arm's first logged tick starts from its gravity-sagged equilibrium,
+    # not from traj[0] exactly, and without this hold every gravity-loaded
+    # trajectory would open with a sag transient the fit mistakes for dynamics.
+    for _ in range(int(round(SETTLE_S / model.opt.timestep))):
+        mujoco.mj_step(model, data)
 
     cmds = clamp_traj(traj, max_delta_rad)
     profile = ServoProfile(n_joints)

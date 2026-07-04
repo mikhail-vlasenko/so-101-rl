@@ -5,7 +5,7 @@ import pytest
 
 from src.lift_env import (
     SO101LiftEnv, CUBE_MOTION_COEFF, CUBE_MOTION_DEADZONE,
-    HEIGHT_PROGRESS_COEFF, GRASP_HOLD_REWARD, TIME_PENALTY,
+    HEIGHT_PROGRESS_COEFF, GRASP_HOLD_REWARD, LIFT_BONUS, TIME_PENALTY,
     EE_CUBE_COEFF, JAW_CONTACT_REWARD, GRIPPER_CLOSE_COEFF,
 )
 
@@ -62,17 +62,39 @@ def test_height_progress_gated_on_grasp(monkeypatch):
 def test_height_progress_credited_when_grasped():
     env = SO101LiftEnv(env_cfg=_cfg())
     env.reset(seed=0)
-    env._prev_cube_pos = np.array([0.2, 0.0, 0.05])
-    cube_pos = np.array([0.2, 0.0, 0.10])
-    reward, _, _ = env._compute_step(
-        ee_pos=np.array([0.2, 0.0, 0.10]),
+    # Stay below target_height=0.10 so this tests progress credit, not termination.
+    env._prev_cube_pos = np.array([0.2, 0.0, 0.04])
+    cube_pos = np.array([0.2, 0.0, 0.09])
+    reward, terminated, _ = env._compute_step(
+        ee_pos=np.array([0.2, 0.0, 0.09]),
         cube_pos=cube_pos,
         ee_cube_dist=0.0,
         grasped=True,
         floor_contact=False,
     )
+    assert not terminated
     # Expected: TIME_PENALTY + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF*0.05
     assert reward == pytest.approx(-0.05 + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF * 0.05)
+
+
+def test_lift_success_bonus():
+    """Crossing target_height while grasped terminates AND pays LIFT_BONUS —
+    finishing must strictly beat holding just under the target (see lift_env.py)."""
+    env = SO101LiftEnv(env_cfg=_cfg())
+    env.reset(seed=0)
+    env._prev_cube_pos = np.array([0.2, 0.0, 0.09])
+    cube_pos = np.array([0.2, 0.0, 0.11])  # crosses target_height=0.10
+    reward, terminated, info = env._compute_step(
+        ee_pos=np.array([0.2, 0.0, 0.11]),
+        cube_pos=cube_pos,
+        ee_cube_dist=0.0,
+        grasped=True,
+        floor_contact=False,
+    )
+    assert terminated
+    assert info["lift_success"]
+    assert reward == pytest.approx(
+        -0.05 + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF * 0.02 + LIFT_BONUS)
 
 
 def test_floor_proximity_penalty(monkeypatch):

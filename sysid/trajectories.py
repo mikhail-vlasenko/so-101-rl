@@ -35,6 +35,15 @@ from src.base_env import JOINT_NAMES
 SYSID_HZ = 15.0
 SYSID_DT = 1.0 / SYSID_HZ
 
+# Hold at traj[0] before logging starts: long enough for the servo's slow
+# accel ramp to close the homing lag and for stiction / gravity sag to settle
+# — the stretch_* trajectories start gravity-loaded, so an unsettled start
+# would leak a startup transient into the first logged ticks. Shared by
+# record_real (real bus) and replay_sim (sim) so both sides log from the same
+# settled state; a sim that skips it starts exactly AT traj[0] and the fit
+# would chase the real arm's sag as if it were dynamics.
+SETTLE_S = 1.0
+
 HOME = np.array([0.0, -1.4, 1.2, 0.0, 0.0, 0.5], dtype=np.float64)
 # Arm straight out forward, horizontal: EE at (0.39, 0, 0.25) m — peak gravity
 # moment on shoulder_lift and elbow_flex, peak inertia about the pan axis.

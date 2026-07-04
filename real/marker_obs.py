@@ -61,33 +61,50 @@ class CameraMarkerSource:
         self._stop = threading.Event()
         self._cap = None
         self._thread = None
+        self.error = None      # set if the capture loop dies; readers re-raise it
 
     def start(self) -> None:
         self._cap = open_camera(focus=self.focus, exposure=MARKER_EXPOSURE, gain=MARKER_GAIN)
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+        # Block until the first frame lands so a camera that never delivers
+        # fails loud here instead of serving zeroed poses (and NaN staleness,
+        # which no downstream age gate would catch) for the whole rollout.
+        deadline = time.monotonic() + 5.0
+        while True:
+            if self.error is not None:
+                raise self.error
+            with self._lock:
+                if self._recv_t is not None:
+                    return
+            if time.monotonic() > deadline:
+                raise RuntimeError("no camera frame within 5 s of start()")
+            time.sleep(0.01)
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
-            t_read = time.monotonic()
-            ok, frame = self._cap.read()
-            t_recv = time.monotonic()
-            if not ok:
-                continue
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            t_det = time.monotonic()
-            poses = {d.id: self.estimator.estimate(d)
-                     for d in self.detector.detect(gray) if d.id in self._wanted}
-            detect_ms = (time.monotonic() - t_det) * 1e3
-            pos, rot = self._poses_to_base(poses)
-            with self._lock:
-                self._pos = pos
-                self._rot = rot
-                self._recv_t = t_recv
-                self._read_ms = (t_recv - t_read) * 1e3
-                self._detect_ms = detect_ms
-            if self._on_frame is not None:
-                self._on_frame(t_recv, pos, rot, detect_ms)
+        try:
+            while not self._stop.is_set():
+                t_read = time.monotonic()
+                ok, frame = self._cap.read()
+                t_recv = time.monotonic()
+                if not ok:
+                    raise RuntimeError("camera read failed mid-session")
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                t_det = time.monotonic()
+                poses = {d.id: self.estimator.estimate(d)
+                         for d in self.detector.detect(gray) if d.id in self._wanted}
+                detect_ms = (time.monotonic() - t_det) * 1e3
+                pos, rot = self._poses_to_base(poses)
+                with self._lock:
+                    self._pos = pos
+                    self._rot = rot
+                    self._recv_t = t_recv
+                    self._read_ms = (t_recv - t_read) * 1e3
+                    self._detect_ms = detect_ms
+                if self._on_frame is not None:
+                    self._on_frame(t_recv, pos, rot, detect_ms)
+        except Exception as exc:   # surface to the consumer thread; a dead camera
+            self.error = exc       # must fail loud, not freeze the last poses
 
     def _poses_to_base(self, poses: dict) -> tuple[np.ndarray, np.ndarray]:
         """Camera-frame tag poses -> base-frame (pos (N,3), rot (N,3));
@@ -105,7 +122,11 @@ class CameraMarkerSource:
         return pos, rot
 
     def marker_poses(self) -> tuple[np.ndarray, np.ndarray]:
-        """(pos (N,3), rot (N,3)) in the base frame for the most recent frame."""
+        """(pos (N,3), rot (N,3)) in the base frame for the most recent frame.
+        Re-raises any exception that killed the capture thread — otherwise a
+        dead camera would silently serve the last snapshot forever."""
+        if self.error is not None:
+            raise self.error
         with self._lock:
             return self._pos.copy(), self._rot.copy()
 
@@ -119,6 +140,8 @@ class CameraMarkerSource:
         fresh frames; near-zero while detect_ms is large means the driver queue
         is feeding backlog and the buffer isn't draining. All NaN before the
         first frame lands."""
+        if self.error is not None:
+            raise self.error
         with self._lock:
             recv_t = self._recv_t
             read_ms = self._read_ms

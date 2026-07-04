@@ -14,6 +14,14 @@ TIME_PENALTY = -0.05
 EE_CUBE_COEFF = -0.5
 GRASP_HOLD_REWARD = 0.15         # a static grasp must strictly beat the pre-grasp shaping rungs
 HEIGHT_PROGRESS_COEFF = 200.0    # credited only while grasped
+# Terminal bonus for a grasped lift to target_height. Holding just under the
+# target nets ~+0.09/step (grasp hold minus time and ee-dist penalties) forever,
+# while crossing the last millimeter pays 200 * 0.001 = 0.2 once and ends the
+# episode — so without this bonus the optimal policy hovers instead of
+# finishing. Must clearly beat the discounted hold annuity: at gamma=0.99 over
+# a full 300-step episode that's ~= 0.09/(1-0.99) ~= 9; re-check if gamma or
+# GRASP_HOLD_REWARD changes.
+LIFT_BONUS = 15.0
 # Contact-quality bridge reach -> grasp (the gradient out of the local optima).
 # Both rungs are gated on real cube↔jaw contact so the bonus can't be farmed by
 # shoving the sponge with a closed gripper near it (which is what proximity-only
@@ -86,6 +94,8 @@ class SO101LiftEnv(SO101BaseEnv):
         # or a knock-up from counting as a lift, and keeps mean episode length an
         # honest "time to a clean first-try lift" signal.
         terminated = grasped and cube_pos[2] >= self.target_height
+        if terminated:
+            reward += LIFT_BONUS
 
         info = {
             "ee_cube_dist": ee_cube_dist,

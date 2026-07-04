@@ -64,6 +64,13 @@ LOG_DIR = REPO_ROOT / "logs" / "ppo_lift"
 
 LIFT_TASK_ID = 0.0
 
+# Abort if the newest camera frame is older than this when the policy consumes
+# it. In-distribution staleness is <= ~90 ms (42-52 ms pipeline delay plus up
+# to one 33 ms frame interval — conf/dr/full.yaml); a frame this old means the
+# camera or capture thread stalled and the policy would be steering the arm on
+# frozen marker poses.
+MAX_MARKER_AGE_S = 0.25
+
 
 def parse_args(lift_cfg: dict) -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -307,6 +314,11 @@ def main() -> int:
                 # Latency of the frame those poses came from, sampled the instant
                 # the policy consumes it.
                 stale_s, cam_read_ms, detect_ms = marker_source.frame_stats()
+                if stale_s > MAX_MARKER_AGE_S:
+                    raise SystemExit(
+                        f"ABORT: marker frame is {stale_s * 1e3:.0f} ms old "
+                        f"(limit {MAX_MARKER_AGE_S * 1e3:.0f} ms); camera "
+                        f"pipeline stalled.")
                 marker_age_ms = stale_s * 1e3
             else:
                 marker_pos, marker_rot = marker_world_poses(data, marker_site_ids)

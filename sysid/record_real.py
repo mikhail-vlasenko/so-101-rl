@@ -38,16 +38,12 @@ from real.twin.mapping import JointMaps, load_joint_maps, rad_to_raw, raw_to_rad
 from real.twin.servo_io import ServoBus
 from src.units import max_raw_delta_per_step
 from sysid.io import OUT_DIR_REAL, REPO_ROOT, write_log
-from sysid.trajectories import SYSID_DT, SYSID_HZ, TRAJECTORIES
+from sysid.trajectories import SETTLE_S, SYSID_DT, SYSID_HZ, TRAJECTORIES
 
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 DEFAULT_CAL = REPO_ROOT.parent / "feetech-servo-sdk" / "calibration.json"
 CONFIG_YAML = REPO_ROOT / "conf" / "config.yaml"
 HOMING_S = 3.0
-# Long enough for the servo's slow accel ramp to close the homing lag and for
-# stiction to settle — the stretch_* trajectories start gravity-loaded, so an
-# unsettled start would leak the homing transient into the first logged ticks.
-SETTLE_S = 1.0
 
 # Sub-target interpolation across each sysid tick, mirroring ArmLoop: the
 # servo profile chases a fresh waypoint every few ms instead of one coarse
