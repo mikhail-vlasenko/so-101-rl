@@ -282,6 +282,28 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         supports_stream=True,
     ),
     ScriptSpec(
+        id="probe_cam_latency", title="Probe camera latency", page="sysid",
+        module="sysid.probe_cam_latency", arg_style="argparse",
+        description="Cross-correlate encoder-FK tag positions against camera-measured "
+                    "ones to recover the camera pipeline delay (feeds cam_latency.delay_ms "
+                    "in conf/dr). Execute drives a sine on the chosen joint — the reliable "
+                    "mode; dry-run records a hand-wiggle, a rough check only (back-driving "
+                    "defeats the encoder ground truth).",
+        args=(
+            ArgSpec("--execute", "flag", "Drive the sine on real servos (default: hand-wiggle)"),
+            ArgSpec("--joint", "choice", "Joint to drive", default="wrist_flex",
+                    choices=("shoulder_pan", "shoulder_lift", "elbow_flex",
+                             "wrist_flex", "wrist_roll", "gripper")),
+            ArgSpec("--amp", "float", "Sine amplitude (rad)", default="0.25"),
+            ArgSpec("--freq", "float", "Sine frequency (Hz)", default="0.4"),
+            ArgSpec("--seconds", "float", "Recording length (s)", default="30"),
+            ArgSpec("--port", "str", "Serial port", default="/dev/ttyACM0"),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+        ),
+        resources=(Resource.CAMERA, Resource.SERIAL),
+    ),
+    ScriptSpec(
         id="sysid_replay", title="Replay in sim", page="sysid",
         module="sysid.replay_sim", arg_style="argparse",
         description="Replay recorded trajectories through the sim model.",

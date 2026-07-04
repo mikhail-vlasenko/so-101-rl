@@ -34,7 +34,7 @@ from src.base_env import MARKER_SITE_NAMES, N_MARKERS
 class CameraMarkerSource:
     """Threaded camera → base-frame marker poses. start() → marker_poses() → stop()."""
 
-    def __init__(self, family: str = "apriltag"):
+    def __init__(self, family: str = "apriltag", on_frame=None):
         # focus from the calibration: the extrinsics (and intrinsics) are only
         # valid at the focus they were solved at, so we open the lens there.
         # quarter_turns un-rotate each tag's measured pose to the sim convention.
@@ -45,9 +45,15 @@ class CameraMarkerSource:
         site_to_tag = {site: tag for tag, site in ARM_TAG_TO_SITE.items()}
         self.slot_tags = [site_to_tag[name] for name in MARKER_SITE_NAMES]
         self._wanted = set(ARM_TAG_TO_SITE) | {TABLE_TAG_ID}
-        self._latest: dict = {}
-        # Latency telemetry for the most recent processed frame; written under
-        # _lock alongside _latest so a reader gets a consistent snapshot.
+        # Called from the capture thread after every processed frame with
+        # (t_recv, pos (N,3), rot (N,3), detect_ms) — base-frame poses,
+        # undetected tags zeroed. Lets a recorder (sysid/probe_cam_latency.py)
+        # timestamp every frame instead of polling for the newest one.
+        self._on_frame = on_frame
+        # Most recent base-frame poses + latency telemetry; written under _lock
+        # together so a reader gets a consistent snapshot of one frame.
+        self._pos = np.zeros((N_MARKERS, 3))
+        self._rot = np.zeros((N_MARKERS, 3))
         self._recv_t: float | None = None
         self._read_ms = float("nan")
         self._detect_ms = float("nan")
@@ -73,18 +79,19 @@ class CameraMarkerSource:
             poses = {d.id: self.estimator.estimate(d)
                      for d in self.detector.detect(gray) if d.id in self._wanted}
             detect_ms = (time.monotonic() - t_det) * 1e3
+            pos, rot = self._poses_to_base(poses)
             with self._lock:
-                # Whole-dict swap + matching telemetry: readers never see a
-                # partial update or stats from a different frame.
-                self._latest = poses
+                self._pos = pos
+                self._rot = rot
                 self._recv_t = t_recv
                 self._read_ms = (t_recv - t_read) * 1e3
                 self._detect_ms = detect_ms
+            if self._on_frame is not None:
+                self._on_frame(t_recv, pos, rot, detect_ms)
 
-    def marker_poses(self) -> tuple[np.ndarray, np.ndarray]:
-        """(pos (N,3), rot (N,3)) in the base frame; undetected/un-anchored tags zeroed."""
-        with self._lock:
-            poses = self._latest
+    def _poses_to_base(self, poses: dict) -> tuple[np.ndarray, np.ndarray]:
+        """Camera-frame tag poses -> base-frame (pos (N,3), rot (N,3));
+        undetected/un-anchored tags zeroed."""
         pos = np.zeros((N_MARKERS, 3))
         rot = np.zeros((N_MARKERS, 3))
         if TABLE_TAG_ID not in poses:
@@ -96,6 +103,11 @@ class CameraMarkerSource:
                 T_cam_tag = rt_to_mat(*poses[tag]) @ quarter_turn_mat(-self.quarter_turns[tag])
                 pos[i], rot[i] = mat_to_pos_rotvec(T_base_cam @ T_cam_tag)
         return pos, rot
+
+    def marker_poses(self) -> tuple[np.ndarray, np.ndarray]:
+        """(pos (N,3), rot (N,3)) in the base frame for the most recent frame."""
+        with self._lock:
+            return self._pos.copy(), self._rot.copy()
 
     def frame_stats(self) -> tuple[float, float, float]:
         """(staleness_s, read_ms, detect_ms) for the most recent processed frame.

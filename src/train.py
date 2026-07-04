@@ -66,25 +66,25 @@ ALGORITHM_REGISTRY = {
 
 
 def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1,
-             obs_noise=None, obs_latency=0, obs_bias=None, marker_dropout=None,
+             obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
              marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
     """Create an env instance from class, config, and XML path."""
     return env_cls(render_mode=render_mode, env_cfg=env_cfg,
                    slow_factor=slow_factor, xml_path=xml_path,
-                   obs_noise=obs_noise, obs_latency=obs_latency, obs_bias=obs_bias,
+                   obs_noise=obs_noise, cam_latency=cam_latency, obs_bias=obs_bias,
                    marker_dropout=marker_dropout,
                    marker_always_visible=marker_always_visible,
                    marker_include_rot=marker_include_rot,
                    prev_actions_n=prev_actions_n)
 
 
-def _make_env_fn(env_cls, env_cfg, xml_path, obs_noise=None, obs_latency=0,
+def _make_env_fn(env_cls, env_cfg, xml_path, obs_noise=None, cam_latency=None,
                  obs_bias=None, marker_dropout=None, marker_always_visible=False,
                  marker_include_rot=False, prev_actions_n=2):
     """Factory closure for SubprocVecEnv."""
     def _init():
         return Monitor(env_cls(env_cfg=env_cfg, xml_path=xml_path,
-                               obs_noise=obs_noise, obs_latency=obs_latency,
+                               obs_noise=obs_noise, cam_latency=cam_latency,
                                obs_bias=obs_bias, marker_dropout=marker_dropout,
                                marker_always_visible=marker_always_visible,
                                marker_include_rot=marker_include_rot,
@@ -114,7 +114,8 @@ def train(cfg: DictConfig):
     n_envs = cfg.train.n_envs
 
     obs_noise = OmegaConf.to_container(cfg.obs_noise, resolve=True)
-    obs_latency = int(cfg.obs_latency)
+    cam_latency = (OmegaConf.to_container(cfg.cam_latency, resolve=True)
+                   if cfg.cam_latency is not None else None)
     obs_bias = OmegaConf.to_container(cfg.obs_bias, resolve=True)
     marker_dropout = OmegaConf.to_container(cfg.marker_dropout, resolve=True)
     marker_always_visible = bool(cfg.marker_always_visible)
@@ -127,13 +128,13 @@ def train(cfg: DictConfig):
         n_lift = round(n_envs * cfg.lift_ratio)
         env_fns = [
             _make_env_fn(lift_cls, lift_cfg, lift_xml, obs_noise=obs_noise,
-                         obs_latency=obs_latency, obs_bias=obs_bias,
+                         cam_latency=cam_latency, obs_bias=obs_bias,
                          marker_dropout=marker_dropout,
                          marker_always_visible=marker_always_visible,
                          marker_include_rot=marker_include_rot,
                          prev_actions_n=prev_actions_n) if i < n_lift
             else _make_env_fn(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise,
-                              obs_latency=obs_latency, obs_bias=obs_bias,
+                              cam_latency=cam_latency, obs_bias=obs_bias,
                               marker_dropout=marker_dropout,
                               marker_always_visible=marker_always_visible,
                               marker_include_rot=marker_include_rot,
@@ -142,7 +143,7 @@ def train(cfg: DictConfig):
         ]
         # Eval on pickplace (the harder task)
         eval_inner = make_env(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise,
-                              obs_latency=obs_latency, obs_bias=obs_bias,
+                              cam_latency=cam_latency, obs_bias=obs_bias,
                               marker_dropout=marker_dropout,
                               marker_always_visible=marker_always_visible,
                               marker_include_rot=marker_include_rot,
@@ -150,13 +151,13 @@ def train(cfg: DictConfig):
     else:
         env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, cfg.env_name)
         env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, obs_noise=obs_noise,
-                                obs_latency=obs_latency, obs_bias=obs_bias,
+                                cam_latency=cam_latency, obs_bias=obs_bias,
                                 marker_dropout=marker_dropout,
                                 marker_always_visible=marker_always_visible,
                                 marker_include_rot=marker_include_rot,
                                 prev_actions_n=prev_actions_n) for _ in range(n_envs)]
         eval_inner = make_env(env_cls, env_cfg, xml_path, obs_noise=obs_noise,
-                              obs_latency=obs_latency, obs_bias=obs_bias,
+                              cam_latency=cam_latency, obs_bias=obs_bias,
                               marker_dropout=marker_dropout,
                               marker_always_visible=marker_always_visible,
                               marker_include_rot=marker_include_rot,

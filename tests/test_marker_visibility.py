@@ -8,9 +8,25 @@ import pytest
 
 from src.base_env import (
     MARKER_VIS_MAX_ANGLE_DEG, MARKER_VIS_MAX_HEIGHT_M, MARKER_VIS_NEAR_ANGLE_DEG,
-    N_MARKERS, marker_dropout_prob, markers_visible, tag_cam_world_pos,
+    N_MARKERS, marker_dropout_prob, marker_world_normals, marker_world_poses,
+    markers_visible, tag_cam_world_pos,
 )
 from src.lift_env import SO101LiftEnv
+
+
+def _prob(data, site_ids, cam_pos, p_near, p_far):
+    """marker_dropout_prob evaluated at the current MjData pose."""
+    pos, _ = marker_world_poses(data, site_ids)
+    normals = marker_world_normals(data, site_ids)
+    return marker_dropout_prob(pos, normals, cam_pos, p_near, p_far)
+
+
+def _refresh_detection(env):
+    """Re-roll a camera detection of the env's current (manually posed) state —
+    what the synchronous camera does at each obs instant — and return the frame."""
+    env._cam_frame = env._process_frame(env._capture_camera_state())
+    env._set_marker_render_colors(env._cam_frame.detected)
+    return env._cam_frame
 
 
 def _cfg():
@@ -86,7 +102,7 @@ def test_height_ceiling_hides_high_tag(env):
     normal = env.data.site_xmat[sid].reshape(3, 3)[:, 2]
     cam_head_on = env.data.site_xpos[sid] + 0.4 * normal   # angle check passes
     assert not markers_visible(env.data, [sid], cam_head_on)[0]
-    assert marker_dropout_prob(env.data, [sid], cam_head_on, 0.2, 0.05)[0] == 1.0
+    assert _prob(env.data, [sid], cam_head_on, 0.2, 0.05)[0] == 1.0
     # The same tag, lowered under the ceiling and facing the camera, is visible.
     _pose_low(env)
     sid_low = env.marker_site_ids[0]
@@ -108,7 +124,7 @@ def test_wrist_roll_sweep_flips_finger_visibility(env):
         env.data.qpos[env.joint_qposadr[roll_idx]] = roll
         mujoco.mj_forward(env.model, env.data)
         # Detection is rolled separately from _compute_obs; refresh it for this pose.
-        env._update_marker_detection()
+        _refresh_detection(env)
         visible = markers_visible(env.data, env.marker_site_ids, env.tag_cam_pos)
         seen.add(bool(visible[0]))
         obs = env._compute_obs()
@@ -122,7 +138,7 @@ def test_wrist_roll_sweep_flips_finger_visibility(env):
 
 def test_hidden_marker_zeroed_after_noise():
     """An undetected tag yields exactly zeros even with obs noise/bias active."""
-    noise = {"qpos_sigma": 0.01, "qvel_sigma": 0.01, "marker_pos_sigma": 0.005,
+    noise = {"qpos_sigma": 0.01, "marker_pos_sigma": 0.005,
              "marker_rot_sigma": 0.02, "cube_sigma": 0.005}
     bias = {"qpos_sigma": 0.01, "marker_pos_sigma": 0.005,
             "marker_rot_sigma": 0.02, "cube_sigma": 0.005}
@@ -158,10 +174,10 @@ def test_dropout_prob_bands(env):
         return site_pos + dist * (np.cos(a) * normal + np.sin(a) * tangent)
 
     pn, pf = 0.2, 0.05
-    assert marker_dropout_prob(env.data, [sid], cam_at(0.0), pn, pf)[0] == pf
-    assert marker_dropout_prob(env.data, [sid], cam_at(60.0), pn, pf)[0] == pf
-    assert marker_dropout_prob(env.data, [sid], cam_at(67.0), pn, pf)[0] == pn
-    assert marker_dropout_prob(env.data, [sid], cam_at(71.0), pn, pf)[0] == 1.0
+    assert _prob(env.data, [sid], cam_at(0.0), pn, pf)[0] == pf
+    assert _prob(env.data, [sid], cam_at(60.0), pn, pf)[0] == pf
+    assert _prob(env.data, [sid], cam_at(67.0), pn, pf)[0] == pn
+    assert _prob(env.data, [sid], cam_at(71.0), pn, pf)[0] == 1.0
     assert MARKER_VIS_NEAR_ANGLE_DEG == 65.0
 
 
@@ -185,13 +201,13 @@ def test_dropout_rate_matches_prob():
     probs = {"near": 0.3, "far": 0.15}
     env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout=probs)
     env.reset(seed=2)
-    expected = marker_dropout_prob(env.data, env.marker_site_ids, env.tag_cam_pos,
-                                   probs["near"], probs["far"])
+    expected = _prob(env.data, env.marker_site_ids, env.tag_cam_pos,
+                     probs["near"], probs["far"])
     n = 4000
     drops = np.zeros(N_MARKERS)
     for _ in range(n):
-        env._update_marker_detection()  # re-roll at the same (frozen) pose
-        drops += ~env._markers_detected
+        frame = _refresh_detection(env)  # re-roll at the same (frozen) pose
+        drops += ~frame.detected
     np.testing.assert_allclose(drops / n, expected, atol=0.03)
 
 
@@ -206,8 +222,7 @@ def test_marker_always_visible_disables_zeroing():
     for roll in np.linspace(lo, hi, 25):
         env.data.qpos[env.joint_qposadr[roll_idx]] = roll
         mujoco.mj_forward(env.model, env.data)
-        env._update_marker_detection()
-        assert env._markers_detected.all()
+        assert _refresh_detection(env).detected.all()
         obs = env._compute_obs()
         markers = obs[MARKER_OBS_START:MARKER_OBS_START + 6 * N_MARKERS]
         assert np.any(markers != 0.0)
@@ -249,7 +264,7 @@ def test_cam_body_geoms_inert(env):
 
 def test_marker_render_colors_track_detection(env):
     """Each marker site's render rgba is green when detected this frame, red when
-    not — set by _update_marker_detection (visual only). Swept over wrist_roll so
+    not — retinted with each camera frame (visual only). Swept over wrist_roll so
     the finger tag deterministically passes through both states."""
     from src.base_env import MARKER_HIDDEN_RGBA, MARKER_VISIBLE_RGBA
 
@@ -261,8 +276,8 @@ def test_marker_render_colors_track_detection(env):
     for roll in np.linspace(lo, hi, 25):
         env.data.qpos[env.joint_qposadr[roll_idx]] = roll
         mujoco.mj_forward(env.model, env.data)
-        env._update_marker_detection()
-        for sid, det in zip(env.marker_site_ids, env._markers_detected):
+        frame = _refresh_detection(env)
+        for sid, det in zip(env.marker_site_ids, frame.detected):
             expected = MARKER_VISIBLE_RGBA if det else MARKER_HIDDEN_RGBA
             np.testing.assert_allclose(env.model.site_rgba[sid], expected, atol=1e-6)
             saw_visible |= bool(det)

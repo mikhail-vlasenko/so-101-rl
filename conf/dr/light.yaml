@@ -9,7 +9,6 @@
 
 obs_noise:
   qpos_sigma: 0.005
-  qvel_sigma: 0.05
   marker_pos_sigma: 0.001
   marker_rot_sigma: 0.01
   cube_sigma: 0.003
@@ -20,7 +19,11 @@ obs_bias:
   marker_rot_sigma: 0.02
   cube_sigma: 0.002
 
-obs_latency: 1
+# Same as dr=full: latency is measured hardware timing, not a difficulty knob.
+cam_latency:
+  frame_ms: 33.3
+  delay_ms: [42.0, 52.0]
+  jitter_ms: 1.5
 
 marker_dropout:
   near: 0.02

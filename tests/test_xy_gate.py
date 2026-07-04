@@ -21,7 +21,7 @@ def cfg():
 def _env(cfg):
     return SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
                              xml_path="so101/scene_pickplace.xml",
-                             obs_noise=None, obs_latency=0, obs_bias=None)
+                             obs_noise=None, obs_bias=None)
 
 
 def _call_reward(env, cube_z, grasped, ring_height, prev_xy_dist=0.10, new_xy_dist=0.08):

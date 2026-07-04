@@ -3,12 +3,15 @@
 # This is the default; curriculum stage 1 trains clean via `dr=none`, then
 # stage 2 fine-tunes the resulting checkpoint back under `dr=full`.
 
-# Per-step Gaussian noise added to observations during training (sim2real domain randomization).
-# Noise is applied at the source (qpos, qvel, marker poses, cube_pos); derived obs
-# (cube_to_target) inherit the noise via the noisy cube_pos. Reward always uses true state.
+# Per-sample Gaussian noise added to observations during training (sim2real domain
+# randomization): qpos per step (encoder read), marker/cube per camera frame (solvePnP),
+# frozen into the frame at capture. Derived obs (cube_to_target) inherit the noise via
+# the noisy cube_pos. Reward always uses true state. No qvel_sigma: the qvel obs is the
+# backward difference of consecutive noisy qpos over the control tick — exactly the real
+# pipeline (ArmLoop.tick) — so its noise is sqrt(2)*qpos_sigma/control_dt (~0.11 rad/s),
+# inherited rather than configured.
 obs_noise:
   qpos_sigma: 0.005        # rad,   joint encoder jitter (~0.3°)
-  qvel_sigma: 0.05         # rad/s, joint velocity noise (numerically differentiated)
   marker_pos_sigma: 0.002  # m,     per-frame AprilTag position jitter (solvePnP)
   marker_rot_sigma: 0.02   # rad,   per-frame AprilTag orientation jitter (~1°)
   cube_sigma: 0.003        # m,     cube position from vision pipeline
@@ -25,10 +28,25 @@ obs_bias:
   marker_rot_sigma: 0.05   # rad,  tag alignment error (~3°)
   cube_sigma: 0.005
 
-# Number of frames the agent's observation lags behind the true state (sim2real DR).
-# 0 = no delay; N = agent sees the obs from N steps ago. Reward path uses true state.
-# At 15 Hz control, 2 frames = 133 ms, more lag than the real bus exhibits — 1 frame fits.
-obs_latency: 1
+# Observation latency (sim2real): only camera-derived obs (markers, cube) lag.
+# Encoder reads are ~2 ms on the bus — effectively fresh at a 66.7 ms tick — so
+# qpos carries no latency, and qvel's half-tick lag comes from the differencing
+# above. Marker/cube obs instead come from simulated camera frames
+# (src/camera_sim.py): capture every frame_ms with a per-episode random phase,
+# available to the policy delay_ms after capture (mid-exposure -> readout ->
+# USB/decode -> AprilTag detection; per-episode uniform sample from the range),
+# consumed at the next control tick. jitter_ms randomizes each frame's capture
+# time so the camera/control beat drifts like real clock skew. The extra
+# 0-33 ms wait-for-consumption staleness the rollouts measure (marker_age_ms
+# telemetry: ~7-43 ms) emerges from the frame schedule itself.
+cam_latency:
+  frame_ms: 33.3           # C922 @ 30 fps (probe run: 30.0 fps, p95 gap 36 ms)
+  # Measured by sysid/probe_cam_latency.py (run probe_1783181402, driven
+  # wrist_flex sine, residual 0.9 mm): capture -> cap.read() tau = 39.5 ms,
+  # + ~7 ms AprilTag detect = ~46.5 ms capture -> pose available. Range covers
+  # per-frame detect variance plus headroom for run-to-run drift.
+  delay_ms: [42.0, 52.0]
+  jitter_ms: 1.5
 
 # AprilTag detector dropout: per-frame probability a geometrically-visible tag is
 # missed, so its obs goes to all-zeros (same convention as a tag turned away).

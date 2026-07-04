@@ -246,13 +246,17 @@ def test_gravity_slack_matches_dynamic_settle(setup):
     assert np.array_equal(np.sign(quasi), np.sign(dynamic)), f"{quasi} vs {dynamic}"
 
     # The slack actually displaces the wrist tag (not a no-op vs rigid FK).
+    # Threshold scales with the model's play range so it tracks the backlash
+    # class: play_rad * 0.1 m is a 10 cm effective lever, well under the real
+    # ~0.3 m reach (±0.2° measured play shifts the tag ~0.5 mm at this pose).
     wrist_sid = site_ids[2]
     settled = settled_site_xpos(model, data, qposadr, pose, wrist_sid)
     data.qpos[:] = 0.0
     data.qpos[qposadr] = pose
     mujoco.mj_kinematics(model, data)
     rigid = data.site_xpos[wrist_sid].copy()
-    assert np.linalg.norm(settled - rigid) > 1e-3   # > 1 mm shift from gear play
+    min_shift = play_rng[:, 1].max() * 0.1
+    assert np.linalg.norm(settled - rigid) > min_shift
 
 
 def test_rejects_corrupted_detection(setup):

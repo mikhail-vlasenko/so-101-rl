@@ -4,13 +4,14 @@ Shared MuJoCo setup, contact detection, rendering, and reset/step skeleton.
 Subclasses define task-specific config, reward, termination, and observations.
 """
 
-from collections import deque
+from typing import NamedTuple
 
 import numpy as np
 import mujoco
 import gymnasium as gym
 from gymnasium import spaces
 
+from src.camera_sim import CameraSim
 from src.servo_profile import ServoProfile
 from src.units import action_to_target
 
@@ -74,6 +75,11 @@ def marker_world_poses(data, site_ids):
     return pos, rot
 
 
+def marker_world_normals(data, site_ids):
+    """Outward tag normals (N,3): +z of each marker site's world frame."""
+    return np.stack([data.site_xmat[sid].reshape(3, 3)[:, 2] for sid in site_ids])
+
+
 def tag_cam_world_pos(model, data):
     """World position of TAG_CAM_NAME. The camera hangs off a fixed mount body,
     so cam_xpos (filled by forward kinematics) is its constant world position;
@@ -92,35 +98,49 @@ def markers_visible(data, site_ids, cam_pos):
     under MARKER_VIS_MAX_ANGLE_DEG *and* world height under MARKER_VIS_MAX_HEIGHT_M
     (see TAG_CAM_NAME doc). No stochastic dropout — used by tests and the real-arm
     twin rollout."""
-    visible = np.empty(len(site_ids), dtype=bool)
-    for i, sid in enumerate(site_ids):
-        normal = data.site_xmat[sid].reshape(3, 3)[:, 2]
-        to_cam = cam_pos - data.site_xpos[sid]
-        facing = normal @ to_cam >= _MARKER_VIS_COS_MIN * np.linalg.norm(to_cam)
-        visible[i] = facing and data.site_xpos[sid][2] <= MARKER_VIS_MAX_HEIGHT_M
-    return visible
+    pos, _ = marker_world_poses(data, site_ids)
+    normals = marker_world_normals(data, site_ids)
+    return marker_dropout_prob(pos, normals, cam_pos, p_near=0.0, p_far=0.0) < 1.0
 
 
-def marker_dropout_prob(data, site_ids, cam_pos, p_near, p_far):
-    """Per-marker probability the tag is undetected this frame (its obs zeroed).
+def marker_dropout_prob(pos, normals, cam_pos, p_near, p_far):
+    """Per-marker probability the tag is undetected this frame (its obs zeroed),
+    from the tags' world positions (N,3) and outward normals (N,3).
 
     Above MARKER_VIS_MAX_HEIGHT_M (out the top of frame) or past
     MARKER_VIS_MAX_ANGLE_DEG the camera can't see the tag at all -> 1.0.
     In the near-boundary band [NEAR, MAX] the grazing view is flaky -> p_near.
     Comfortably facing the camera (angle < NEAR) -> p_far (rare detector miss).
     """
-    prob = np.empty(len(site_ids))
-    for i, sid in enumerate(site_ids):
-        normal = data.site_xmat[sid].reshape(3, 3)[:, 2]
-        to_cam = cam_pos - data.site_xpos[sid]
-        cos = (normal @ to_cam) / np.linalg.norm(to_cam)
-        if data.site_xpos[sid][2] > MARKER_VIS_MAX_HEIGHT_M or cos < _MARKER_VIS_COS_MIN:
+    prob = np.empty(len(pos))
+    for i in range(len(pos)):
+        to_cam = cam_pos - pos[i]
+        cos = (normals[i] @ to_cam) / np.linalg.norm(to_cam)
+        if pos[i][2] > MARKER_VIS_MAX_HEIGHT_M or cos < _MARKER_VIS_COS_MIN:
             prob[i] = 1.0
         elif cos < _MARKER_VIS_COS_NEAR:
             prob[i] = p_near
         else:
             prob[i] = p_far
     return prob
+
+
+class CamState(NamedTuple):
+    """World-state snapshot recorded per physics substep for CameraSim: what a
+    camera frame captured at that instant would see."""
+    marker_pos: np.ndarray     # (N_MARKERS, 3)
+    marker_rot: np.ndarray     # (N_MARKERS, 3) axis-angle
+    marker_normal: np.ndarray  # (N_MARKERS, 3) outward tag normals
+    cube_pos: np.ndarray       # (3,)
+
+
+class CamFrame(NamedTuple):
+    """One processed detection: dropout, bias, and noise frozen at capture time.
+    Undetected tags are already zeroed — the real-pipeline convention."""
+    marker_pos: np.ndarray  # (N_MARKERS, 3)
+    marker_rot: np.ndarray  # (N_MARKERS, 3)
+    detected: np.ndarray    # (N_MARKERS,) bool
+    cube_pos: np.ndarray    # (3,)
 
 
 def sample_cube_orientation(rng, half_extents, smallest_face_only=False):
@@ -176,13 +196,15 @@ class SO101BaseEnv(gym.Env):
     TASK_NAME: str  # "lift" or "pickplace"
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
-                 obs_noise=None, obs_latency=0, obs_bias=None, marker_dropout=None,
+                 obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
                  marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
         super().__init__()
         self.render_mode = render_mode
         self.slow_factor = slow_factor
-        # dict with keys qpos_sigma, qvel_sigma, marker_pos_sigma,
-        # marker_rot_sigma, cube_sigma; or None
+        # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
+        # cube_sigma; or None. No qvel key: the qvel obs is the backward
+        # difference of consecutive qpos obs (matching the real pipeline), so
+        # its noise is inherited from qpos_sigma, not configured.
         self.obs_noise = obs_noise
         # AprilTag detector dropout (DR): dict with keys "near"/"far" giving the
         # per-frame probability a geometrically-visible tag is missed (near-boundary
@@ -194,9 +216,11 @@ class SO101BaseEnv(gym.Env):
         # When false the marker rotation vectors are dropped from the obs (positions
         # only). Changes obs dim — see obs_dim_for / conf/config.yaml:marker_include_rot.
         self.marker_include_rot = bool(marker_include_rot)
-        self._markers_detected = np.ones(N_MARKERS, dtype=bool)
-        self.obs_latency = int(obs_latency)  # frames; agent sees obs from N steps ago
-        self._obs_history: deque = deque()
+        # Camera latency model (sim2real): dict with keys frame_ms, delay_ms
+        # [lo, hi], jitter_ms (see conf/dr/full.yaml), or None for a synchronous
+        # zero-latency camera. Stored raw here; the CameraSim is built below
+        # once the control period is known.
+        self.cam_latency = cam_latency
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
         # cube_sigma; or None. Marker biases are sampled independently per
         # marker (uncorrelated: each tag has its own glue/pose-estimate error).
@@ -278,6 +302,21 @@ class SO101BaseEnv(gym.Env):
         self.DRAG_HEIGHT_TOL = 0.005
         self.DRAG_SPEED_THRESH = 0.01
 
+        # Marker/cube obs come from simulated camera frames (src/camera_sim.py);
+        # qpos/qvel are encoder-path and stay fresh. _cam_frame is the frame the
+        # policy currently sees; _prev_qpos_obs feeds the differenced qvel obs.
+        if self.cam_latency is None:
+            self._camera = CameraSim.synchronous(self._step_dt)
+        else:
+            self._camera = CameraSim(
+                frame_s=float(self.cam_latency["frame_ms"]) * 1e-3,
+                delay_range_s=(float(self.cam_latency["delay_ms"][0]) * 1e-3,
+                               float(self.cam_latency["delay_ms"][1]) * 1e-3),
+                jitter_s=float(self.cam_latency["jitter_ms"]) * 1e-3,
+                control_dt=self._step_dt)
+        self._cam_frame: CamFrame | None = None
+        self._prev_qpos_obs = None
+
         self._parse_config(cfg)
 
         self.action_space = spaces.Box(low=-1.0, high=1.0,
@@ -297,24 +336,53 @@ class SO101BaseEnv(gym.Env):
         for sid, det in zip(self.marker_site_ids, detected):
             self.model.site_rgba[sid] = MARKER_VISIBLE_RGBA if det else MARKER_HIDDEN_RGBA
 
-    def _update_marker_detection(self):
-        """Roll this frame's per-marker detection into self._markers_detected:
-        geometric visibility plus the DR dropout (near-boundary tags drop more
-        often). _compute_obs zeroes the undetected tags; here we also retint the
-        sites. Must run after physics and before the obs is built for the frame."""
+    def _capture_camera_state(self):
+        """CamState snapshot of the current MjData — recorded per substep so
+        CameraSim can capture frames at any past instant of the tick."""
+        marker_pos, marker_rot = marker_world_poses(self.data, self.marker_site_ids)
+        return CamState(marker_pos=marker_pos, marker_rot=marker_rot,
+                        marker_normal=marker_world_normals(self.data, self.marker_site_ids),
+                        cube_pos=self._get_cube_pos())
+
+    def _process_frame(self, state: CamState) -> CamFrame:
+        """One simulated detection of a captured world state: roll the per-frame
+        dropout (geometric visibility + DR), apply bias and per-frame noise, zero
+        undetected tags. Runs exactly once per frame, at capture time — a real
+        frame is detected once, so consuming it twice re-reads the same values."""
         if self.marker_always_visible:
-            self._markers_detected = np.ones(N_MARKERS, dtype=bool)
-            self._set_marker_render_colors(self._markers_detected)
-            return
-        if self.marker_dropout is None:
-            p_near = p_far = 0.0
+            detected = np.ones(N_MARKERS, dtype=bool)
         else:
-            p_near = self.marker_dropout["near"]
-            p_far = self.marker_dropout["far"]
-        prob = marker_dropout_prob(self.data, self.marker_site_ids, self.tag_cam_pos,
-                                   p_near, p_far)
-        self._markers_detected = self.np_random.random(N_MARKERS) >= prob
-        self._set_marker_render_colors(self._markers_detected)
+            if self.marker_dropout is None:
+                p_near = p_far = 0.0
+            else:
+                p_near = self.marker_dropout["near"]
+                p_far = self.marker_dropout["far"]
+            prob = marker_dropout_prob(state.marker_pos, state.marker_normal,
+                                       self.tag_cam_pos, p_near, p_far)
+            detected = self.np_random.random(N_MARKERS) >= prob
+
+        marker_pos = state.marker_pos.copy()
+        marker_rot = state.marker_rot.copy()
+        cube_pos = state.cube_pos.copy()
+        if self.obs_bias is not None:
+            marker_pos = marker_pos + self._marker_pos_bias
+            marker_rot = marker_rot + self._marker_rot_bias
+            cube_pos = cube_pos + self._cube_bias
+        if self.obs_noise is not None:
+            rng = self.np_random
+            marker_pos = marker_pos + rng.normal(0, self.obs_noise["marker_pos_sigma"],
+                                                 size=marker_pos.shape)
+            marker_rot = marker_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
+                                                 size=marker_rot.shape)
+            cube_pos = cube_pos + rng.normal(0, self.obs_noise["cube_sigma"],
+                                             size=cube_pos.shape)
+        # An undetected tag yields exactly zeros — after bias/noise, the
+        # convention the real camera pipeline follows for undetected tags.
+        hidden = ~detected
+        marker_pos[hidden] = 0.0
+        marker_rot[hidden] = 0.0
+        return CamFrame(marker_pos=marker_pos, marker_rot=marker_rot,
+                        detected=detected, cube_pos=cube_pos)
 
     def _get_cube_pos(self):
         return self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3].copy()
@@ -334,51 +402,35 @@ class SO101BaseEnv(gym.Env):
         raise NotImplementedError
 
     def _compute_obs(self):
+        """Build the policy observation. qpos/qvel take the encoder path (fresh;
+        qvel differenced like real/rollout_common.ArmLoop); markers and cube come
+        from the camera frame consumed this tick (self._cam_frame)."""
         qpos = self.data.qpos[self.joint_qposadr].copy()
-        qvel = self.data.qvel[self.joint_dofadr].copy()
-        marker_pos, marker_rot = marker_world_poses(self.data, self.marker_site_ids)
-        cube_pos = self._get_cube_pos()
-
         if self.obs_bias is not None:
             qpos = qpos + self._qpos_bias
-            marker_pos = marker_pos + self._marker_pos_bias
-            marker_rot = marker_rot + self._marker_rot_bias
-            cube_pos = cube_pos + self._cube_bias
-
         if self.obs_noise is not None:
-            rng = self.np_random
-            qpos = qpos + rng.normal(0, self.obs_noise["qpos_sigma"], size=qpos.shape)
-            qvel = qvel + rng.normal(0, self.obs_noise["qvel_sigma"], size=qvel.shape)
-            marker_pos = marker_pos + rng.normal(0, self.obs_noise["marker_pos_sigma"],
-                                                 size=marker_pos.shape)
-            marker_rot = marker_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
-                                                 size=marker_rot.shape)
-            cube_pos = cube_pos + rng.normal(0, self.obs_noise["cube_sigma"], size=cube_pos.shape)
+            qpos = qpos + self.np_random.normal(0, self.obs_noise["qpos_sigma"],
+                                                size=qpos.shape)
+        # Real qvel is the backward difference of consecutive encoder reads over
+        # the control tick, so the obs inherits its half-tick lag, smoothing, and
+        # noise (sqrt(2)*qpos_sigma/dt) from qpos. Zero on the first obs after
+        # reset — ArmLoop.boot does the same.
+        if self._prev_qpos_obs is None:
+            qvel = np.zeros_like(qpos)
+        else:
+            qvel = (qpos - self._prev_qpos_obs) / self._step_dt
+        self._prev_qpos_obs = qpos
 
-        # An undetected tag (turned away, or a DR dropout) yields exactly zeros —
-        # after bias/noise, the convention the real camera pipeline must follow for
-        # undetected tags. Detection was rolled this frame in _update_marker_detection.
-        hidden = ~self._markers_detected
-        marker_pos[hidden] = 0.0
-        marker_rot[hidden] = 0.0
-
+        frame = self._cam_frame
         if self.marker_include_rot:
             # hstack interleaves per marker: [pos_finger, rot_finger, pos_wrist, rot_wrist]
-            markers = np.hstack([marker_pos, marker_rot]).flatten()
+            markers = np.hstack([frame.marker_pos, frame.marker_rot]).flatten()
         else:
             # positions only: [pos_finger, pos_wrist]
-            markers = marker_pos.flatten()
+            markers = frame.marker_pos.flatten()
+        cube_pos = frame.cube_pos
         return np.concatenate([qpos, qvel, markers, cube_pos, self._obs_extra(cube_pos),
                                self._prev_actions.flatten()]).astype(np.float32)
-
-    def _get_obs(self):
-        raw = self._compute_obs()
-        if self.obs_latency == 0:
-            return raw
-        self._obs_history.append(raw)
-        while len(self._obs_history) > self.obs_latency + 1:
-            self._obs_history.popleft()
-        return self._obs_history[0]
 
     def _n_jaw_contacts(self):
         """Number of distinct gripper jaws (0, 1, or 2) currently touching the cube."""
@@ -485,7 +537,7 @@ class SO101BaseEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
-        self._obs_history.clear()
+        self._prev_qpos_obs = None
         self._prev_actions[:] = 0.0
 
         cube_xy = self._sample_cube_pos()
@@ -535,9 +587,12 @@ class SO101BaseEnv(gym.Env):
                                                size=(N_MARKERS, 3))
             self._cube_bias = rng.normal(0, self.obs_bias["cube_sigma"], size=3)
 
-        self._update_marker_detection()
+        self._cam_frame = self._camera.reset(self.np_random, self.data.time,
+                                             self._capture_camera_state(),
+                                             self._process_frame)
+        self._set_marker_render_colors(self._cam_frame.detected)
 
-        return self._get_obs(), {}
+        return self._compute_obs(), {}
 
     def _compute_step(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):
         """Return (reward, terminated, info) for the current step."""
@@ -564,11 +619,13 @@ class SO101BaseEnv(gym.Env):
             for k in range(self.n_substeps):
                 self.data.ctrl[:self.n_joints] = setpoints[k]
                 mujoco.mj_step(self.model, self.data)
+                self._camera.record(self.data.time, self._capture_camera_state())
             self._ctrl_target = target
         else:
             self.data.ctrl[:self.n_joints] = target
             for _ in range(self.n_substeps):
                 mujoco.mj_step(self.model, self.data)
+                self._camera.record(self.data.time, self._capture_camera_state())
 
         ee_pos = self._get_ee_pos()
         cube_pos = self._get_cube_pos()
@@ -589,12 +646,15 @@ class SO101BaseEnv(gym.Env):
         )
         info["task_name"] = self.TASK_NAME
 
-        # Roll detection for this frame (geometric visibility + DR dropout). The
-        # undetected tags are zeroed in the obs built below; track them for the
-        # hidden-ratio metric. Losing a tag's pose is the policy's own penalty —
-        # there is deliberately no reward term for it.
-        self._update_marker_detection()
-        self._markers_hidden_total += N_MARKERS - int(self._markers_detected.sum())
+        # Advance the camera to the obs instant and take the newest available
+        # frame (dropout/noise were frozen into it at capture time). Undetected
+        # tags are already zeroed; track them for the hidden-ratio metric.
+        # Losing a tag's pose is the policy's own penalty — there is
+        # deliberately no reward term for it.
+        self._cam_frame = self._camera.observe(self.data.time, self.np_random,
+                                               self._process_frame)
+        self._set_marker_render_colors(self._cam_frame.detected)
+        self._markers_hidden_total += N_MARKERS - int(self._cam_frame.detected.sum())
 
         truncated = self.step_count >= self.max_steps
         if terminated or truncated:
@@ -610,7 +670,7 @@ class SO101BaseEnv(gym.Env):
         if self.render_mode == "human":
             self._render_human()
 
-        return self._get_obs(), float(reward), terminated, truncated, info
+        return self._compute_obs(), float(reward), terminated, truncated, info
 
     def _render_human(self):
         import time

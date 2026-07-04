@@ -7,7 +7,6 @@
 
 obs_noise:
   qpos_sigma: 0.0
-  qvel_sigma: 0.0
   marker_pos_sigma: 0.0
   marker_rot_sigma: 0.0
   cube_sigma: 0.0
@@ -18,7 +17,10 @@ obs_bias:
   marker_rot_sigma: 0.0
   cube_sigma: 0.0
 
-obs_latency: 0
+# Synchronous zero-latency camera: marker/cube obs are the current state.
+# (qvel is still the backward difference of qpos over the tick — that's the
+# observation pipeline, not a DR knob.)
+cam_latency: null
 
 # No stochastic detector dropout (tags past 70° are still zeroed — camera physics).
 marker_dropout:

@@ -1,8 +1,11 @@
-"""Tests for per-step Gaussian observation noise (sim2real domain randomization).
+"""Tests for per-sample Gaussian observation noise (sim2real domain randomization).
 
-Noise is applied at the source values (qpos, qvel, marker poses, cube_pos)
-inside SO101BaseEnv._get_obs. Derived task obs (e.g. pickplace's cube_to_target)
-must inherit the noise via the noisy cube_pos rather than re-noising independently.
+Noise is applied at the source values: qpos per step (SO101BaseEnv._compute_obs),
+marker poses and cube_pos per camera frame (_process_frame, frozen at capture).
+Derived task obs (e.g. pickplace's cube_to_target) must inherit the noise via the
+noisy cube_pos rather than re-noising independently. There is no qvel sigma: the
+qvel obs is the backward difference of consecutive noisy qpos over the control
+tick (the real pipeline), so its noise is sqrt(2)*qpos_sigma/control_dt.
 """
 
 import numpy as np
@@ -18,7 +21,6 @@ from src.pickplace_env import SO101PickPlaceEnv
 
 SIGMAS = {
     "qpos_sigma": 0.005,
-    "qvel_sigma": 0.05,
     "marker_pos_sigma": 0.002,
     "marker_rot_sigma": 0.02,
     "cube_sigma": 0.003,
@@ -145,7 +147,10 @@ def test_per_step_noise_magnitude_matches_sigmas(cfg):
 
     # Noise std should be within ~10% of configured sigma.
     np.testing.assert_allclose(diffs[:, QPOS].std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.1)
-    np.testing.assert_allclose(diffs[:, QVEL].std(axis=0).mean(), SIGMAS["qvel_sigma"], rtol=0.1)
+    # qvel = (qpos_t - qpos_{t-1})/dt of the noisy qpos, so its noise std is
+    # sqrt(2)*qpos_sigma/control_dt — inherited, not configured.
+    qvel_sigma = np.sqrt(2.0) * SIGMAS["qpos_sigma"] / env_noisy._step_dt
+    np.testing.assert_allclose(diffs[:, QVEL].std(axis=0).mean(), qvel_sigma, rtol=0.1)
     np.testing.assert_allclose(marker_pos_diffs.std(), SIGMAS["marker_pos_sigma"], rtol=0.1)
     np.testing.assert_allclose(marker_rot_diffs.std(), SIGMAS["marker_rot_sigma"], rtol=0.1)
     np.testing.assert_allclose(diffs[:, CUBE].std(axis=0).mean(), SIGMAS["cube_sigma"], rtol=0.1)
@@ -158,7 +163,7 @@ def test_noise_does_not_corrupt_true_state(cfg):
     env = _pickplace(cfg, obs_noise=SIGMAS)
     env.reset(seed=0)
     pre_cube = env._get_cube_pos().copy()
-    env.step(_zero_action())  # this calls _get_obs which adds noise
+    env.step(_zero_action())  # this calls _compute_obs which adds noise
     post_cube = env._get_cube_pos()
     # _get_cube_pos reads from self.data — must remain physically meaningful (unchanged
     # apart from physics; with zero action and 1 step, cube hardly moves).
@@ -183,11 +188,10 @@ def test_lift_env_compatible_with_noise(lift_cfg):
 
 
 def test_prev_actions_track_last_two_actions(cfg):
-    """After stepping, obs[PREV_ACTIONS] = [a(t-1), a(t)] (12 dims = 2 actions * 6 joints).
-    Disable obs_latency so we see the most-recent buffer state without delay."""
+    """After stepping, obs[PREV_ACTIONS] = [a(t-1), a(t)] (12 dims = 2 actions * 6 joints)."""
     env = SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
                             xml_path="so101/scene_pickplace.xml",
-                            obs_noise=None, obs_latency=0, marker_include_rot=True)
+                            obs_noise=None, marker_include_rot=True)
     env.reset(seed=0)
     a0 = np.array([0.1, -0.2, 0.3, -0.4, 0.5, -0.6], dtype=np.float32)
     a1 = np.array([-0.7, 0.8, -0.9, 0.4, -0.3, 0.2], dtype=np.float32)
