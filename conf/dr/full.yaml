@@ -59,3 +59,12 @@ cam_latency:
 marker_dropout:
   near: 0.02
   far: 0.01
+
+# Per-episode sponge resize (physical DR, not vision): each of the box's three
+# full side lengths is jittered by an independent uniform +/- cube_size_jitter
+# (resampled every reset), so the policy sees a range of sponge sizes. The
+# nominal 6x4x2.5 cm box is the center; draws that would break the strict
+# long>mid>short face ordering (required by sample_cube_orientation and the
+# tag-glued-to-the-largest-face convention) are reject-sampled. Applies to every
+# cube env (lift + pickplace) since it's the same physical sponge. Meters.
+cube_size_jitter: 0.01

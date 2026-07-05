@@ -90,7 +90,8 @@ def resume_overrides(cfg: DictConfig) -> dict:
 
 def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1,
              obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
-             marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
+             marker_always_visible=False, marker_include_rot=False, prev_actions_n=2,
+             cube_size_jitter=0.0):
     """Create an env instance from class, config, and XML path."""
     return env_cls(render_mode=render_mode, env_cfg=env_cfg,
                    slow_factor=slow_factor, xml_path=xml_path,
@@ -98,12 +99,13 @@ def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1,
                    marker_dropout=marker_dropout,
                    marker_always_visible=marker_always_visible,
                    marker_include_rot=marker_include_rot,
-                   prev_actions_n=prev_actions_n)
+                   prev_actions_n=prev_actions_n,
+                   cube_size_jitter=cube_size_jitter)
 
 
 def _make_env_fn(env_cls, env_cfg, xml_path, obs_noise=None, cam_latency=None,
                  obs_bias=None, marker_dropout=None, marker_always_visible=False,
-                 marker_include_rot=False, prev_actions_n=2):
+                 marker_include_rot=False, prev_actions_n=2, cube_size_jitter=0.0):
     """Factory closure for SubprocVecEnv."""
     def _init():
         return Monitor(env_cls(env_cfg=env_cfg, xml_path=xml_path,
@@ -111,7 +113,8 @@ def _make_env_fn(env_cls, env_cfg, xml_path, obs_noise=None, cam_latency=None,
                                obs_bias=obs_bias, marker_dropout=marker_dropout,
                                marker_always_visible=marker_always_visible,
                                marker_include_rot=marker_include_rot,
-                               prev_actions_n=prev_actions_n))
+                               prev_actions_n=prev_actions_n,
+                               cube_size_jitter=cube_size_jitter))
     return _init
 
 
@@ -144,6 +147,7 @@ def train(cfg: DictConfig):
     marker_always_visible = bool(cfg.marker_always_visible)
     marker_include_rot = bool(cfg.marker_include_rot)
     prev_actions_n = int(cfg.prev_actions_n)
+    cube_size_jitter = float(cfg.cube_size_jitter)
 
     if cfg.env_name == "multitask":
         lift_cls, lift_cfg, lift_xml = _resolve_env(cfg, orig_dir, "lift")
@@ -155,13 +159,15 @@ def train(cfg: DictConfig):
                          marker_dropout=marker_dropout,
                          marker_always_visible=marker_always_visible,
                          marker_include_rot=marker_include_rot,
-                         prev_actions_n=prev_actions_n) if i < n_lift
+                         prev_actions_n=prev_actions_n,
+                         cube_size_jitter=cube_size_jitter) if i < n_lift
             else _make_env_fn(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise,
                               cam_latency=cam_latency, obs_bias=obs_bias,
                               marker_dropout=marker_dropout,
                               marker_always_visible=marker_always_visible,
                               marker_include_rot=marker_include_rot,
-                              prev_actions_n=prev_actions_n)
+                              prev_actions_n=prev_actions_n,
+                              cube_size_jitter=cube_size_jitter)
             for i in range(n_envs)
         ]
         # Eval on pickplace (the harder task)
@@ -170,7 +176,8 @@ def train(cfg: DictConfig):
                               marker_dropout=marker_dropout,
                               marker_always_visible=marker_always_visible,
                               marker_include_rot=marker_include_rot,
-                              prev_actions_n=prev_actions_n)
+                              prev_actions_n=prev_actions_n,
+                              cube_size_jitter=cube_size_jitter)
         assert int(lift_cfg["n_substeps"]) == int(pp_cfg["n_substeps"]), \
             "multitask envs must share a control rate for one obs_norm qvel scale"
         n_substeps = int(lift_cfg["n_substeps"])
@@ -181,13 +188,15 @@ def train(cfg: DictConfig):
                                 marker_dropout=marker_dropout,
                                 marker_always_visible=marker_always_visible,
                                 marker_include_rot=marker_include_rot,
-                                prev_actions_n=prev_actions_n) for _ in range(n_envs)]
+                                prev_actions_n=prev_actions_n,
+                                cube_size_jitter=cube_size_jitter) for _ in range(n_envs)]
         eval_inner = make_env(env_cls, env_cfg, xml_path, obs_noise=obs_noise,
                               cam_latency=cam_latency, obs_bias=obs_bias,
                               marker_dropout=marker_dropout,
                               marker_always_visible=marker_always_visible,
                               marker_include_rot=marker_include_rot,
-                              prev_actions_n=prev_actions_n)
+                              prev_actions_n=prev_actions_n,
+                              cube_size_jitter=cube_size_jitter)
         n_substeps = int(env_cfg["n_substeps"])
 
     frame_stack = int(cfg.frame_stack)

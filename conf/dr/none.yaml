@@ -26,3 +26,6 @@ cam_latency: null
 marker_dropout:
   near: 0.0
   far: 0.0
+
+# No sponge resize: the nominal 6x4x2.5 cm box every episode.
+cube_size_jitter: 0.0

@@ -449,7 +449,8 @@ class SO101BaseEnv(SO101ArmEnv):
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
                  obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
-                 marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
+                 marker_always_visible=False, marker_include_rot=False, prev_actions_n=2,
+                 cube_size_jitter=0.0):
         super().__init__(render_mode=render_mode, slow_factor=slow_factor,
                          xml_path=xml_path, prev_actions_n=prev_actions_n,
                          env_cfg=env_cfg)
@@ -516,9 +517,16 @@ class SO101BaseEnv(SO101ArmEnv):
         cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
         self.cube_qpos_idx = self.model.jnt_qposadr[cube_joint_id]
         self.cube_dofadr = self.model.jnt_dofadr[cube_joint_id]
-        # Sponge box half extents; per-episode resting half-height (depends on
-        # which face it stands on) is set in reset() as self.cube_rest_half_z.
-        self.cube_half_extents = self.model.geom_size[self.cube_geom_id].copy()
+        # Sponge box half extents. The nominal value is the XML box; the actual
+        # per-episode extents (self.cube_half_extents) are resampled each reset
+        # when cube_size_jitter > 0 (DR sponge resize). The per-episode resting
+        # half-height (depends on which face it stands on) is set in reset() as
+        # self.cube_rest_half_z.
+        self.cube_nominal_half_extents = self.model.geom_size[self.cube_geom_id].copy()
+        self.cube_half_extents = self.cube_nominal_half_extents.copy()
+        # Half-extent jitter: each full side length varies +/- cube_size_jitter,
+        # i.e. each half-extent varies +/- cube_size_jitter/2. See conf/dr/*.yaml.
+        self.cube_size_half_jitter = float(cube_size_jitter) / 2.0
 
         cfg = env_cfg
         self.cube_low = np.array(cfg["cube_low"])
@@ -831,6 +839,30 @@ class SO101BaseEnv(SO101ArmEnv):
             return cube_pos, cube_quat
         return None
 
+    def _set_cube_half_extents(self, half):
+        """Resize the sponge box: write the geom half-extents and slide the
+        cube_tag site back onto the (now moved) top face — the tag is glued to
+        the center of the largest face, so its z offset equals the z half-extent.
+        Keeps self.cube_half_extents in sync for the orientation/rest-height
+        sampling that reads it."""
+        self.model.geom_size[self.cube_geom_id] = half
+        self.model.site_pos[self.cube_tag_site_id][2] = half[2]
+        self.cube_half_extents = np.asarray(half, dtype=np.float64).copy()
+
+    def _sample_cube_half_extents(self):
+        """Per-episode sponge half-extents (DR resize): each axis jittered by a
+        uniform +/- cube_size_half_jitter around the nominal box, reject-sampling
+        any draw that breaks the strict hx > hy > hz face ordering that
+        sample_cube_orientation and the tag-on-largest-face convention require."""
+        nominal = self.cube_nominal_half_extents
+        if self.cube_size_half_jitter == 0.0:
+            return nominal.copy()
+        j = self.cube_size_half_jitter
+        while True:
+            half = nominal + self.np_random.uniform(-j, j, size=3)
+            if half[0] > half[1] > half[2]:
+                return half
+
     def _randomize_scene(self):
         """Hook for task scenery randomization (e.g. ring height). Runs before
         the arm and cube are placed, so their rejection sampling (collision,
@@ -857,6 +889,14 @@ class SO101BaseEnv(SO101ArmEnv):
 
         cube_pinned = "cube_pos" in options
         qpos_pinned = "qpos" in options
+
+        # Sponge-size DR: resample the box extents before any orientation/spawn
+        # sampling reads self.cube_half_extents. Skipped when the cube pose is
+        # pinned (e.g. sysid replay), which must use the modeled nominal sponge.
+        self._set_cube_half_extents(
+            self.cube_nominal_half_extents if cube_pinned
+            else self._sample_cube_half_extents())
+
         if cube_pinned:
             self._randomize_scene()
             cube_pos = np.asarray(options["cube_pos"], dtype=np.float64)

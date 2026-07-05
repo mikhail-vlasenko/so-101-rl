@@ -28,3 +28,7 @@ cam_latency:
 marker_dropout:
   near: 0.02
   far: 0.01
+
+# Sponge resize: physical DR (not vision), so kept at the full level like the
+# encoder noise above. See dr=full for the semantics. Meters.
+cube_size_jitter: 0.01

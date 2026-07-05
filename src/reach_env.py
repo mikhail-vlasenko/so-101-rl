@@ -24,10 +24,11 @@ class SO101ReachEnv(SO101ArmEnv):
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
                  obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
-                 marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
+                 marker_always_visible=False, marker_include_rot=False, prev_actions_n=2,
+                 cube_size_jitter=0.0):
         # not used by reach env (kept for train.py signature)
         del obs_noise, cam_latency, obs_bias, marker_dropout, marker_always_visible
-        del marker_include_rot
+        del marker_include_rot, cube_size_jitter
         super().__init__(render_mode=render_mode, slow_factor=slow_factor,
                          xml_path=xml_path, prev_actions_n=prev_actions_n,
                          env_cfg=env_cfg)
