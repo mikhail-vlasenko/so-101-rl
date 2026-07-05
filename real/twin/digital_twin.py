@@ -29,6 +29,7 @@ from .constants import (
     SERVO_POSITION_DEADZONE,
     SERVO_POSITION_KP,
     SERVO_SPEED,
+    SERVO_TORQUE_LIMIT,
 )
 from .control import clamp_raw_delta, stream_sub_targets
 from .gamepad import gamepad_worker
@@ -136,6 +137,7 @@ def make_enter_control(state: TwinState, bus: ServoBus, jm: JointMaps):
             # not whatever the last tool left behind.
             bus.set_position_kp(SERVO_POSITION_KP)
             bus.set_position_deadzone(SERVO_POSITION_DEADZONE)
+            bus.set_torque_limit(SERVO_TORQUE_LIMIT)
             bus.enable_torque_all()
         with state.lock:
             state.mode = CONTROL

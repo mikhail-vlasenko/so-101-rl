@@ -99,7 +99,11 @@ from real.extrinsics import EXTRINSICS_PATH, rigid_register, save_extrinsics
 from real.marker_spec import ARM_TAG_TO_SITE, MARKER_EXPOSURE, MARKER_GAIN, TABLE_TAG_ID
 from real.overlay import annotate_detections
 from real.pose import PoseEstimator, load_intrinsics
-from real.twin.constants import SERVO_POSITION_DEADZONE, SERVO_POSITION_KP
+from real.twin.constants import (
+    SERVO_POSITION_DEADZONE,
+    SERVO_POSITION_KP,
+    SERVO_TORQUE_LIMIT,
+)
 from real.twin.mapping import JOINT_NAMES, load_joint_maps, raw_to_rad
 from real.twin.servo_io import ServoBus
 from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_world_pos
@@ -510,6 +514,7 @@ def capture(args, jm, direction, poses, max_raw_delta):
     try:
         bus.set_position_kp(SERVO_POSITION_KP)
         bus.set_position_deadzone(SERVO_POSITION_DEADZONE)
+        bus.set_torque_limit(SERVO_TORQUE_LIMIT)
         bus.enable_torque_all()
         prev_raw = bus.read_all().copy()
         for i, pose in enumerate(poses):

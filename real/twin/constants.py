@@ -40,6 +40,27 @@ INTERP_HZ = 100.0
 # with the profile carrying the lag.
 SERVO_ACCEL = 40
 
+# STS3215 stall torque (N·m) at the 12 V bench supply — the 30 kg·cm spec
+# figure the sim actuator model was built around.
+STS3215_STALL_TORQUE_NM = 2.94
+
+# Fraction of stall torque the servos may output, applied symmetrically on
+# both sides of the sim-to-real boundary: real side via the Torque_Limit
+# register (RAM addr 48, 0-1000 = fraction of stall; the firmware re-inits it
+# from EPROM Max_Torque_Limit at power-on, so the RAM write leaves no
+# permanent state), sim side via the so101.xml sts3215-class forcerange
+# (= frac * stall, consistency-tested in tests/control/test_torque_limit.py).
+# Rationale: stall is a peak figure the servo can only produce briefly before
+# current-limiting/heat-throttling (continuous rating ≈ 1/3 of stall), so an
+# uncapped sim trains policies that lean on torque the real arm can't
+# sustain. 2/3 trims that cheat while keeping ample margin over the
+# worst-case gravity load (shoulder_lift ~0.86 N·m over the joint box, 29% of
+# stall) and cuts a stalled press's force and I²R heating. Uniform across
+# joints for now; make it per-joint like SERVO_POSITION_KP if one joint needs
+# a different ceiling.
+SERVO_TORQUE_LIMIT_FRAC = 2.0 / 3.0
+SERVO_TORQUE_LIMIT = round(1000 * SERVO_TORQUE_LIMIT_FRAC)  # register units
+
 # Position-loop P gain (Feetech SMS-STS register addr 21), per joint in
 # JOINT_NAMES order (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
 # wrist_roll, gripper). Factory default is 32 uniformly. Lower Kp = softer

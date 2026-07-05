@@ -38,6 +38,7 @@ from .twin.constants import (
     SERVO_POSITION_DEADZONE,
     SERVO_POSITION_KP,
     SERVO_SPEED,
+    SERVO_TORQUE_LIMIT,
 )
 from .twin.control import clamp_raw_delta, stream_sub_targets
 from .twin.mapping import JointMaps, rad_to_raw, raw_to_rad
@@ -202,6 +203,7 @@ class ArmLoop:
                 f"slow={self.slow}x (max joint speed "
                 f"{max_joint_speed_rad_s(self.action_scale, self.control_hz) / self.slow:.2f} rad/s, "
                 f"raw clamp ±{self.max_raw_delta}/tick, "
+                f"torque≤{SERVO_TORQUE_LIMIT / 10:.0f}%stall, "
                 f"{self.n_interp} sub-targets/tick @ {1.0 / self.sub_dt:.0f} Hz, "
                 f"qpos_bias≤{np.degrees(np.abs(self.qpos_bias)).max():.1f}deg, "
                 f"compliance≤{np.degrees(np.abs(self.compliance)).max():.0f}deg/N·m)")
@@ -235,6 +237,7 @@ class ArmLoop:
         if self.execute:
             self.bus.set_position_kp(SERVO_POSITION_KP)
             self.bus.set_position_deadzone(SERVO_POSITION_DEADZONE)
+            self.bus.set_torque_limit(SERVO_TORQUE_LIMIT)
             self.bus.enable_torque_all()
         self.prev_raw_target = raw0.copy()
         self.qpos = qpos

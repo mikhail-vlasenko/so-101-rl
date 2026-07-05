@@ -11,7 +11,11 @@ import numpy as np
 import pytest
 
 from real.rollout_common import DEFAULT_CAL, REPO_ROOT, ArmLoop
-from real.twin.constants import SERVO_POSITION_DEADZONE, SERVO_POSITION_KP
+from real.twin.constants import (
+    SERVO_POSITION_DEADZONE,
+    SERVO_POSITION_KP,
+    SERVO_TORQUE_LIMIT,
+)
 from real.twin.mapping import load_joint_maps, rad_to_raw, raw_to_rad
 from src.units import action_to_target
 from real.twin.control import clamp_raw_delta
@@ -26,6 +30,7 @@ class FakeBus:
         self.torque_on = False
         self.kp = None
         self.deadzone = None
+        self.torque_limit = None
 
     def read_all(self) -> np.ndarray:
         return self.raw.copy()
@@ -39,6 +44,9 @@ class FakeBus:
 
     def set_position_deadzone(self, dz) -> None:
         self.deadzone = tuple(dz)
+
+    def set_torque_limit(self, limit) -> None:
+        self.torque_limit = int(limit)
 
     def enable_torque_all(self) -> None:
         self.torque_on = True
@@ -83,7 +91,7 @@ def test_dry_run_never_writes_or_torques(model, jm):
     loop.tick(np.ones(6))
     assert bus.writes == []
     assert not bus.torque_on
-    assert bus.kp is None and bus.deadzone is None
+    assert bus.kp is None and bus.deadzone is None and bus.torque_limit is None
 
 
 def test_execute_boot_sets_gains_and_torque(model, jm):
@@ -93,6 +101,7 @@ def test_execute_boot_sets_gains_and_torque(model, jm):
     assert bus.torque_on
     assert bus.kp == SERVO_POSITION_KP
     assert bus.deadzone == SERVO_POSITION_DEADZONE
+    assert bus.torque_limit == SERVO_TORQUE_LIMIT
 
 
 def test_tick_matches_training_shaping(model, jm):

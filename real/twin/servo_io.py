@@ -18,6 +18,7 @@ ADDR_TORQUE_ENABLE = 40
 ADDR_POSITION_KP = 21
 ADDR_CW_DEADZONE = 26
 ADDR_CCW_DEADZONE = 27
+ADDR_TORQUE_LIMIT = 48
 ADDR_PRESENT_POSITION = 56
 LEN_PRESENT_POSITION = 2
 BAUDRATE = 1_000_000
@@ -166,6 +167,31 @@ class ServoBus:
                         f"servo {sid} deadzone write (addr {addr}) error: "
                         f"{self.packet_handler.getRxPacketError(error)}"
                     )
+
+    def set_torque_limit(self, limit: int) -> None:
+        """Write the output-torque cap (RAM register 48, 2 bytes) to every
+        connected servo: 0-1000 = fraction of stall torque. RAM-only — the
+        firmware re-initializes it from EPROM Max_Torque_Limit (addr 16) at
+        power-on, so every torque-on session must re-write it (boot paths do).
+        Keep it in sync with the sim actuator forcerange; see
+        real/twin/constants.SERVO_TORQUE_LIMIT_FRAC."""
+        assert self.packet_handler is not None, "ServoBus not connected"
+        assert 0 < limit <= 1000, f"torque limit out of range: {limit}"
+        for sid, ok in zip(self.servo_ids, self.present_mask):
+            if not ok:
+                continue
+            result, error = self.packet_handler.write2ByteTxRx(
+                sid, ADDR_TORQUE_LIMIT, int(limit))
+            if result != scs.COMM_SUCCESS:
+                raise RuntimeError(
+                    f"servo {sid} torque-limit write failed: "
+                    f"{self.packet_handler.getTxRxResult(result)}"
+                )
+            if error != 0:
+                raise RuntimeError(
+                    f"servo {sid} torque-limit write error: "
+                    f"{self.packet_handler.getRxPacketError(error)}"
+                )
 
     def read_pos_speed(self, servo_id: int) -> tuple[int, int]:
         """Read present position + present speed of ONE servo in a single bus
