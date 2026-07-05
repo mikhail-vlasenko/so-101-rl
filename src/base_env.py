@@ -762,15 +762,28 @@ class SO101BaseEnv(SO101ArmEnv):
                 return True
         return False
 
-    def _sample_visible_cube_spawn(self):
+    def _sample_collision_free_arm_pose(self):
+        """Sample random arm position, rejecting arm-environment collisions."""
+        attempt = 0
+        while True:
+            joint_pos = self.np_random.uniform(self.joint_low, self.joint_high)
+            self._write_arm_pose(joint_pos)
+            if not self._has_arm_collision():
+                return joint_pos
+            attempt += 1
+            if attempt % 10 == 0:
+                print(f"WARNING: {attempt} arm position samples rejected (collision)")
+
+    def _sample_visible_cube_spawn(self, max_attempts):
         """Sample the cube spawn pose, rejecting any the camera cannot actually
         see the tag of — matching the real protocol of placing the sponge where
         the camera sees its tag. Requires the arm (and any task scenery) already
         placed: a candidate must face the camera within the strict (non-grazing)
         angle band, have an unobstructed ray past the arm and scenery, and not
         touch the arm. Writes the accepted pose into qpos (data left forwarded)
-        and returns (cube_pos, cube_quat)."""
-        for attempt in range(200):
+        and returns (cube_pos, cube_quat). Returns None when no candidate
+        passes within max_attempts."""
+        for _ in range(max_attempts):
             cube_xy = self._sample_cube_pos()
             cube_quat, self.cube_rest_half_z = sample_cube_orientation(
                 self.np_random, self.cube_half_extents,
@@ -792,9 +805,7 @@ class SO101BaseEnv(SO101ArmEnv):
             if self._cube_arm_contact():
                 continue
             return cube_pos, cube_quat
-        raise AssertionError(
-            "no camera-visible cube spawn found in 200 attempts; "
-            "check the spawn box against the tag camera")
+        return None
 
     def _randomize_scene(self):
         """Hook for task scenery randomization (e.g. ring height). Runs before
@@ -820,40 +831,54 @@ class SO101BaseEnv(SO101ArmEnv):
         assert ("cube_pos" in options) == ("cube_quat" in options), \
             "cube_pos and cube_quat must be overridden together"
 
-        self._randomize_scene()
-
         cube_pinned = "cube_pos" in options
+        qpos_pinned = "qpos" in options
         if cube_pinned:
+            self._randomize_scene()
             cube_pos = np.asarray(options["cube_pos"], dtype=np.float64)
             cube_quat = np.asarray(options["cube_quat"], dtype=np.float64)
             # Spawn height = resting half height (cube spawns at rest).
             self.cube_rest_half_z = float(cube_pos[2])
             self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
             self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = cube_quat
-        else:
-            # Park the cube out of reach while the arm pose is sampled, so the
-            # arm's collision rejection doesn't test against a cube that has
-            # not been placed yet (the real spawn happens after, when tag
-            # visibility can account for the arm).
+            if qpos_pinned:
+                joint_pos = np.asarray(options["qpos"], dtype=np.float64)
+                self._write_arm_pose(joint_pos)
+            else:
+                joint_pos = self._sample_collision_free_arm_pose()
+        elif qpos_pinned:
+            self._randomize_scene()
+            # Park the cube out of reach while setting the pinned arm pose.
             self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = (1.0, 1.0, 0.05)
-
-        if "qpos" in options:
             joint_pos = np.asarray(options["qpos"], dtype=np.float64)
             self._write_arm_pose(joint_pos)
+            sampled = self._sample_visible_cube_spawn(max_attempts=100)
+            if sampled is None:
+                raise AssertionError(
+                    "no camera-visible cube spawn found in 100 attempts; "
+                    "check the spawn box against the tag camera")
+            cube_pos, cube_quat = sampled
         else:
-            # Sample random arm position, rejecting any arm-environment collisions
-            attempt = 0
-            while True:
-                joint_pos = self.np_random.uniform(self.joint_low, self.joint_high)
-                self._write_arm_pose(joint_pos)
-                if not self._has_arm_collision():
+            # If the sampled arm fully blocks camera-tag visibility, restart the
+            # reset sampling from scratch with a new scene/arm realization.
+            for reset_attempt in range(100):
+                self._randomize_scene()
+                self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = (1.0, 1.0, 0.05)
+                joint_pos = self._sample_collision_free_arm_pose()
+                sampled = self._sample_visible_cube_spawn(max_attempts=100)
+                if sampled is not None:
+                    cube_pos, cube_quat = sampled
                     break
-                attempt += 1
-                if attempt % 10 == 0:
-                    print(f"WARNING: {attempt} arm position samples rejected (collision)")
-
-        if not cube_pinned:
-            cube_pos, cube_quat = self._sample_visible_cube_spawn()
+                if (reset_attempt + 1) % 10 == 0:
+                    print(
+                        "WARNING: "
+                        f"{reset_attempt + 1} reset resamples rejected "
+                        "(no visible cube spawn for sampled arm pose)"
+                    )
+            else:
+                raise AssertionError(
+                    "no camera-visible cube spawn found after 200 reset resamples "
+                    "(100 cube attempts each); check the spawn box and tag camera")
 
         self._on_reset(cube_pos)
         self._servo_profile.reset(joint_pos)
