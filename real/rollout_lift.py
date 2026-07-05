@@ -354,6 +354,11 @@ def main() -> int:
     try:
         if marker_source is not None:
             marker_source.start()
+            # Let the camera + detector settle before the arm moves: block until
+            # the table anchor tag is being detected, so the first obs is built on
+            # a camera actually mapped to the base frame, not zeroed/held poses.
+            waited = marker_source.warmup()
+            print(f"camera warmup: table tag anchored after {waited:.2f} s")
         loop.boot()
 
         # Sync the sim arm to the real arm and place the cube.

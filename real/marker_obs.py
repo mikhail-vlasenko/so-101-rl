@@ -84,6 +84,10 @@ class CameraMarkerSource:
         self._pos = np.zeros((N_MARKERS, 3))
         self._rot = np.zeros((N_MARKERS, 3))
         self._last_capture_t = np.full(N_MARKERS, -np.inf)
+        # Capture time of the last frame the table anchor tag was seen in; -inf =
+        # never. Until it is fresh the camera can't be mapped to the base frame at
+        # all (every pose is zeroed/held), so warmup() blocks on it.
+        self._table_last_capture_t = -np.inf
         self._cube_pos = np.zeros(3)
         self._cube_rot = np.zeros(3)
         self._cube_last_capture_t = -np.inf
@@ -132,6 +136,8 @@ class CameraMarkerSource:
                     self._pos[detected] = pos[detected]
                     self._rot[detected] = rot[detected]
                     self._last_capture_t[detected] = t_recv - CAPTURE_TO_READ_S
+                    if TABLE_TAG_ID in poses:
+                        self._table_last_capture_t = t_recv - CAPTURE_TO_READ_S
                     if cube_pose is not None:
                         self._cube_pos, self._cube_rot = cube_pose
                         self._cube_last_capture_t = t_recv - CAPTURE_TO_READ_S
@@ -220,6 +226,34 @@ class CameraMarkerSource:
         if recv_t is None:
             return float("nan"), float("nan"), float("nan")
         return time.monotonic() - recv_t, read_ms, detect_ms
+
+    def table_age(self) -> float:
+        """Seconds since the table anchor tag (id TABLE_TAG_ID) was last
+        detected; inf if never seen this session. Re-raises a dead-thread
+        error."""
+        if self.error is not None:
+            raise self.error
+        with self._lock:
+            last = self._table_last_capture_t
+        return time.monotonic() - last
+
+    def warmup(self, timeout_s: float = 5.0, fresh_s: float = 0.25) -> float:
+        """Block until the table anchor tag is freshly detected (age <= fresh_s),
+        so the episode starts with the camera actually anchored to the base frame
+        instead of steering the arm on zeroed/held poses while the sensor and
+        detector settle. Re-raises a dead-thread error; raises on timeout so a
+        mis-framed or out-of-focus camera fails loud before the arm moves.
+        Returns how long it waited (s)."""
+        t0 = time.monotonic()
+        deadline = t0 + timeout_s
+        while True:
+            if self.table_age() <= fresh_s:   # re-raises self.error if the thread died
+                return time.monotonic() - t0
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"table anchor tag (id {TABLE_TAG_ID}) not detected within "
+                    f"{timeout_s:.0f} s of warmup; check camera framing/focus.")
+            time.sleep(0.02)
 
     def stop(self) -> None:
         self._stop.set()
