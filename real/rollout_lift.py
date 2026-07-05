@@ -304,6 +304,12 @@ def main() -> int:
     assert cube_tag_site_id >= 0, f"site '{CUBE_TAG_SITE_NAME}' not found in model"
     # Tag-face offset from the sponge center, sourced from the loaded scene XML.
     cube_hz = float(model.geom_size[cube_geom_id][2])
+    # Static body->tag-site transform (the site carries the calibrated in-plane
+    # glue yaw, euler in scene_*.xml); inverted below to draw the sponge body
+    # from the measured tag pose.
+    sq = model.site_quat[cube_tag_site_id]  # MuJoCo wxyz
+    cube_tag_site_R = Rotation.from_quat([sq[1], sq[2], sq[3], sq[0]])
+    cube_tag_site_pos = model.site_pos[cube_tag_site_id].copy()
 
     policy = load_policy(args.model, LOG_DIR,
                          obs_dim_for(prev_actions_n, marker_include_rot))
@@ -443,12 +449,14 @@ def main() -> int:
             if marker_source is not None and cube_tag_pos.any():
                 # Pin the sim cube to the measurement so the viewer shows the
                 # real sponge (held pose while the tag is hidden). Center and
-                # orientation are back-derived from the tag pose for display;
-                # the obs carries the raw tag pose.
+                # orientation are back-derived from the tag pose for display,
+                # inverting the tag site's body-relative glue yaw so the drawn
+                # body matches the real sponge; the obs carries the raw tag pose.
                 tag_R = Rotation.from_rotvec(cube_tag_rot)
+                body_R = tag_R * cube_tag_site_R.inv()
                 data.qpos[cube_qposadr:cube_qposadr + 3] = \
-                    cube_tag_pos - cube_hz * tag_R.as_matrix()[:, 2]
-                x, y, z, w = tag_R.as_quat()  # scipy xyzw -> MuJoCo wxyz
+                    cube_tag_pos - body_R.apply(cube_tag_site_pos)
+                x, y, z, w = body_R.as_quat()  # scipy xyzw -> MuJoCo wxyz
                 data.qpos[cube_qposadr + 3:cube_qposadr + 7] = (w, x, y, z)
                 data.qvel[cube_dofadr:cube_dofadr + 6] = 0.0
             mujoco.mj_forward(model, data)

@@ -36,9 +36,15 @@
           contype="1" conaffinity="1" solref="0.01 1"/>
       <!-- AprilTag id 1 (20 mm) glued to the center of one largest (6x4) face;
            +z out of the printed face, same convention as the arm marker sites
-           in so101.xml. Site z offset = the geom's z half-extent. -->
+           in so101.xml. Site z offset = the geom's z half-extent. The 90 deg
+           z-rotation is the calibrated in-plane glue yaw of the real tag on the
+           sponge (TODO.md #21): real/marker_obs.py reads the cube tag raw, so
+           this site frame must carry the same quarter turn. Sign is irrelevant
+           (+/-90 differ by a 180 deg turn about the normal, which is a symmetry
+           of the stretched box); only the quarter turn vs axis-aligned matters.
+           Affects the cube_tag_rot channel only. -->
       <site name="cube_tag" type="box" group="2" size="0.01 0.01 0.0005"
-          pos="0 0 0.0125" rgba="0.1 0.8 0.1 1"/>
+          pos="0 0 0.0125" euler="0 0 1.5708" rgba="0.1 0.8 0.1 1"/>
     </body>
 
     <!-- Place target: visual-only flat cylinder -->

@@ -165,9 +165,9 @@ class CameraMarkerSource:
                 detected[i] = True
         cube_pose = None
         if self.track_cube and CUBE_TAG_ID in poses:
-            # Raw tag pose, no quarter_turns un-rotation: the sim trained on
-            # the tag site's own pose, and the tag's in-plane glue yaw on the
-            # sponge is uncalibrated (TODO.md).
+            # Raw tag pose, no quarter_turns un-rotation: the sim cube_tag site
+            # bakes the calibrated 90 deg in-plane glue yaw (so101/scene_*.xml),
+            # so the raw measured tag frame already matches the sim convention.
             cube_pose = mat_to_pos_rotvec(T_base_cam @ rt_to_mat(*poses[CUBE_TAG_ID]))
         return pos, rot, detected, cube_pose
 
