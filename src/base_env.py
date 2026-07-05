@@ -579,38 +579,60 @@ class SO101BaseEnv(gym.Env):
         """Hook for task-specific reset state. Called after common reset."""
 
     def reset(self, *, seed=None, options=None):
+        """options may pin the initial state instead of sampling it (used by
+        sysid/replay_rollout.py to restart a sim episode from a recorded real
+        pose): "qpos" (6,) sets the arm joints, "cube_pos" (3,) + "cube_quat"
+        (4, wxyz — must come together) set the cube. Pinned states skip the
+        corresponding sampling but keep every other reset step identical."""
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
         self._prev_qpos_obs = None
         self._prev_actions[:] = 0.0
 
-        cube_xy = self._sample_cube_pos()
-        cube_quat, self.cube_rest_half_z = sample_cube_orientation(
-            self.np_random, self.cube_half_extents,
-            smallest_face_only=self.cube_smallest_face_only)
-        cube_pos = np.array([cube_xy[0], cube_xy[1], self.cube_rest_half_z])
+        options = options or {}
+        assert ("cube_pos" in options) == ("cube_quat" in options), \
+            "cube_pos and cube_quat must be overridden together"
+        if "cube_pos" in options:
+            cube_pos = np.asarray(options["cube_pos"], dtype=np.float64)
+            cube_quat = np.asarray(options["cube_quat"], dtype=np.float64)
+            # Spawn height = resting half height (cube spawns at rest).
+            self.cube_rest_half_z = float(cube_pos[2])
+        else:
+            cube_xy = self._sample_cube_pos()
+            cube_quat, self.cube_rest_half_z = sample_cube_orientation(
+                self.np_random, self.cube_half_extents,
+                smallest_face_only=self.cube_smallest_face_only)
+            cube_pos = np.array([cube_xy[0], cube_xy[1], self.cube_rest_half_z])
         self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
         self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = cube_quat
 
         self._on_reset(cube_pos)
 
-        # Sample random arm position, rejecting any arm-environment collisions
-        attempt = 0
-        while True:
-            joint_pos = self.np_random.uniform(self.joint_low, self.joint_high)
+        if "qpos" in options:
+            joint_pos = np.asarray(options["qpos"], dtype=np.float64)
             self.data.qpos[self.joint_qposadr] = joint_pos
             self.data.ctrl[:self.n_joints] = joint_pos
-            # If actuators carry activation state (e.g. dyntype="filter"),
-            # initialize it at the joint position so the controller doesn't
-            # snap the arm from 0 toward joint_pos on the first step.
             if self.model.na > 0:
                 self.data.act[:] = joint_pos
             mujoco.mj_forward(self.model, self.data)
-            if not self._has_arm_collision():
-                break
-            attempt += 1
-            if attempt % 10 == 0:
-                print(f"WARNING: {attempt} arm position samples rejected (collision)")
+        else:
+            # Sample random arm position, rejecting any arm-environment collisions
+            attempt = 0
+            while True:
+                joint_pos = self.np_random.uniform(self.joint_low, self.joint_high)
+                self.data.qpos[self.joint_qposadr] = joint_pos
+                self.data.ctrl[:self.n_joints] = joint_pos
+                # If actuators carry activation state (e.g. dyntype="filter"),
+                # initialize it at the joint position so the controller doesn't
+                # snap the arm from 0 toward joint_pos on the first step.
+                if self.model.na > 0:
+                    self.data.act[:] = joint_pos
+                mujoco.mj_forward(self.model, self.data)
+                if not self._has_arm_collision():
+                    break
+                attempt += 1
+                if attempt % 10 == 0:
+                    print(f"WARNING: {attempt} arm position samples rejected (collision)")
         self._servo_profile.reset(joint_pos)
         self._ctrl_target = joint_pos.copy()
         self.step_count = 0

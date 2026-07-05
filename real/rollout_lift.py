@@ -201,11 +201,17 @@ def print_latency_summary(rows: list[dict]) -> None:
 
 
 def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
+    tag_names = [n.removeprefix("marker_") for n in MARKER_SITE_NAMES]
     header = (["step", "t_s"]
               + [f"action_{n}" for n in JOINT_NAMES]
               + [f"qpos_{n}" for n in JOINT_NAMES]
-              + ["ee_x", "ee_y", "ee_z", "cube_x", "cube_y", "cube_z", "grasped_sim",
-                 "loop_ms", "predict_ms", "read_all_ms", "stream_ms", "window_ms",
+              + ["ee_x", "ee_y", "ee_z", "cube_x", "cube_y", "cube_z", "grasped_sim"]
+              # marker obs the policy saw (camera or FK stand-in), the FK pose
+              # of the same tick's qpos, and the per-tag age fed to the policy
+              + [f"mobs_{t}_{ax}" for t in tag_names for ax in "xyz"]
+              + [f"mfk_{t}_{ax}" for t in tag_names for ax in "xyz"]
+              + [f"mage_{t}_s" for t in tag_names]
+              + ["loop_ms", "predict_ms", "read_all_ms", "stream_ms", "window_ms",
                  "marker_age_ms", "cam_read_ms", "detect_ms"])
     with out_path.open("w", newline="") as f:
         w = csv.writer(f)
@@ -217,6 +223,9 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
                         f"{r['ee'][0]:.6f}", f"{r['ee'][1]:.6f}", f"{r['ee'][2]:.6f}",
                         f"{r['cube'][0]:.6f}", f"{r['cube'][1]:.6f}", f"{r['cube'][2]:.6f}",
                         int(r["grasped"]),
+                        *(f"{v:.6f}" for v in r["marker_obs"].flatten()),
+                        *(f"{v:.6f}" for v in r["marker_fk"].flatten()),
+                        *(f"{v:.4f}" for v in r["marker_age"]),
                         f"{r['loop_ms']:.2f}", f"{r['predict_ms']:.3f}",
                         f"{r['read_all_ms']:.2f}", f"{r['stream_ms']:.2f}",
                         f"{r['window_ms']:.2f}",
@@ -323,6 +332,11 @@ def main() -> int:
             prev_iter_t = iter_t
 
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
+            # FK marker poses of the same qpos the obs uses (data is still
+            # pinned at loop.qpos from the previous tick). Logged next to the
+            # camera's measured poses: their difference is the live
+            # camera-vs-encoder-chain disagreement per tag.
+            fk_pos_now, fk_rot_now = marker_world_poses(data, marker_site_ids)
             if marker_source is not None:
                 # Measured AprilTag poses in the base frame, held at the last
                 # detection per tag with their age (real/marker_obs.py).
@@ -340,10 +354,9 @@ def main() -> int:
                 # Match training (base_env._compute_obs): a tag turned away
                 # from tag_cam holds its last visible pose, age keeps growing.
                 now = time.monotonic()
-                pos_now, rot_now = marker_world_poses(data, marker_site_ids)
                 vis = markers_visible(data, marker_site_ids, tag_cam_pos)
-                fk_pos[vis] = pos_now[vis]
-                fk_rot[vis] = rot_now[vis]
+                fk_pos[vis] = fk_pos_now[vis]
+                fk_rot[vis] = fk_rot_now[vis]
                 fk_seen_t[vis] = now - FK_FRESH_AGE_S
                 marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
                 marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
@@ -389,6 +402,8 @@ def main() -> int:
             log_rows.append({
                 "step": step, "action": action.copy(), "qpos": loop.qpos.copy(),
                 "ee": ee_pos.copy(), "cube": cube_pos.copy(), "grasped": grasped_sim,
+                "marker_obs": marker_pos.copy(), "marker_fk": fk_pos_now.copy(),
+                "marker_age": marker_age.copy(),
                 "loop_ms": loop_ms, "predict_ms": predict_ms,
                 "read_all_ms": loop.last_read_ms, "stream_ms": loop.last_stream_ms,
                 "window_ms": loop.last_window_ms,
@@ -415,6 +430,8 @@ def main() -> int:
                 if marker_source is not None:
                     lat += (f" | cam age={marker_age_ms:.0f} "
                             f"read={cam_read_ms:.0f} detect={detect_ms:.0f}")
+                    cam_fk_mm = np.linalg.norm(marker_pos - fk_pos_now, axis=1) * 1e3
+                    lat += " | cam-fk[mm]=" + "/".join(f"{v:.0f}" for v in cam_fk_mm)
                 print(lat)
             step += 1
 
