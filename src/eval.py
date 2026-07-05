@@ -18,7 +18,7 @@ from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 
 from src.checkpoints import resolve_model_path
-from src.train import ENV_REGISTRY, _resolve_env, make_env
+from src.train import ENV_REGISTRY, _resolve_env, make_env, runtime_cfg_from_hydra
 
 ALGORITHM_CLASSES = {
     "sac": SAC,
@@ -48,11 +48,11 @@ def main(cfg: DictConfig):
     print(f"Loading {algo_name.upper()} model: {model_path}")
     model = algo_cls.load(model_path)
 
+    runtime_cfg = runtime_cfg_from_hydra(cfg)
     render_mode = "human" if cfg.render else None
     inner_env = make_env(env_cls, env_cfg, xml_path, render_mode=render_mode,
                          slow_factor=cfg.slow_factor,
-                         marker_include_rot=bool(cfg.marker_include_rot),
-                         prev_actions_n=int(cfg.prev_actions_n))
+                         cfg=runtime_cfg)
     frame_stack = int(cfg.frame_stack)
     vec_env = DummyVecEnv([lambda: inner_env])
     if frame_stack > 1:

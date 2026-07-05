@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from hydra import compose, initialize
 
+from src.base_env import RuntimeEnvConfig
 from src.pickplace_env import SO101PickPlaceEnv, XY_PROGRESS_COEFF, GRASP_HOLD_REWARD
 
 
@@ -19,9 +20,10 @@ def cfg():
 
 
 def _env(cfg):
+    runtime = RuntimeEnvConfig(obs_noise=None, obs_bias=None)
     return SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
                              xml_path="so101/scene_pickplace.xml",
-                             obs_noise=None, obs_bias=None)
+                             cfg=runtime)
 
 
 def _call_reward(env, cube_z, grasped, ring_height, prev_xy_dist=0.10, new_xy_dist=0.08):

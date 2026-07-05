@@ -9,14 +9,17 @@ import hydra
 from omegaconf import DictConfig
 
 from src.pickplace_env import SO101PickPlaceEnv
+from src.train import runtime_cfg_from_hydra
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
 def main(cfg: DictConfig):
     # When streaming (web panel), render offscreen instead of the native viewer.
     stream = cfg.stream_port is not None
+    runtime_cfg = runtime_cfg_from_hydra(cfg)
     env = SO101PickPlaceEnv(render_mode=None if stream else "human",
-                            env_cfg=cfg["pickplace_env"])
+                            env_cfg=cfg["pickplace_env"],
+                            cfg=runtime_cfg)
     publisher = None
     if stream:
         from panel.sim_stream import SimStreamPublisher

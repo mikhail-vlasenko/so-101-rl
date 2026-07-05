@@ -13,7 +13,7 @@ import numpy as np
 import mujoco
 from gymnasium import spaces
 
-from src.base_env import SO101ArmEnv
+from src.base_env import RuntimeEnvConfig, SO101ArmEnv
 
 
 class SO101ReachEnv(SO101ArmEnv):
@@ -23,14 +23,10 @@ class SO101ReachEnv(SO101ArmEnv):
     TASK_NAME = "reach"
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
-                 obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
-                 marker_always_visible=False, marker_include_rot=False, prev_actions_n=2,
-                 cube_size_jitter=0.0):
-        # not used by reach env (kept for train.py signature)
-        del obs_noise, cam_latency, obs_bias, marker_dropout, marker_always_visible
-        del marker_include_rot, cube_size_jitter
+                 cfg: RuntimeEnvConfig | None = None):
+        assert cfg is not None, "RuntimeEnvConfig is required"
         super().__init__(render_mode=render_mode, slow_factor=slow_factor,
-                         xml_path=xml_path, prev_actions_n=prev_actions_n,
+                         xml_path=xml_path, prev_actions_n=cfg.prev_actions_n,
                          env_cfg=env_cfg)
 
         self.joint_center = 0.5 * (self.joint_low + self.joint_high)

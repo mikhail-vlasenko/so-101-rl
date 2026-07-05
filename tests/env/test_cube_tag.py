@@ -11,6 +11,7 @@ import pytest
 
 from src.base_env import (
     MARKER_AGE_CAP_S,
+    RuntimeEnvConfig,
     cube_tag_occluded,
     cube_tag_visible,
     marker_world_poses,
@@ -47,7 +48,7 @@ CUBE_AGE = 26
 
 @pytest.fixture(scope="module")
 def env():
-    return SO101LiftEnv(env_cfg=_cfg())
+    return SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
 
 
 def _refresh_detection(env):
@@ -119,7 +120,8 @@ def test_never_seen_reads_zero_with_capped_age():
     """Full detector dropout starves the cube tag from reset on: zero pose,
     age pinned at MARKER_AGE_CAP_S (the tag-visible spawn only guarantees
     geometry, not the dropout roll)."""
-    env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout={"near": 1.0, "far": 1.0})
+    env = SO101LiftEnv(env_cfg=_cfg(),
+                       cfg=RuntimeEnvConfig(marker_dropout={"near": 1.0, "far": 1.0}))
     env.reset(seed=0)
     for _ in range(5):
         obs, *_ = env.step(np.zeros(6, dtype=np.float32))
@@ -131,8 +133,11 @@ def test_never_seen_reads_zero_with_capped_age():
 def test_always_visible_bypasses_dropout_and_occlusion():
     """marker_always_visible feeds the cube tag fresh regardless of dropout —
     the easy-mode crutch covers the cube exactly like the arm markers."""
-    env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout={"near": 1.0, "far": 1.0},
-                       marker_always_visible=True)
+    env = SO101LiftEnv(
+        env_cfg=_cfg(),
+        cfg=RuntimeEnvConfig(marker_dropout={"near": 1.0, "far": 1.0},
+                             marker_always_visible=True),
+    )
     env.reset(seed=0)
     for _ in range(5):
         obs, *_ = env.step(np.zeros(6, dtype=np.float32))

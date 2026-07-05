@@ -14,7 +14,7 @@ import pytest
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
-from src.base_env import cube_tag_visible, markers_visible
+from src.base_env import RuntimeEnvConfig, cube_tag_visible, markers_visible
 from src.lift_env import SO101LiftEnv
 from src.pickplace_env import SO101PickPlaceEnv
 
@@ -56,9 +56,10 @@ def lift_cfg():
 # These tests exercise the marker-rotation obs slices, so they pin the (non-default)
 # marker_include_rot=True layout; the indices/OBS_DIM below assume it.
 def _pickplace(cfg, obs_noise):
+    runtime = RuntimeEnvConfig(obs_noise=obs_noise, marker_include_rot=True)
     return SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
                              xml_path="so101/scene_pickplace.xml",
-                             obs_noise=obs_noise, marker_include_rot=True)
+                             cfg=runtime)
 
 
 def _zero_action():
@@ -197,7 +198,7 @@ def test_noise_does_not_corrupt_true_state(cfg):
 def test_lift_env_compatible_with_noise(lift_cfg):
     """Lift env must accept obs_noise and produce correctly-shaped obs."""
     env = SO101LiftEnv(env_cfg=lift_cfg.lift_env, xml_path="so101/scene_lift.xml",
-                      obs_noise=SIGMAS, marker_include_rot=True)
+                       cfg=RuntimeEnvConfig(obs_noise=SIGMAS, marker_include_rot=True))
     obs, _ = env.reset(seed=0)
     assert obs.shape == (OBS_DIM,)
     # Lift's _obs_extra returns zeros + task_id, so [33:36] should be zero, [36]=lift TASK_ID=0.0
@@ -211,7 +212,7 @@ def test_prev_actions_track_last_two_actions(cfg):
     """After stepping, obs[PREV_ACTIONS] = [a(t-1), a(t)] (12 dims = 2 actions * 6 joints)."""
     env = SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
                             xml_path="so101/scene_pickplace.xml",
-                            obs_noise=None, marker_include_rot=True)
+                            cfg=RuntimeEnvConfig(obs_noise=None, marker_include_rot=True))
     env.reset(seed=0)
     a0 = np.array([0.1, -0.2, 0.3, -0.4, 0.5, -0.6], dtype=np.float32)
     a1 = np.array([-0.7, 0.8, -0.9, 0.4, -0.3, 0.2], dtype=np.float32)

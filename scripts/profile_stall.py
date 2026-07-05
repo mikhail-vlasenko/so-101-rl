@@ -23,7 +23,7 @@ import numpy as np
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from src.base_env import JOINT_NAMES
+from src.base_env import JOINT_NAMES, RuntimeEnvConfig
 from src.lift_env import SO101LiftEnv
 from src.units import action_to_target
 
@@ -40,7 +40,8 @@ def _make_env(action_scale=None):
     if action_scale is not None:
         env_cfg["action_scale"] = action_scale
     return SO101LiftEnv(env_cfg=env_cfg,
-                        xml_path=os.path.join(REPO_ROOT, "so101/scene_lift.xml"))
+                        xml_path=os.path.join(REPO_ROOT, "so101/scene_lift.xml"),
+                        cfg=RuntimeEnvConfig())
 
 
 def _drive(env, action, n_ticks):

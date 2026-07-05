@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from src.base_env import RuntimeEnvConfig
 from src.lift_env import (
     SO101LiftEnv, CUBE_MOTION_COEFF, CUBE_MOTION_DEADZONE,
     HEIGHT_PROGRESS_COEFF, GRASP_HOLD_REWARD, LIFT_BONUS, TIME_PENALTY,
@@ -30,7 +31,7 @@ def _cfg():
 
 
 def test_env_resets_and_steps():
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     obs, _ = env.reset(seed=0)
     assert obs.shape == (env.obs_dim,)
     for _ in range(5):
@@ -39,7 +40,7 @@ def test_env_resets_and_steps():
 
 
 def test_height_progress_gated_on_grasp(monkeypatch):
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     # Force not-grasped: cube should not get height-progress reward even if it rises.
     monkeypatch.setattr(env, "_detect_grasp", lambda: False)
@@ -61,7 +62,7 @@ def test_height_progress_gated_on_grasp(monkeypatch):
 
 
 def test_height_progress_credited_when_grasped():
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     # Stay below target_height=0.10 so this tests progress credit, not termination.
     env._prev_cube_pos = np.array([0.2, 0.0, 0.04])
@@ -81,7 +82,7 @@ def test_height_progress_credited_when_grasped():
 def test_lift_success_bonus():
     """Crossing target_height while grasped terminates AND pays LIFT_BONUS —
     finishing must strictly beat holding just under the target (see lift_env.py)."""
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     env._prev_cube_pos = np.array([0.2, 0.0, 0.09])
     cube_pos = np.array([0.2, 0.0, 0.11])  # crosses target_height=0.10
@@ -99,7 +100,7 @@ def test_lift_success_bonus():
 
 
 def test_floor_proximity_penalty(monkeypatch):
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
     env._prev_cube_pos = np.array([0.2, 0.0, 0.05])
@@ -126,14 +127,14 @@ def test_floor_proximity_penalty(monkeypatch):
 
 
 def test_min_arm_floor_dist_runs():
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     d = env._min_arm_floor_dist(0.02)
     assert -0.02 <= d <= 0.02
 
 
 def test_cube_motion_penalty_pregrasp(monkeypatch):
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
     env._prev_cube_pos = np.array([0.20, 0.0, 0.05])
@@ -154,7 +155,7 @@ def test_cube_motion_penalty_pregrasp(monkeypatch):
 
 def test_grasp_contact_ladder_pregrasp(monkeypatch):
     """Pre-grasp reward rises with jaw contact: touch one jaw, then close on both."""
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     monkeypatch.setattr(env, "_gripper_closedness", lambda: 1.0)
     kwargs = dict(ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
@@ -174,7 +175,7 @@ def test_grasp_contact_ladder_pregrasp(monkeypatch):
 
 def test_poke_force_penalty_pregrasp(monkeypatch):
     """With shaping on, pre-grasp arm↔cube contact force is penalized (gentle approach)."""
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     env.poke_force_coeff = -0.002
     monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
@@ -191,7 +192,7 @@ def test_floor_force_penalty_applies_while_grasped(monkeypatch):
     """Arm↔floor contact force is penalized proportionally, including during the
     grasp — the binary contact/proximity terms alone let the policy lean on the
     floor at ~20 N for free once contact is already paid for."""
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     env.floor_force_coeff = -0.02
     env.floor_proximity_penalty = 0.0
@@ -207,7 +208,7 @@ def test_floor_force_penalty_applies_while_grasped(monkeypatch):
 
 def test_cube_tip_penalty_pregrasp(monkeypatch):
     """With shaping on, pre-grasp cube angular speed (rolling it over) is penalized."""
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     env.cube_tip_coeff = -0.5
     monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
@@ -222,7 +223,7 @@ def test_cube_tip_penalty_pregrasp(monkeypatch):
 
 def test_shaping_terms_skipped_when_zero(monkeypatch):
     """shaping=none: poke/tip helpers and the proximity check aren't even called."""
-    env = SO101LiftEnv(env_cfg=_cfg())  # poke/tip coeffs are 0 in the fixture
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())  # poke/tip coeffs are 0 in the fixture
     env.reset(seed=0)
     env.floor_proximity_penalty = 0.0
     monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)

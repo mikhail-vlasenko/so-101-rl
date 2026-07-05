@@ -26,7 +26,7 @@ import mujoco.viewer
 from hydra import compose, initialize_config_dir
 import os
 
-from src.train import _resolve_env, make_env
+from src.train import _resolve_env, make_env, runtime_cfg_from_hydra
 
 
 def build_lift_env():
@@ -35,9 +35,10 @@ def build_lift_env():
                                version_base=None):
         cfg = compose(config_name="config", overrides=["env=lift"])
     env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, "lift")
+    runtime_cfg = runtime_cfg_from_hydra(cfg)
     # render_mode=None: we own the viewer. DR params left at defaults — they
     # only touch observations, and here the physics is all that matters.
-    return make_env(env_cls, env_cfg, xml_path)
+    return make_env(env_cls, env_cfg, xml_path, cfg=runtime_cfg)
 
 
 def refresh_tag_colors(env):

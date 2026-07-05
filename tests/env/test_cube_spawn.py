@@ -13,7 +13,7 @@ import mujoco
 from hydra import compose, initialize
 
 from src.base_env import (
-    cube_tag_occluded, marker_dropout_prob, marker_world_poses, markers_visible,
+    RuntimeEnvConfig, cube_tag_occluded, marker_dropout_prob, marker_world_poses, markers_visible,
     obs_dim_for, sample_cube_orientation,
 )
 from src.lift_env import SO101LiftEnv
@@ -31,7 +31,8 @@ def env():
         cfg = compose(config_name="config", overrides=["env=lift"])
     # marker_include_rot=True so the MARKER_*_ROT obs slices below are populated.
     return SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
-                        obs_noise=None, obs_bias=None, marker_include_rot=True)
+                        cfg=RuntimeEnvConfig(obs_noise=None, obs_bias=None,
+                                             marker_include_rot=True))
 
 
 def test_sample_cube_orientation_rest_heights():
@@ -141,7 +142,7 @@ def test_default_obs_drops_marker_rotations():
         cfg = compose(config_name="config", overrides=["env=lift"])
     # marker_always_visible so neither pose goes stale regardless of the spawn pose.
     env = SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
-                       marker_always_visible=True)
+                       cfg=RuntimeEnvConfig(marker_always_visible=True))
     assert env.marker_include_rot is False
     assert env.obs_dim == obs_dim_for(env.prev_actions_n, marker_include_rot=False)
     assert env.obs_dim == obs_dim_for(env.prev_actions_n, marker_include_rot=True) - 6

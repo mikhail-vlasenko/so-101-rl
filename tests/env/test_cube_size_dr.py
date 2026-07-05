@@ -12,6 +12,7 @@ import numpy as np
 
 from hydra import compose, initialize
 
+from src.base_env import RuntimeEnvConfig
 from src.lift_env import SO101LiftEnv
 
 NOMINAL = np.array([0.03, 0.02, 0.0125])
@@ -23,8 +24,8 @@ def _env(cube_size_jitter):
     with initialize(config_path="../../conf", version_base=None):
         cfg = compose(config_name="config", overrides=["env=lift"])
     return SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
-                        obs_noise=None, obs_bias=None,
-                        cube_size_jitter=cube_size_jitter)
+                        cfg=RuntimeEnvConfig(obs_noise=None, obs_bias=None,
+                                             cube_size_jitter=cube_size_jitter))
 
 
 def test_zero_jitter_keeps_nominal():

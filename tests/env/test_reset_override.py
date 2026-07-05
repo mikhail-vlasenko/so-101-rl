@@ -4,7 +4,7 @@ restart a sim episode from a recorded real-arm pose."""
 import numpy as np
 import pytest
 
-from src.base_env import sample_cube_orientation
+from src.base_env import RuntimeEnvConfig, sample_cube_orientation
 from src.lift_env import SO101LiftEnv
 from src.train import make_env
 from real.rollout_common import load_env_cfg
@@ -16,8 +16,29 @@ QPOS = np.array([0.3, -1.5, 1.57, -0.4, 1.45, -0.01])
 def env():
     env_cfg, prev_actions_n, marker_include_rot = load_env_cfg("lift")
     return make_env(SO101LiftEnv, env_cfg, SO101LiftEnv.XML_PATH,
-                    marker_include_rot=marker_include_rot,
-                    prev_actions_n=prev_actions_n)
+                    cfg=RuntimeEnvConfig(marker_include_rot=marker_include_rot,
+                                         prev_actions_n=prev_actions_n))
+
+
+def test_make_env_can_map_runtime_cfg():
+    env_cfg, _, _ = load_env_cfg("lift")
+    runtime_cfg = {
+        "obs_noise": {"qpos_sigma": 0.0, "marker_pos_sigma": 0.0,
+                      "marker_rot_sigma": 0.0, "cube_sigma": 0.0},
+        "cam_latency": None,
+        "obs_bias": {"qpos_sigma": 0.0, "marker_pos_sigma": 0.0,
+                     "marker_rot_sigma": 0.0, "cube_sigma": 0.0},
+        "marker_dropout": {"near": 0.0, "far": 0.0},
+        "marker_always_visible": True,
+        "marker_include_rot": False,
+        "prev_actions_n": 1,
+        "cube_size_jitter": 0.0,
+    }
+    env = make_env(SO101LiftEnv, env_cfg, SO101LiftEnv.XML_PATH,
+                   cfg=RuntimeEnvConfig(**runtime_cfg))
+    assert env.marker_always_visible is True
+    assert env.prev_actions_n == 1
+    env.close()
 
 
 def test_reset_pins_qpos_and_cube(env):

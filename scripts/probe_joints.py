@@ -3,6 +3,7 @@
 import numpy as np
 import mujoco
 from hydra import compose, initialize
+from src.base_env import RuntimeEnvConfig
 from src.lift_env import SO101LiftEnv
 
 
@@ -10,7 +11,7 @@ def main():
     with initialize(config_path="../conf", version_base=None):
         cfg = compose(config_name="config", overrides=["env=lift"])
     env = SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
-                       obs_noise=None, obs_bias=None)
+                       cfg=RuntimeEnvConfig(obs_noise=None, obs_bias=None))
     env.reset(seed=0)
     print("Joint names:")
     from base_env import JOINT_NAMES

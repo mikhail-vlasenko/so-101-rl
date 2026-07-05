@@ -10,6 +10,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecNormalize
+from src.base_env import RuntimeEnvConfig
 from src.callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EpisodeLengthCallback,
     EvalStatsCallback, EvalStatsTracker, FloorContactCallback, LiftSuccessCallback,
@@ -89,33 +90,34 @@ def resume_overrides(cfg: DictConfig) -> dict:
 
 
 def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1,
-             obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
-             marker_always_visible=False, marker_include_rot=False, prev_actions_n=2,
-             cube_size_jitter=0.0):
+             *, cfg: RuntimeEnvConfig):
     """Create an env instance from class, config, and XML path."""
     return env_cls(render_mode=render_mode, env_cfg=env_cfg,
                    slow_factor=slow_factor, xml_path=xml_path,
-                   obs_noise=obs_noise, cam_latency=cam_latency, obs_bias=obs_bias,
-                   marker_dropout=marker_dropout,
-                   marker_always_visible=marker_always_visible,
-                   marker_include_rot=marker_include_rot,
-                   prev_actions_n=prev_actions_n,
-                   cube_size_jitter=cube_size_jitter)
+                   cfg=cfg)
 
 
-def _make_env_fn(env_cls, env_cfg, xml_path, obs_noise=None, cam_latency=None,
-                 obs_bias=None, marker_dropout=None, marker_always_visible=False,
-                 marker_include_rot=False, prev_actions_n=2, cube_size_jitter=0.0):
+def _make_env_fn(env_cls, env_cfg, xml_path, *, cfg: RuntimeEnvConfig):
     """Factory closure for SubprocVecEnv."""
     def _init():
         return Monitor(env_cls(env_cfg=env_cfg, xml_path=xml_path,
-                               obs_noise=obs_noise, cam_latency=cam_latency,
-                               obs_bias=obs_bias, marker_dropout=marker_dropout,
-                               marker_always_visible=marker_always_visible,
-                               marker_include_rot=marker_include_rot,
-                               prev_actions_n=prev_actions_n,
-                               cube_size_jitter=cube_size_jitter))
+                               cfg=cfg))
     return _init
+
+
+def runtime_cfg_from_hydra(cfg: DictConfig) -> RuntimeEnvConfig:
+    """Build typed runtime env options from the composed Hydra config."""
+    return RuntimeEnvConfig(
+        obs_noise=OmegaConf.to_container(cfg.obs_noise, resolve=True),
+        cam_latency=(OmegaConf.to_container(cfg.cam_latency, resolve=True)
+                     if cfg.cam_latency is not None else None),
+        obs_bias=OmegaConf.to_container(cfg.obs_bias, resolve=True),
+        marker_dropout=OmegaConf.to_container(cfg.marker_dropout, resolve=True),
+        marker_always_visible=bool(cfg.marker_always_visible),
+        marker_include_rot=bool(cfg.marker_include_rot),
+        prev_actions_n=int(cfg.prev_actions_n),
+        cube_size_jitter=float(cfg.cube_size_jitter),
+    )
 
 
 def _resolve_env(cfg, orig_dir, env_name):
@@ -139,64 +141,29 @@ def train(cfg: DictConfig):
     gamma = cfg.train.gamma
     n_envs = cfg.train.n_envs
 
-    obs_noise = OmegaConf.to_container(cfg.obs_noise, resolve=True)
-    cam_latency = (OmegaConf.to_container(cfg.cam_latency, resolve=True)
-                   if cfg.cam_latency is not None else None)
-    obs_bias = OmegaConf.to_container(cfg.obs_bias, resolve=True)
-    marker_dropout = OmegaConf.to_container(cfg.marker_dropout, resolve=True)
-    marker_always_visible = bool(cfg.marker_always_visible)
-    marker_include_rot = bool(cfg.marker_include_rot)
-    prev_actions_n = int(cfg.prev_actions_n)
-    cube_size_jitter = float(cfg.cube_size_jitter)
+    runtime_cfg = runtime_cfg_from_hydra(cfg)
+    marker_include_rot = runtime_cfg.marker_include_rot
+    prev_actions_n = runtime_cfg.prev_actions_n
 
     if cfg.env_name == "multitask":
         lift_cls, lift_cfg, lift_xml = _resolve_env(cfg, orig_dir, "lift")
         pp_cls, pp_cfg, pp_xml = _resolve_env(cfg, orig_dir, "pickplace")
         n_lift = round(n_envs * cfg.lift_ratio)
         env_fns = [
-            _make_env_fn(lift_cls, lift_cfg, lift_xml, obs_noise=obs_noise,
-                         cam_latency=cam_latency, obs_bias=obs_bias,
-                         marker_dropout=marker_dropout,
-                         marker_always_visible=marker_always_visible,
-                         marker_include_rot=marker_include_rot,
-                         prev_actions_n=prev_actions_n,
-                         cube_size_jitter=cube_size_jitter) if i < n_lift
-            else _make_env_fn(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise,
-                              cam_latency=cam_latency, obs_bias=obs_bias,
-                              marker_dropout=marker_dropout,
-                              marker_always_visible=marker_always_visible,
-                              marker_include_rot=marker_include_rot,
-                              prev_actions_n=prev_actions_n,
-                              cube_size_jitter=cube_size_jitter)
+            _make_env_fn(lift_cls, lift_cfg, lift_xml, cfg=runtime_cfg) if i < n_lift
+            else _make_env_fn(pp_cls, pp_cfg, pp_xml, cfg=runtime_cfg)
             for i in range(n_envs)
         ]
         # Eval on pickplace (the harder task)
-        eval_inner = make_env(pp_cls, pp_cfg, pp_xml, obs_noise=obs_noise,
-                              cam_latency=cam_latency, obs_bias=obs_bias,
-                              marker_dropout=marker_dropout,
-                              marker_always_visible=marker_always_visible,
-                              marker_include_rot=marker_include_rot,
-                              prev_actions_n=prev_actions_n,
-                              cube_size_jitter=cube_size_jitter)
+        eval_inner = make_env(pp_cls, pp_cfg, pp_xml, cfg=runtime_cfg)
         assert int(lift_cfg["n_substeps"]) == int(pp_cfg["n_substeps"]), \
             "multitask envs must share a control rate for one obs_norm qvel scale"
         n_substeps = int(lift_cfg["n_substeps"])
     else:
         env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, cfg.env_name)
-        env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, obs_noise=obs_noise,
-                                cam_latency=cam_latency, obs_bias=obs_bias,
-                                marker_dropout=marker_dropout,
-                                marker_always_visible=marker_always_visible,
-                                marker_include_rot=marker_include_rot,
-                                prev_actions_n=prev_actions_n,
-                                cube_size_jitter=cube_size_jitter) for _ in range(n_envs)]
-        eval_inner = make_env(env_cls, env_cfg, xml_path, obs_noise=obs_noise,
-                              cam_latency=cam_latency, obs_bias=obs_bias,
-                              marker_dropout=marker_dropout,
-                              marker_always_visible=marker_always_visible,
-                              marker_include_rot=marker_include_rot,
-                              prev_actions_n=prev_actions_n,
-                              cube_size_jitter=cube_size_jitter)
+        env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, cfg=runtime_cfg)
+                   for _ in range(n_envs)]
+        eval_inner = make_env(env_cls, env_cfg, xml_path, cfg=runtime_cfg)
         n_substeps = int(env_cfg["n_substeps"])
 
     frame_stack = int(cfg.frame_stack)

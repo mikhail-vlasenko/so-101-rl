@@ -13,6 +13,7 @@ import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from src.base_env import RuntimeEnvConfig
 from src.reach_env import SO101ReachEnv
 
 
@@ -31,7 +32,8 @@ def _make_env(cfg=None):
     if cfg is None:
         cfg = _load_reach_cfg()
     return SO101ReachEnv(env_cfg=cfg,
-                         xml_path=os.path.join(REPO_ROOT, "so101/scene.xml"))
+                         xml_path=os.path.join(REPO_ROOT, "so101/scene.xml"),
+                         cfg=RuntimeEnvConfig())
 
 
 def test_configured_waypoints_above_ee_z_min():

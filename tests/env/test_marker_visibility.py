@@ -10,7 +10,7 @@ import pytest
 
 from src.base_env import (
     MARKER_AGE_CAP_S, MARKER_VIS_MAX_ANGLE_DEG, MARKER_VIS_MAX_HEIGHT_M,
-    MARKER_VIS_NEAR_ANGLE_DEG, N_MARKERS, marker_dropout_prob,
+    MARKER_VIS_NEAR_ANGLE_DEG, N_MARKERS, RuntimeEnvConfig, marker_dropout_prob,
     marker_world_normals, marker_world_poses, markers_visible, tag_cam_world_pos,
 )
 from src.lift_env import SO101LiftEnv
@@ -55,7 +55,8 @@ def _cfg():
 # envs here pin the (non-default) marker_include_rot=True layout.
 @pytest.fixture(scope="module")
 def env():
-    return SO101LiftEnv(env_cfg=_cfg(), marker_include_rot=True)
+    return SO101LiftEnv(env_cfg=_cfg(),
+                        cfg=RuntimeEnvConfig(marker_include_rot=True))
 
 
 # Obs layout: [qpos(6), qvel(6), pos_finger(3), rot_finger(3), pos_wrist(3),
@@ -153,8 +154,9 @@ def test_hidden_marker_holds_last_measurement():
              "marker_rot_sigma": 0.02, "cube_sigma": 0.005}
     bias = {"qpos_sigma": 0.01, "marker_pos_sigma": 0.005,
             "marker_rot_sigma": 0.02, "cube_sigma": 0.005}
-    env = SO101LiftEnv(env_cfg=_cfg(), obs_noise=noise, obs_bias=bias,
-                       marker_include_rot=True)
+    env = SO101LiftEnv(env_cfg=_cfg(),
+                       cfg=RuntimeEnvConfig(obs_noise=noise, obs_bias=bias,
+                                            marker_include_rot=True))
     env.reset(seed=0)
     age_start = MARKER_OBS_START + 6 * N_MARKERS
     prev = None
@@ -204,8 +206,9 @@ def test_dropout_one_starves_even_facing_tags():
     """marker_dropout near=far=1.0 means no tag is ever detected, even ones
     facing the camera (the geometric-visibility path alone would detect them):
     never-seen tags read all-zero poses with ages pinned at MARKER_AGE_CAP_S."""
-    env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout={"near": 1.0, "far": 1.0},
-                       marker_include_rot=True)
+    env = SO101LiftEnv(env_cfg=_cfg(),
+                       cfg=RuntimeEnvConfig(marker_dropout={"near": 1.0, "far": 1.0},
+                                            marker_include_rot=True))
     env.reset(seed=0)
     age_start = MARKER_OBS_START + 6 * N_MARKERS
     for _ in range(10):
@@ -223,7 +226,8 @@ def test_dropout_rate_matches_prob():
     """Across many draws at a fixed pose, each tag's empirical drop rate matches
     marker_dropout_prob for that pose (whatever band it falls in)."""
     probs = {"near": 0.3, "far": 0.15}
-    env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout=probs)
+    env = SO101LiftEnv(env_cfg=_cfg(),
+                       cfg=RuntimeEnvConfig(marker_dropout=probs))
     env.reset(seed=2)
     expected = _prob(env.data, env.marker_site_ids, env.tag_cam_pos,
                      probs["near"], probs["far"])
@@ -239,8 +243,11 @@ def test_marker_always_visible_disables_staleness():
     """marker_always_visible feeds every tag fresh (never held) even when
     geometry hides it and dropout would drop it — the easy-mode crutch for
     training from scratch."""
-    env = SO101LiftEnv(env_cfg=_cfg(), marker_dropout={"near": 1.0, "far": 1.0},
-                       marker_always_visible=True, marker_include_rot=True)
+    env = SO101LiftEnv(
+        env_cfg=_cfg(),
+        cfg=RuntimeEnvConfig(marker_dropout={"near": 1.0, "far": 1.0},
+                             marker_always_visible=True, marker_include_rot=True),
+    )
     env.reset(seed=0)
     age_start = MARKER_OBS_START + 6 * N_MARKERS
     roll_idx = 4  # sweep wrist_roll through poses that would hide the finger tag
@@ -258,7 +265,7 @@ def test_marker_always_visible_disables_staleness():
 
 
 def test_marker_hidden_ratio_in_info():
-    env = SO101LiftEnv(env_cfg=_cfg())
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     info = {}
     for _ in range(env.max_steps):

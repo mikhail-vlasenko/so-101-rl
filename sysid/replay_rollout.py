@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -51,7 +52,7 @@ from src.base_env import (
     tag_cam_world_pos,
 )
 from src.lift_env import SO101LiftEnv
-from src.train import make_env
+from src.train import make_env, runtime_cfg_from_hydra
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = REPO_ROOT / "logs" / "ppo_lift"
@@ -287,8 +288,16 @@ def main() -> int:
     assert prev_actions_n == 1 and not marker_include_rot, (
         "obsdiff's hand-built obs assumes prev_actions_n=1, marker_include_rot=false; "
         "update run_obsdiff for the new layout")
-    cam_latency = (OmegaConf.to_container(cfg.cam_latency, resolve=True)
-                   if cfg.cam_latency is not None else None)
+    runtime_cfg = runtime_cfg_from_hydra(cfg)
+    runtime_cfg_replay = replace(
+        runtime_cfg, obs_noise=None, obs_bias=None, marker_dropout=None, cam_latency=None,
+        marker_include_rot=marker_include_rot, prev_actions_n=prev_actions_n, cube_size_jitter=0.0
+    )
+    runtime_cfg_policy = replace(
+        runtime_cfg_replay,
+        cam_latency=(OmegaConf.to_container(cfg.cam_latency, resolve=True)
+                     if cfg.cam_latency is not None else None),
+    )
 
     policy = load_policy(args.model, LOG_DIR,
                          obs_dim_for(prev_actions_n, marker_include_rot))
@@ -298,11 +307,8 @@ def main() -> int:
     # Closed-loop keeps the camera latency model (marker ages in the training
     # range) but no noise/bias/dropout: the "clean but latency-matched" sim.
     env_replay = make_env(SO101LiftEnv, env_cfg, xml_path,
-                          marker_include_rot=marker_include_rot,
-                          prev_actions_n=prev_actions_n)
-    env_policy = make_env(SO101LiftEnv, env_cfg, xml_path, cam_latency=cam_latency,
-                          marker_include_rot=marker_include_rot,
-                          prev_actions_n=prev_actions_n)
+                          cfg=runtime_cfg_replay)
+    env_policy = make_env(SO101LiftEnv, env_cfg, xml_path, cfg=runtime_cfg_policy)
 
     spawn = reproduce_spawn(args.seed, env_cfg, env_replay.model, rec["cube"][0])
     control_dt = env_replay._step_dt

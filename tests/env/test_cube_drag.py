@@ -13,6 +13,7 @@ import pytest
 import mujoco
 from hydra import compose, initialize
 
+from src.base_env import RuntimeEnvConfig
 from src.pickplace_env import SO101PickPlaceEnv
 
 
@@ -23,9 +24,10 @@ def cfg():
 
 
 def _pickplace(cfg):
+    runtime = RuntimeEnvConfig(obs_noise=None, obs_bias=None)
     return SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
                              xml_path="so101/scene_pickplace.xml",
-                             obs_noise=None, obs_bias=None)
+                             cfg=runtime)
 
 
 def _zero_action():

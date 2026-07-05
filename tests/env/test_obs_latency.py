@@ -18,7 +18,7 @@ import pytest
 
 from hydra import compose, initialize
 
-from src.base_env import marker_world_poses
+from src.base_env import RuntimeEnvConfig, marker_world_poses
 from src.camera_sim import CameraSim
 from src.pickplace_env import SO101PickPlaceEnv
 
@@ -37,10 +37,10 @@ def cfg():
 
 def _pickplace(cfg, cam_latency, **kwargs):
     # Disable noise so observations can be compared by exact equality.
+    runtime = RuntimeEnvConfig(obs_noise=None, cam_latency=cam_latency, **kwargs)
     return SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
                              xml_path="so101/scene_pickplace.xml",
-                             obs_noise=None,
-                             cam_latency=cam_latency, **kwargs)
+                             cfg=runtime)
 
 
 def _move_action():

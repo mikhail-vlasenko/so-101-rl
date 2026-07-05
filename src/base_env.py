@@ -4,6 +4,7 @@ Shared MuJoCo setup, contact detection, rendering, and reset/step skeleton.
 Subclasses define task-specific config, reward, termination, and observations.
 """
 
+from dataclasses import dataclass
 from typing import NamedTuple
 
 import numpy as np
@@ -77,6 +78,19 @@ MARKER_VIS_MAX_HEIGHT_M = 0.23
 # frame, red when not (over-angle or dropped). Visual only — never read by obs.
 MARKER_VISIBLE_RGBA = np.array([0.1, 0.8, 0.1, 1.0])
 MARKER_HIDDEN_RGBA = np.array([0.9, 0.1, 0.1, 1.0])
+
+
+@dataclass(frozen=True)
+class RuntimeEnvConfig:
+    """Runtime observation/DR options shared across envs."""
+    obs_noise: dict | None = None
+    cam_latency: dict | None = None
+    obs_bias: dict | None = None
+    marker_dropout: dict | None = None
+    marker_always_visible: bool = False
+    marker_include_rot: bool = False
+    prev_actions_n: int = 2
+    cube_size_jitter: float = 0.0
 
 
 def marker_world_poses(data, site_ids):
@@ -448,38 +462,37 @@ class SO101BaseEnv(SO101ArmEnv):
     TASK_ID: float  # 0.0 = lift, 1.0 = pickplace
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
-                 obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
-                 marker_always_visible=False, marker_include_rot=False, prev_actions_n=2,
-                 cube_size_jitter=0.0):
+                 cfg: RuntimeEnvConfig | None = None):
+        assert cfg is not None, "RuntimeEnvConfig is required"
         super().__init__(render_mode=render_mode, slow_factor=slow_factor,
-                         xml_path=xml_path, prev_actions_n=prev_actions_n,
+                         xml_path=xml_path, prev_actions_n=cfg.prev_actions_n,
                          env_cfg=env_cfg)
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
         # cube_sigma; or None. No qvel key: the qvel obs is the backward
         # difference of consecutive qpos obs (matching the real pipeline), so
         # its noise is inherited from qpos_sigma, not configured.
-        self.obs_noise = obs_noise
+        self.obs_noise = cfg.obs_noise
         # AprilTag detector dropout (DR): dict with keys "near"/"far" giving the
         # per-frame probability a geometrically-visible tag is missed (near-boundary
         # vs comfortably-facing), or None for geometric visibility only.
-        self.marker_dropout = marker_dropout
+        self.marker_dropout = cfg.marker_dropout
         # Easy-mode crutch: feed every tag to the policy regardless of camera angle
         # or dropout (no held/stale poses). See conf/config.yaml:marker_always_visible.
-        self.marker_always_visible = bool(marker_always_visible)
+        self.marker_always_visible = bool(cfg.marker_always_visible)
         # When false the marker rotation vectors are dropped from the obs (positions
         # only). Changes obs dim — see obs_dim_for / conf/config.yaml:marker_include_rot.
-        self.marker_include_rot = bool(marker_include_rot)
+        self.marker_include_rot = bool(cfg.marker_include_rot)
         # Camera latency model (sim2real): dict with keys frame_ms, delay_ms
         # [lo, hi], jitter_ms (see conf/dr/full.yaml), or None for a synchronous
         # zero-latency camera. Stored raw here; the CameraSim is built below
         # once the control period is known.
-        self.cam_latency = cam_latency
+        self.cam_latency = cfg.cam_latency
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
         # cube_sigma; or None. Marker biases are sampled independently per
         # marker (uncorrelated: each tag has its own glue/pose-estimate error).
         # The cube tag's pos bias uses cube_sigma; its rot bias reuses
         # marker_rot_sigma (same AprilTag pose pipeline).
-        self.obs_bias = obs_bias
+        self.obs_bias = cfg.obs_bias
         self._qpos_bias = np.zeros(len(JOINT_NAMES))
         self._marker_pos_bias = np.zeros((N_MARKERS, 3))
         self._marker_rot_bias = np.zeros((N_MARKERS, 3))
@@ -526,13 +539,13 @@ class SO101BaseEnv(SO101ArmEnv):
         self.cube_half_extents = self.cube_nominal_half_extents.copy()
         # Half-extent jitter: each full side length varies +/- cube_size_jitter,
         # i.e. each half-extent varies +/- cube_size_jitter/2. See conf/dr/*.yaml.
-        self.cube_size_half_jitter = float(cube_size_jitter) / 2.0
+        self.cube_size_half_jitter = float(cfg.cube_size_jitter) / 2.0
 
-        cfg = env_cfg
-        self.cube_low = np.array(cfg["cube_low"])
-        self.cube_high = np.array(cfg["cube_high"])
-        self.cube_smallest_face_only = bool(cfg["cube_smallest_face_only"])
-        self.floor_contact_penalty = float(cfg["floor_contact_penalty"])
+        task_cfg = env_cfg
+        self.cube_low = np.array(task_cfg["cube_low"])
+        self.cube_high = np.array(task_cfg["cube_high"])
+        self.cube_smallest_face_only = bool(task_cfg["cube_smallest_face_only"])
+        self.floor_contact_penalty = float(task_cfg["floor_contact_penalty"])
 
         self.gripper_idx = JOINT_NAMES.index("gripper")
 
@@ -566,7 +579,7 @@ class SO101BaseEnv(SO101ArmEnv):
         self._cube_last_capture_t = -np.inf
         self._prev_qpos_obs = None
 
-        self._parse_config(cfg)
+        self._parse_config(task_cfg)
 
         obs_high = np.full(self.obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)

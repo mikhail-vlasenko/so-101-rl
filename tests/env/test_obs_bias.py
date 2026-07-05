@@ -12,6 +12,7 @@ import pytest
 
 from hydra import compose, initialize
 
+from src.base_env import RuntimeEnvConfig
 from src.pickplace_env import SO101PickPlaceEnv
 
 
@@ -48,12 +49,12 @@ def cfg():
 
 
 def _pickplace(cfg, *, obs_bias=SIGMAS, obs_noise=None, marker_always_visible=False):
+    runtime = RuntimeEnvConfig(obs_noise=obs_noise, obs_bias=obs_bias,
+                               marker_include_rot=True,
+                               marker_always_visible=marker_always_visible)
     return SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
                              xml_path="so101/scene_pickplace.xml",
-                             obs_noise=obs_noise,
-                             obs_bias=obs_bias,
-                             marker_include_rot=True,
-                             marker_always_visible=marker_always_visible)
+                             cfg=runtime)
 
 
 def _zero_action():

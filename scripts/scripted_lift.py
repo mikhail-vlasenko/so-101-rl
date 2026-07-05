@@ -14,6 +14,7 @@ import time
 import numpy as np
 from hydra import compose, initialize
 
+from src.base_env import RuntimeEnvConfig
 from src.lift_env import SO101LiftEnv
 
 
@@ -24,7 +25,7 @@ def make_env(render=False):
         env_cfg=cfg.lift_env,
         xml_path="so101/scene_lift.xml",
         render_mode="human" if render else None,
-        obs_noise=None, obs_bias=None,
+        cfg=RuntimeEnvConfig(obs_noise=None, obs_bias=None),
     )
     return env, cfg
 
