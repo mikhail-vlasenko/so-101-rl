@@ -1,8 +1,4 @@
-"""Screenshot the lift scene to verify marker sites and the sponge box.
-
-Renders two views, each aimed at one marker site (lookat taken from the site's
-FK pose so the views track placement edits).
-"""
+"""Screenshot the lift scene to verify the sponge box dimensions."""
 from pathlib import Path
 
 import mujoco
@@ -18,20 +14,19 @@ for name, val in pose.items():
     jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
     data.qpos[model.jnt_qposadr[jid]] = val
 
-# Sponge standing on its 2 x 1.5 cm face (3 cm tall) near the gripper.
+# Sponge standing on its 4 x 2.5 cm face (6 cm tall) near the gripper.
 cube_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
 adr = model.jnt_qposadr[cube_jid]
-data.qpos[adr:adr + 3] = [0.25, -0.05, 0.015]
+data.qpos[adr:adr + 3] = [0.25, -0.05, 0.03]
 data.qpos[adr + 3:adr + 7] = [np.cos(np.pi / 4), 0, np.sin(np.pi / 4), 0]  # x-axis up
 mujoco.mj_forward(model, data)
 
-site_pos = {}
-for sname in ["marker_finger", "marker_wrist"]:
-    sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, sname)
-    site_pos[sname] = data.site_xpos[sid].copy()
-    xmat = data.site_xmat[sid].reshape(3, 3)
-    print(f"{sname}: world pos {site_pos[sname].round(4)}  "
-          f"face normal (site z) -> world {xmat[:, 2].round(3)}")
+cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
+cube_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "cube")
+cube_center = data.xpos[cube_body_id].copy()
+cube_half = model.geom_size[cube_geom_id].copy()
+print(f"cube center: {cube_center.round(4)}")
+print(f"cube half extents (m): {cube_half.round(4)}")
 
 renderer = mujoco.Renderer(model, height=480, width=640)
 out = Path("screenshots")
@@ -40,20 +35,19 @@ cam = mujoco.MjvCamera()
 opt = mujoco.MjvOption()
 opt.sitegroup[:] = 1
 
-# View 1: at the wrist marker from -y (its face normal direction).
-cam.lookat[:] = site_pos["marker_wrist"]
-cam.distance = 0.18
-cam.azimuth = 90   # camera on -y, looking toward +y: the arm's right side
-cam.elevation = 0
+# View 1: side close-up on the sponge.
+cam.lookat[:] = cube_center
+cam.distance = 0.14
+cam.azimuth = 40
+cam.elevation = -8
 renderer.update_scene(data, camera=cam, scene_option=opt)
-PIL.Image.fromarray(renderer.render()).save(out / "markers_right_side.png")
+PIL.Image.fromarray(renderer.render()).save(out / "sponge_close_side.png")
 
-# View 2: face-on at the finger marker — camera below, looking up its normal
-# (gripper-body -x maps to world (-0.479, 0.049, -0.877) at this pose).
-cam.lookat[:] = site_pos["marker_finger"]
-cam.distance = 0.18
-cam.azimuth = -6
-cam.elevation = 61
+# View 2: angled view to show sponge proportions in context.
+cam.lookat[:] = cube_center
+cam.distance = 0.20
+cam.azimuth = 130
+cam.elevation = -25
 renderer.update_scene(data, camera=cam, scene_option=opt)
-PIL.Image.fromarray(renderer.render()).save(out / "markers_finger_sponge.png")
-print("saved screenshots/markers_right_side.png screenshots/markers_finger_sponge.png")
+PIL.Image.fromarray(renderer.render()).save(out / "sponge_angled_context.png")
+print("saved screenshots/sponge_close_side.png screenshots/sponge_angled_context.png")

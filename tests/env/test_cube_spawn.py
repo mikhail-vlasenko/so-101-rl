@@ -1,7 +1,7 @@
 """Tests for the sponge-box spawn (orientation sampling) and marker observations.
 
-The 3 x 2 x 1.5 cm sponge box must spawn standing on one of its two non-largest
-faces (2 or 3 cm tall, both occurring), stable under settling. The marker obs
+The 6 x 4 x 2.5 cm sponge box must spawn standing on one of its two non-largest
+faces (4 or 6 cm tall, both occurring), stable under settling. The marker obs
 dims must carry the world poses of the marker_finger / marker_wrist sites
 (xyz + axis-angle rotation vector each).
 """
@@ -35,11 +35,11 @@ def env():
 
 def test_sample_cube_orientation_rest_heights():
     rng = np.random.default_rng(0)
-    half = np.array([0.015, 0.01, 0.0075])
+    half = np.array([0.03, 0.02, 0.0125])
     rest_halves = set()
     for _ in range(200):
         quat, rest_half_z = sample_cube_orientation(rng, half)
-        assert rest_half_z in (0.015, 0.01)
+        assert rest_half_z in (0.03, 0.02)
         rest_halves.add(rest_half_z)
         np.testing.assert_allclose(np.linalg.norm(quat), 1.0, atol=1e-9)
         # The face touching the floor must be a non-largest face: the geom
@@ -48,16 +48,16 @@ def test_sample_cube_orientation_rest_heights():
         mujoco.mju_quat2Mat(mat, quat)
         z_axis_world = mat.reshape(3, 3)[:, 2]
         assert abs(z_axis_world[2]) < 1e-9
-    assert rest_halves == {0.015, 0.01}, "both standing heights must occur"
+    assert rest_halves == {0.03, 0.02}, "both standing heights must occur"
 
 
 def test_sample_cube_orientation_smallest_face_only():
     """smallest_face_only always stands on the hy*hz face (x-axis vertical, tallest)."""
     rng = np.random.default_rng(0)
-    half = np.array([0.015, 0.01, 0.0075])
+    half = np.array([0.03, 0.02, 0.0125])
     for _ in range(200):
         quat, rest_half_z = sample_cube_orientation(rng, half, smallest_face_only=True)
-        assert rest_half_z == 0.015  # hx: standing on the smallest face
+        assert rest_half_z == 0.03  # hx: standing on the smallest face
         # The geom x-axis (largest half-extent) must end up vertical.
         mat = np.empty(9)
         mujoco.mju_quat2Mat(mat, quat)
@@ -68,7 +68,7 @@ def test_sample_cube_orientation_smallest_face_only():
 def test_sample_cube_orientation_rejects_unordered_extents():
     rng = np.random.default_rng(0)
     with pytest.raises(AssertionError):
-        sample_cube_orientation(rng, np.array([0.015, 0.015, 0.015]))
+        sample_cube_orientation(rng, np.array([0.03, 0.03, 0.03]))
 
 
 def test_spawn_is_stable_and_at_rest_height(env):
