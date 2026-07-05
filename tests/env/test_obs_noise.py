@@ -14,7 +14,7 @@ import pytest
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
-from src.base_env import markers_visible
+from src.base_env import cube_tag_visible, markers_visible
 from src.lift_env import SO101LiftEnv
 from src.pickplace_env import SO101PickPlaceEnv
 
@@ -26,17 +26,19 @@ SIGMAS = {
     "cube_sigma": 0.003,
 }
 
-# Obs layout: [qpos(6), qvel(6), markers(2*6), marker_age(2), cube_pos(3),
-# task_extra(4), prev_actions(2*6)]
+# Obs layout: [qpos(6), qvel(6), markers(2*6), marker_age(2), cube_tag_pos(3),
+# cube_tag_rot(3), cube_age(1), task_extra(4), prev_actions(2*6)]
 QPOS = slice(0, 6)
 QVEL = slice(6, 12)
 MARKER_AGE = slice(24, 26)
 CUBE = slice(26, 29)
-C2T = slice(29, 31)
-RING_H = 31
-TASK_ID = 32
-PREV_ACTIONS = slice(33, 45)
-OBS_DIM = 45
+CUBE_ROT = slice(29, 32)
+CUBE_AGE = 32
+C2T = slice(33, 35)
+RING_H = 35
+TASK_ID = 36
+PREV_ACTIONS = slice(37, 49)
+OBS_DIM = 49
 
 
 @pytest.fixture(scope="module")
@@ -106,9 +108,10 @@ def test_constant_obs_dims_are_not_noised(cfg):
     assert obs_clean[TASK_ID] == obs_noisy[TASK_ID]
     # Prev actions are commanded values, not measurements — must not be noised.
     assert np.array_equal(obs_clean[PREV_ACTIONS], obs_noisy[PREV_ACTIONS])
-    # Marker ages are frame-schedule timing, not measurements — identical too
-    # (detection here is geometric-only, so it matches across the two envs).
+    # Marker/cube ages are frame-schedule timing, not measurements — identical
+    # too (detection here is geometric-only, so it matches across the two envs).
     assert np.array_equal(obs_clean[MARKER_AGE], obs_noisy[MARKER_AGE])
+    assert obs_clean[CUBE_AGE] == obs_noisy[CUBE_AGE]
 
 
 def test_cube_to_target_uses_noisy_cube_pos(cfg):
@@ -131,6 +134,7 @@ def test_per_step_noise_magnitude_matches_sigmas(cfg):
     n_samples = 1000
     diffs = np.empty((n_samples, OBS_DIM), dtype=np.float64)
     visible = np.empty((n_samples, 2), dtype=bool)
+    cube_visible = np.empty(n_samples, dtype=bool)
     for i in range(n_samples):
         env_clean.reset(seed=i)
         env_noisy.reset(seed=i)
@@ -142,6 +146,10 @@ def test_per_step_noise_magnitude_matches_sigmas(cfg):
         # so exclude hidden tags from the marker noise statistics.
         visible[i] = markers_visible(env_noisy.data, env_noisy.marker_site_ids,
                                      env_noisy.tag_cam_pos)
+        cube_visible[i] = cube_tag_visible(env_noisy.model, env_noisy.data,
+                                           env_noisy.cube_tag_site_id,
+                                           env_noisy.tag_cam_pos,
+                                           env_noisy.cube_body_id)
     # Marker noise is measured per tag, so each tag (not both at once) just needs
     # enough visible samples. Under the 0.23 m height ceiling both-visible is rare
     # (~7%), but each tag alone clears this comfortably over the random poses.
@@ -159,9 +167,15 @@ def test_per_step_noise_magnitude_matches_sigmas(cfg):
     np.testing.assert_allclose(diffs[:, QVEL].std(axis=0).mean(), qvel_sigma, rtol=0.1)
     np.testing.assert_allclose(marker_pos_diffs.std(), SIGMAS["marker_pos_sigma"], rtol=0.1)
     np.testing.assert_allclose(marker_rot_diffs.std(), SIGMAS["marker_rot_sigma"], rtol=0.1)
-    np.testing.assert_allclose(diffs[:, CUBE].std(axis=0).mean(), SIGMAS["cube_sigma"], rtol=0.1)
+    assert cube_visible.sum() > 50, "too few cube-visible samples"
+    np.testing.assert_allclose(diffs[cube_visible][:, CUBE].std(axis=0).mean(),
+                               SIGMAS["cube_sigma"], rtol=0.1)
+    # The cube tag's rot shares the arm tags' marker_rot_sigma (same pipeline).
+    np.testing.assert_allclose(diffs[cube_visible][:, CUBE_ROT].std(axis=0).mean(),
+                               SIGMAS["marker_rot_sigma"], rtol=0.1)
     # cube_to_target inherits cube_sigma (same draw, derived).
-    np.testing.assert_allclose(diffs[:, C2T].std(axis=0).mean(), SIGMAS["cube_sigma"], rtol=0.1)
+    np.testing.assert_allclose(diffs[cube_visible][:, C2T].std(axis=0).mean(),
+                               SIGMAS["cube_sigma"], rtol=0.1)
 
 
 def test_noise_does_not_corrupt_true_state(cfg):
@@ -186,8 +200,8 @@ def test_lift_env_compatible_with_noise(lift_cfg):
                       obs_noise=SIGMAS, marker_include_rot=True)
     obs, _ = env.reset(seed=0)
     assert obs.shape == (OBS_DIM,)
-    # Lift's _obs_extra returns zeros + task_id, so [29:32] should be zero, [32]=lift TASK_ID=0.0
-    assert np.array_equal(obs[29:32], np.zeros(3, dtype=np.float32))
+    # Lift's _obs_extra returns zeros + task_id, so [33:36] should be zero, [36]=lift TASK_ID=0.0
+    assert np.array_equal(obs[33:36], np.zeros(3, dtype=np.float32))
     assert obs[TASK_ID] == 0.0
     # Prev actions are zero immediately after reset (no action has been taken yet).
     assert np.array_equal(obs[PREV_ACTIONS], np.zeros(12, dtype=np.float32))

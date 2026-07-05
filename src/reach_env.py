@@ -5,23 +5,19 @@ arm to one of N fixed joint-space waypoints (selected at reset, encoded as a
 one-hot in the observation) and dwell there for `dwell_steps` consecutive steps.
 
 No cube. EE is required to stay above `ee_z_min` so the gripper never approaches
-the table during real-world deployment.
+the table during real-world deployment. Built on SO101ArmEnv (shared arm/drive
+machinery); the cube + camera obs pipeline of SO101BaseEnv does not apply here.
 """
 
 import numpy as np
 import mujoco
-import gymnasium as gym
 from gymnasium import spaces
 
-from src.base_env import JOINT_NAMES
-from src.servo_profile import ServoProfile
-from src.units import action_to_target
+from src.base_env import SO101ArmEnv
 
 
-class SO101ReachEnv(gym.Env):
+class SO101ReachEnv(SO101ArmEnv):
     """Reach one of N fixed joint-space waypoints and dwell."""
-
-    metadata = {"render_modes": ["human"], "render_fps": 20}
 
     XML_PATH = "so101/scene.xml"
     TASK_NAME = "reach"
@@ -29,37 +25,17 @@ class SO101ReachEnv(gym.Env):
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
                  obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
                  marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
-        super().__init__()
         # not used by reach env (kept for train.py signature)
         del obs_noise, cam_latency, obs_bias, marker_dropout, marker_always_visible
         del marker_include_rot
-        self.render_mode = render_mode
-        self.slow_factor = slow_factor
-        self.prev_actions_n = int(prev_actions_n)
+        super().__init__(render_mode=render_mode, slow_factor=slow_factor,
+                         xml_path=xml_path, prev_actions_n=prev_actions_n,
+                         env_cfg=env_cfg)
 
-        self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
-        self.data = mujoco.MjData(self.model)
-
-        self.n_joints = len(JOINT_NAMES)
-        self.joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)
-                          for n in JOINT_NAMES]
-        self.joint_qposadr = self.model.jnt_qposadr[self.joint_ids]
-        self.joint_dofadr = self.model.jnt_dofadr[self.joint_ids]
-        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
-        self.floor_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
-        assert self.floor_geom_id >= 0, "Floor geom 'floor' not found in XML"
-        self.arm_geom_ids = {i for i in range(self.model.ngeom) if self.model.geom_group[i] == 3}
-
-        self.joint_low = self.model.jnt_range[self.joint_ids, 0]
-        self.joint_high = self.model.jnt_range[self.joint_ids, 1]
         self.joint_center = 0.5 * (self.joint_low + self.joint_high)
         self.joint_half_range = 0.5 * (self.joint_high - self.joint_low)
 
         cfg = env_cfg
-        self.action_scale = float(cfg["action_scale"])
-        self.use_servo_profile = bool(cfg["use_servo_profile"])
-        self.max_steps = int(cfg["max_steps"])
-        self.n_substeps = int(cfg["n_substeps"])
         self.ee_z_min = float(cfg["ee_z_min"])
         self.tolerance = float(cfg["tolerance"])
         self.dwell_steps = int(cfg["dwell_steps"])
@@ -81,22 +57,10 @@ class SO101ReachEnv(gym.Env):
         self.joint_limit_penalty_coeff = float(cfg["joint_limit_penalty_coeff"])
         self.time_penalty = float(cfg["time_penalty"])
 
-        self.action_space = spaces.Box(low=-1.0, high=1.0,
-                                       shape=(self.n_joints,), dtype=np.float32)
         # obs = [qpos(n), qvel(n), ee_pos(3), waypoint_onehot(N), prev_actions(prev_actions_n * n)]
         obs_dim = 2 * self.n_joints + 3 + self.n_waypoints + self.prev_actions_n * self.n_joints
         obs_high = np.full(obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
-
-        self._prev_actions = np.zeros((self.prev_actions_n, self.n_joints), dtype=np.float32)
-
-        # Firmware motion-profile model: ctrl carries the profiled setpoint,
-        # not the raw tick target (see src/servo_profile.py).
-        self._servo_profile = ServoProfile(self.n_joints)
-        self._ctrl_target = None
-
-        self.step_count = 0
-        self.viewer = None
 
     def _ee_z_at(self, qpos):
         """Forward-kinematics-only EE z for a given joint config."""
@@ -133,19 +97,6 @@ class SO101ReachEnv(gym.Env):
                 f"(margin={self.limit_margin}); per-joint excess={excess.tolist()}"
             )
 
-    def _get_ee_pos(self):
-        return self.data.site_xpos[self.ee_site_id].copy()
-
-    def _get_joint_pos(self):
-        return self.data.qpos[self.joint_qposadr].copy()
-
-    def _has_arm_collision(self):
-        for i in range(self.data.ncon):
-            c = self.data.contact[i]
-            if c.geom1 in self.arm_geom_ids or c.geom2 in self.arm_geom_ids:
-                return True
-        return False
-
     def _waypoint_onehot(self):
         oh = np.zeros(self.n_waypoints, dtype=np.float32)
         oh[self.waypoint_idx] = 1.0
@@ -162,9 +113,7 @@ class SO101ReachEnv(gym.Env):
         """Sample a joint pose with EE z >= ee_z_min and no arm collision."""
         for attempt in range(200):
             q = self.np_random.uniform(self.joint_low, self.joint_high)
-            self.data.qpos[self.joint_qposadr] = q
-            self.data.ctrl[:self.n_joints] = q
-            mujoco.mj_forward(self.model, self.data)
+            self._write_arm_pose(q)
             if (not self._has_arm_collision()) and self._get_ee_pos()[2] >= self.ee_z_min:
                 return q
         raise RuntimeError(
@@ -181,13 +130,6 @@ class SO101ReachEnv(gym.Env):
         self.target_qpos = self.waypoints[self.waypoint_idx].copy()
 
         q0 = self._sample_safe_init()
-        self.data.qpos[self.joint_qposadr] = q0
-        self.data.ctrl[:self.n_joints] = q0
-        # Actuators carry activation state (dyntype="filter"); initialize it at
-        # the joint position so the controller doesn't snap from 0 on step one.
-        if self.model.na > 0:
-            self.data.act[:] = q0
-        mujoco.mj_forward(self.model, self.data)
         self._servo_profile.reset(q0)
         self._ctrl_target = q0.copy()
 
@@ -201,27 +143,7 @@ class SO101ReachEnv(gym.Env):
 
     def step(self, action):
         self.step_count += 1
-        action = np.clip(action, -1.0, 1.0).astype(np.float32)
-
-        if self.prev_actions_n > 0:
-            if self.prev_actions_n > 1:
-                self._prev_actions[:-1] = self._prev_actions[1:]
-            self._prev_actions[-1] = action
-
-        current = self.data.qpos[self.joint_qposadr].copy()
-        target = action_to_target(current, action, self.action_scale,
-                                  self.joint_low, self.joint_high)
-        if self.use_servo_profile:
-            setpoints = self._servo_profile.tick(self._ctrl_target, target,
-                                                 self.n_substeps, self.model.opt.timestep)
-            for k in range(self.n_substeps):
-                self.data.ctrl[:self.n_joints] = setpoints[k]
-                mujoco.mj_step(self.model, self.data)
-            self._ctrl_target = target
-        else:
-            self.data.ctrl[:self.n_joints] = target
-            for _ in range(self.n_substeps):
-                mujoco.mj_step(self.model, self.data)
+        action = self._apply_action(action)
 
         q = self._get_joint_pos()
         ee_pos = self._get_ee_pos()
@@ -275,17 +197,3 @@ class SO101ReachEnv(gym.Env):
             self._render_human()
 
         return self._get_obs(), float(reward), terminated, truncated, info
-
-    def _render_human(self):
-        import time
-        if self.viewer is None:
-            import mujoco.viewer
-            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-        self.viewer.sync()
-        if self.slow_factor > 1:
-            time.sleep(self.model.opt.timestep * self.n_substeps * (self.slow_factor - 1))
-
-    def close(self):
-        if self.viewer is not None:
-            self.viewer.close()
-            self.viewer = None

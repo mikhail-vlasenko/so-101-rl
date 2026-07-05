@@ -140,7 +140,8 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ScriptSpec(
         id="rollout_lift", title="Rollout: lift", page="real",
         module="real.rollout_lift", arg_style="argparse",
-        description="Lift policy on the real arm with a lockstep sim cube. "
+        description="Lift policy on the real arm. Marker source 'camera' tracks "
+                    "the real sponge via its tag; 'fk' uses a lockstep sim cube. "
                     "Dry-run unless Execute is checked.",
         args=(
             ArgSpec("--model", "str", "Model (latest / best / path)", default="latest",

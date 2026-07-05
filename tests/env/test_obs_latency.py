@@ -152,18 +152,20 @@ def test_default_config_has_cam_latency(cfg):
 
 
 def test_synchronous_camera_markers_are_fresh(cfg):
-    """cam_latency=None: marker and cube obs equal the current true state every
-    step (the dr=none curriculum contract)."""
+    """cam_latency=None: marker and cube-tag obs equal the current true state
+    every step (the dr=none curriculum contract)."""
     env = _pickplace(cfg, cam_latency=None, marker_always_visible=True)
     env.reset(seed=0)
     for _ in range(5):
         obs, *_ = env.step(_move_action())
         cur_pos, _ = marker_world_poses(env.data, env.marker_site_ids)
         np.testing.assert_allclose(obs[12:18].reshape(2, 3), cur_pos, atol=1e-6)
-        # Fresh synchronous frames: marker ages are zero.
+        # Fresh synchronous frames: marker and cube ages are zero.
         np.testing.assert_allclose(obs[18:20], 0.0, atol=1e-6)
-        cube = env.data.qpos[env.cube_qpos_idx:env.cube_qpos_idx + 3]
-        np.testing.assert_allclose(obs[20:23], cube, atol=1e-6)
+        (tag_pos,), (tag_rot,) = marker_world_poses(env.data, [env.cube_tag_site_id])
+        np.testing.assert_allclose(obs[20:23], tag_pos, atol=1e-6)
+        np.testing.assert_allclose(obs[23:26], tag_rot, atol=1e-6)
+        np.testing.assert_allclose(obs[26], 0.0, atol=1e-6)
 
 
 def test_delayed_camera_markers_lag_current_state(cfg):

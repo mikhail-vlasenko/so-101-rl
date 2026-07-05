@@ -13,7 +13,8 @@ import mujoco
 from hydra import compose, initialize
 
 from src.base_env import (
-    marker_world_poses, markers_visible, obs_dim_for, sample_cube_orientation,
+    cube_tag_occluded, marker_dropout_prob, marker_world_poses, markers_visible,
+    obs_dim_for, sample_cube_orientation,
 )
 from src.lift_env import SO101LiftEnv
 
@@ -83,12 +84,28 @@ def test_spawn_is_stable_and_at_rest_height(env):
         assert env._get_cube_pos()[2] == pytest.approx(env.cube_rest_half_z, abs=0.002)
 
 
+def test_spawn_tag_visible(env):
+    """Every spawn must leave the cube tag genuinely visible to the camera —
+    strictly facing (inside the NEAR band, not the flaky grazing band), the
+    ray past the already-placed arm unobstructed, and no arm contact — the sim
+    twin of placing the real sponge where the camera sees its tag."""
+    for seed in range(50):
+        env.reset(seed=seed)
+        tag_pos, _ = marker_world_poses(env.data, [env.cube_tag_site_id])
+        normal = env.data.site_xmat[env.cube_tag_site_id].reshape(3, 3)[:, 2]
+        assert marker_dropout_prob(tag_pos, normal[None], env.tag_cam_pos,
+                                   p_near=1.0, p_far=0.0)[0] < 1.0, seed
+        assert not cube_tag_occluded(env.model, env.data, tag_pos[0],
+                                     env.tag_cam_pos, env.cube_body_id), seed
+        assert not env._cube_arm_contact(), seed
+
+
 def test_marker_obs_match_site_poses(env):
     """Clean obs marker dims must equal FK world poses of the marker sites.
 
-    Seed 4 spawns the arm with both tags facing tag_cam — hidden tags would
+    Seed 5 spawns the arm with both tags facing tag_cam — hidden tags would
     hold their last detection instead (covered by test_marker_visibility.py)."""
-    obs, _ = env.reset(seed=4)
+    obs, _ = env.reset(seed=5)
     assert markers_visible(env.data, env.marker_site_ids, env.tag_cam_pos).all()
     marker_pos, marker_rot = marker_world_poses(env.data, env.marker_site_ids)
     np.testing.assert_allclose(obs[MARKER_FINGER_POS], marker_pos[0], atol=1e-6)
@@ -133,7 +150,8 @@ def test_default_obs_drops_marker_rotations():
     assert obs.shape == (env.obs_dim,)
     marker_pos, _ = marker_world_poses(env.data, env.marker_site_ids)
     # qpos(6)+qvel(6)=12, then pos_finger(3), pos_wrist(3), marker_age(2),
-    # then cube_pos(3).
+    # then cube_tag pos(3).
     np.testing.assert_allclose(obs[12:15], marker_pos[0], atol=1e-6)
     np.testing.assert_allclose(obs[15:18], marker_pos[1], atol=1e-6)
-    np.testing.assert_allclose(obs[20:23], env._get_cube_pos(), atol=1e-6)
+    (cube_tag_pos,), _ = marker_world_poses(env.data, [env.cube_tag_site_id])
+    np.testing.assert_allclose(obs[20:23], cube_tag_pos, atol=1e-6)

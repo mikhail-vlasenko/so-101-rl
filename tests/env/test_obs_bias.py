@@ -37,7 +37,8 @@ MARKER_FINGER_ROT = slice(15, 18)
 MARKER_WRIST_POS = slice(18, 21)
 MARKER_WRIST_ROT = slice(21, 24)
 CUBE = slice(26, 29)
-C2T = slice(29, 31)
+CUBE_ROT = slice(29, 32)
+C2T = slice(33, 35)
 
 
 @pytest.fixture(scope="module")
@@ -130,6 +131,7 @@ def test_bias_magnitude_matches_sigmas(cfg):
     marker_pos_diffs = np.empty((n, 6))
     marker_rot_diffs = np.empty((n, 6))
     cube_diffs = np.empty((n, 3))
+    cube_rot_diffs = np.empty((n, 3))
     for i in range(n):
         env_clean.reset(seed=i)
         env_biased.reset(seed=i)
@@ -141,12 +143,16 @@ def test_bias_magnitude_matches_sigmas(cfg):
         marker_rot_diffs[i, :3] = obs_b[MARKER_FINGER_ROT] - obs_c[MARKER_FINGER_ROT]
         marker_rot_diffs[i, 3:] = obs_b[MARKER_WRIST_ROT] - obs_c[MARKER_WRIST_ROT]
         cube_diffs[i] = obs_b[CUBE] - obs_c[CUBE]
+        cube_rot_diffs[i] = obs_b[CUBE_ROT] - obs_c[CUBE_ROT]
     np.testing.assert_allclose(qpos_diffs.std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.15)
     np.testing.assert_allclose(marker_pos_diffs.std(axis=0).mean(),
                                SIGMAS["marker_pos_sigma"], rtol=0.15)
     np.testing.assert_allclose(marker_rot_diffs.std(axis=0).mean(),
                                SIGMAS["marker_rot_sigma"], rtol=0.15)
     np.testing.assert_allclose(cube_diffs.std(axis=0).mean(), SIGMAS["cube_sigma"], rtol=0.15)
+    # The cube tag's rot bias reuses marker_rot_sigma (same AprilTag pipeline).
+    np.testing.assert_allclose(cube_rot_diffs.std(axis=0).mean(),
+                               SIGMAS["marker_rot_sigma"], rtol=0.15)
 
 
 def test_qvel_unbiased(cfg):

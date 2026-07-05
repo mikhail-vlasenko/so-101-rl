@@ -17,8 +17,8 @@ from src.units import action_to_target
 
 
 def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
-    """OBS_DIM = qpos(6) + qvel(6) + markers(2*M) + marker_age(2) + cube_pos(3)
-    + extra(4) + prev_actions(N*6).
+    """OBS_DIM = qpos(6) + qvel(6) + markers(2*M) + marker_age(2) + cube_tag(6)
+    + cube_age(1) + extra(4) + prev_actions(N*6).
 
     Each marker contributes its world xyz (M=3); when marker_include_rot is true it
     also contributes a world rotation vector (axis-angle, +3 dims, M=6) — the same
@@ -27,10 +27,16 @@ def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
     capture of the pose it is serving (capped at MARKER_AGE_CAP_S): pipeline
     latency when freshly detected, growing while the tag is undetected and its
     last pose is held.
+
+    The cube is observed the same way: cube_tag is the world pose (xyz +
+    axis-angle rotation vector, always both) of the AprilTag on the sponge's
+    largest face — the raw tag pose, never inferred back to a sponge center —
+    and cube_age is its own age channel under the identical hold-last-pose
+    convention.
     """
     marker_dim = 6 if marker_include_rot else 3
-    # 12 = qpos(6) + qvel(6); 7 = cube_pos(3) + extra(4)
-    return 12 + N_MARKERS * marker_dim + N_MARKERS + 7 + prev_actions_n * 6
+    # 12 = qpos(6) + qvel(6); 11 = cube_tag(3+3) + cube_age(1) + extra(4)
+    return 12 + N_MARKERS * marker_dim + N_MARKERS + 11 + prev_actions_n * 6
 
 
 # AprilTags glued to the arm (ids per real/marker_spec.py ROLES): "finger" on
@@ -38,6 +44,10 @@ def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
 # Sites of the same names in so101.xml mirror their placement.
 MARKER_SITE_NAMES = ["marker_finger", "marker_wrist"]
 N_MARKERS = len(MARKER_SITE_NAMES)
+
+# AprilTag id 1 on the sponge's largest face (real/marker_spec.py ROLES);
+# the site of the same name in the scene XMLs mirrors it.
+CUBE_TAG_SITE_NAME = "cube_tag"
 
 # Undetected tags keep their last measured pose in the obs while their age
 # channel grows, capped here; a tag never detected this episode reads an
@@ -135,13 +145,53 @@ def marker_dropout_prob(pos, normals, cam_pos, p_near, p_far):
     return prob
 
 
+# The camera's visible stand-in geoms (tag_cam_body/lens in so101.xml) sit
+# within ~4 cm of the camera position, so the occlusion ray stops this far
+# short of the camera to keep them from self-occluding every tag. Nothing else
+# in the scene lives that close to the camera.
+_CAM_GEOM_CLEARANCE_M = 0.06
+
+
+def cube_tag_occluded(model, data, tag_pos, cam_pos, cube_body_id):
+    """True when a geom blocks the cube tag's view of the camera.
+
+    Casts an mj_ray from the tag toward the camera against all geoms (static
+    included — ring walls and floor block; so do the arm's visual meshes, the
+    shapes the camera actually sees). The cube's own body is excluded so a tag
+    facing away stays the angle check's job, not a self-occlusion.
+    """
+    vec = np.asarray(cam_pos, dtype=np.float64) - tag_pos
+    dist = float(np.linalg.norm(vec))
+    geomid = np.zeros(1, dtype=np.int32)
+    hit = mujoco.mj_ray(model, data, tag_pos.astype(np.float64), vec / dist,
+                        None, 1, cube_body_id, geomid)
+    return 0.0 <= hit < dist - _CAM_GEOM_CLEARANCE_M
+
+
+def cube_tag_visible(model, data, site_id, cam_pos, cube_body_id):
+    """Geometric visibility of the cube tag from cam_pos: the markers_visible
+    checks (plane angle under MARKER_VIS_MAX_ANGLE_DEG, height under
+    MARKER_VIS_MAX_HEIGHT_M) plus an unobstructed ray to the camera. No
+    stochastic dropout — used by tests and the real-arm rollout's FK branch."""
+    pos, _ = marker_world_poses(data, [site_id])
+    normal = data.site_xmat[site_id].reshape(3, 3)[:, 2]
+    if marker_dropout_prob(pos, normal[None], cam_pos, p_near=0.0, p_far=0.0)[0] >= 1.0:
+        return False
+    return not cube_tag_occluded(model, data, pos[0], cam_pos, cube_body_id)
+
+
 class CamState(NamedTuple):
     """World-state snapshot recorded per physics substep for CameraSim: what a
-    camera frame captured at that instant would see."""
+    camera frame captured at that instant would see. Occlusion is resolved here,
+    at capture time, where live MjData exists — the frame may be consumed ticks
+    later, when the world has moved on."""
     marker_pos: np.ndarray     # (N_MARKERS, 3)
     marker_rot: np.ndarray     # (N_MARKERS, 3) axis-angle
     marker_normal: np.ndarray  # (N_MARKERS, 3) outward tag normals
-    cube_pos: np.ndarray       # (3,)
+    cube_tag_pos: np.ndarray   # (3,)
+    cube_tag_rot: np.ndarray   # (3,) axis-angle
+    cube_tag_normal: np.ndarray  # (3,) outward tag normal
+    cube_tag_occluded: bool
 
 
 class CamFrame(NamedTuple):
@@ -151,14 +201,16 @@ class CamFrame(NamedTuple):
     marker_pos: np.ndarray  # (N_MARKERS, 3)
     marker_rot: np.ndarray  # (N_MARKERS, 3)
     detected: np.ndarray    # (N_MARKERS,) bool
-    cube_pos: np.ndarray    # (3,)
+    cube_tag_pos: np.ndarray  # (3,)
+    cube_tag_rot: np.ndarray  # (3,)
+    cube_detected: bool
 
 
 def sample_cube_orientation(rng, half_extents, smallest_face_only=False):
     """Spawn orientation for the sponge box: standing on a non-largest face.
 
     half_extents (hx, hy, hz) must be strictly ordered hx > hy > hz (the
-    3 x 2 x 1.5 cm box). The box stands either on its hy*hz face (x-axis up,
+    6 x 4 x 2.5 cm box). The box stands either on its hy*hz face (x-axis up,
     2*hx tall) or its hx*hz face (y-axis up, 2*hy tall), never on the largest
     hx*hy face, with a uniform random yaw. Returns (quat wxyz, rest_half_z).
 
@@ -197,21 +249,186 @@ JOINT_NAMES = [
 ]
 
 
-class SO101BaseEnv(gym.Env):
-    """Base class for SO-101 arm tasks with shared MuJoCo setup."""
+class SO101ArmEnv(gym.Env):
+    """Shared SO-101 arm machinery: model/joint setup, the clip ->
+    action_to_target -> servo-profile -> substep drive (_apply_action),
+    prev-actions bookkeeping, collision/floor checks, and rendering.
+
+    Task envs own observation, reward, and reset on top: SO101BaseEnv layers
+    the cube + AprilTag camera observation pipeline here; SO101ReachEnv builds
+    its waypoint task directly on this class (no cube in its scene).
+    """
 
     metadata = {"render_modes": ["human"], "render_fps": 20}
 
     XML_PATH: str  # subclasses must set
+    TASK_NAME: str
+
+    def __init__(self, render_mode, slow_factor, xml_path, prev_actions_n, env_cfg):
+        super().__init__()
+        self.render_mode = render_mode
+        self.slow_factor = slow_factor
+        self.prev_actions_n = int(prev_actions_n)
+
+        self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
+        self.data = mujoco.MjData(self.model)
+
+        self.n_joints = len(JOINT_NAMES)
+        self.joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)
+                          for n in JOINT_NAMES]
+        self.joint_qposadr = self.model.jnt_qposadr[self.joint_ids]
+        self.joint_dofadr = self.model.jnt_dofadr[self.joint_ids]
+        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
+        self.floor_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        assert self.floor_geom_id >= 0, "Floor geom 'floor' not found in XML"
+        self.arm_geom_ids = {i for i in range(self.model.ngeom) if self.model.geom_group[i] == 3}
+
+        self.joint_low = self.model.jnt_range[self.joint_ids, 0]
+        self.joint_high = self.model.jnt_range[self.joint_ids, 1]
+
+        cfg = env_cfg
+        self.action_scale = float(cfg["action_scale"])
+        self.use_servo_profile = bool(cfg["use_servo_profile"])
+        self.max_steps = int(cfg["max_steps"])
+        self.n_substeps = int(cfg["n_substeps"])
+        self._step_dt = self.model.opt.timestep * self.n_substeps
+
+        self._prev_actions = np.zeros((self.prev_actions_n, self.n_joints), dtype=np.float32)
+
+        # Firmware motion-profile model: ctrl carries the profiled setpoint,
+        # not the raw tick target (see src/servo_profile.py).
+        self._servo_profile = ServoProfile(self.n_joints)
+        self._ctrl_target = None
+
+        self.action_space = spaces.Box(low=-1.0, high=1.0,
+                                       shape=(self.n_joints,), dtype=np.float32)
+
+        self.step_count = 0
+        self.viewer = None
+
+    def _get_ee_pos(self):
+        return self.data.site_xpos[self.ee_site_id].copy()
+
+    def _get_joint_pos(self):
+        return self.data.qpos[self.joint_qposadr].copy()
+
+    def _has_arm_collision(self):
+        """Check if any arm/gripper geom has a contact (with environment or itself)."""
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            if c.geom1 in self.arm_geom_ids or c.geom2 in self.arm_geom_ids:
+                return True
+        return False
+
+    def _has_floor_contact(self):
+        """Check if any arm/gripper geom is in contact with the floor."""
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            if g1 == self.floor_geom_id and g2 in self.arm_geom_ids:
+                return True
+            if g2 == self.floor_geom_id and g1 in self.arm_geom_ids:
+                return True
+        return False
+
+    def _min_arm_floor_dist(self, distmax: float) -> float:
+        """Min signed distance (m) between any arm geom and the floor, capped at distmax.
+        Negative values mean penetration. distmax bounds the broadphase work — pairs
+        further apart than distmax return distmax without doing exact collision math."""
+        min_dist = distmax
+        for gid in self.arm_geom_ids:
+            d = mujoco.mj_geomDistance(self.model, self.data, gid,
+                                       self.floor_geom_id, distmax, None)
+            if d < min_dist:
+                min_dist = d
+        return min_dist
+
+    def _arm_floor_contact_force(self):
+        """Sum of normal contact force magnitudes (N) between any arm geom and the floor."""
+        total = 0.0
+        wrench = np.zeros(6)
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            if (g1 == self.floor_geom_id and g2 in self.arm_geom_ids) or \
+                    (g2 == self.floor_geom_id and g1 in self.arm_geom_ids):
+                mujoco.mj_contactForce(self.model, self.data, i, wrench)
+                total += abs(wrench[0])
+        return total
+
+    def _write_arm_pose(self, qpos):
+        """Write an arm pose plus the matching ctrl and actuator activation
+        state (dyntype='filter' actuators drive toward act, so leaving it stale
+        would snap the arm on the first step), then forward the model."""
+        self.data.qpos[self.joint_qposadr] = qpos
+        self.data.ctrl[:self.n_joints] = qpos
+        if self.model.na > 0:
+            self.data.act[:] = qpos
+        mujoco.mj_forward(self.model, self.data)
+
+    def _on_substep(self):
+        """Hook after each physics substep of _apply_action (SO101BaseEnv
+        records camera states here)."""
+
+    def _apply_action(self, action):
+        """Clip the raw policy action, record it in the prev-actions buffer,
+        and drive the sim one control tick (action_to_target quantization, the
+        servo profile when enabled, n_substeps physics steps). Returns the
+        clipped action."""
+        action = np.clip(action, -1.0, 1.0).astype(np.float32)
+
+        if self.prev_actions_n > 0:
+            if self.prev_actions_n > 1:
+                self._prev_actions[:-1] = self._prev_actions[1:]
+            self._prev_actions[-1] = action
+
+        current = self.data.qpos[self.joint_qposadr].copy()
+        target = action_to_target(current, action, self.action_scale,
+                                  self.joint_low, self.joint_high)
+        if self.use_servo_profile:
+            setpoints = self._servo_profile.tick(self._ctrl_target, target,
+                                                 self.n_substeps, self.model.opt.timestep)
+            for k in range(self.n_substeps):
+                self.data.ctrl[:self.n_joints] = setpoints[k]
+                mujoco.mj_step(self.model, self.data)
+                self._on_substep()
+            self._ctrl_target = target
+        else:
+            self.data.ctrl[:self.n_joints] = target
+            for _ in range(self.n_substeps):
+                mujoco.mj_step(self.model, self.data)
+                self._on_substep()
+        return action
+
+    def _render_human(self):
+        import time
+        if self.viewer is None:
+            import mujoco.viewer
+            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+        self.viewer.sync()
+        if self.slow_factor > 1:
+            time.sleep(self.model.opt.timestep * self.n_substeps * (self.slow_factor - 1))
+
+    def close(self):
+        if self.viewer is not None:
+            self.viewer.close()
+            self.viewer = None
+
+
+class SO101BaseEnv(SO101ArmEnv):
+    """Base class for the cube-manipulation tasks: adds the cube + AprilTag
+    camera observation pipeline (markers, cube tag, hold-last-pose ages, DR
+    noise/bias/latency/dropout) and the cube-centric reset/step skeleton on
+    top of SO101ArmEnv."""
+
     TASK_ID: float  # 0.0 = lift, 1.0 = pickplace
-    TASK_NAME: str  # "lift" or "pickplace"
 
     def __init__(self, render_mode=None, env_cfg=None, slow_factor=1, xml_path=None,
                  obs_noise=None, cam_latency=None, obs_bias=None, marker_dropout=None,
                  marker_always_visible=False, marker_include_rot=False, prev_actions_n=2):
-        super().__init__()
-        self.render_mode = render_mode
-        self.slow_factor = slow_factor
+        super().__init__(render_mode=render_mode, slow_factor=slow_factor,
+                         xml_path=xml_path, prev_actions_n=prev_actions_n,
+                         env_cfg=env_cfg)
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
         # cube_sigma; or None. No qvel key: the qvel obs is the backward
         # difference of consecutive qpos obs (matching the real pipeline), so
@@ -235,23 +452,16 @@ class SO101BaseEnv(gym.Env):
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
         # cube_sigma; or None. Marker biases are sampled independently per
         # marker (uncorrelated: each tag has its own glue/pose-estimate error).
+        # The cube tag's pos bias uses cube_sigma; its rot bias reuses
+        # marker_rot_sigma (same AprilTag pose pipeline).
         self.obs_bias = obs_bias
         self._qpos_bias = np.zeros(len(JOINT_NAMES))
         self._marker_pos_bias = np.zeros((N_MARKERS, 3))
         self._marker_rot_bias = np.zeros((N_MARKERS, 3))
         self._cube_bias = np.zeros(3)
-        self.prev_actions_n = int(prev_actions_n)
+        self._cube_rot_bias = np.zeros(3)
         self.obs_dim = obs_dim_for(self.prev_actions_n, self.marker_include_rot)
 
-        self.model = mujoco.MjModel.from_xml_path(xml_path or self.XML_PATH)
-        self.data = mujoco.MjData(self.model)
-
-        self.n_joints = len(JOINT_NAMES)
-        self.joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)
-                          for n in JOINT_NAMES]
-        self.joint_qposadr = self.model.jnt_qposadr[self.joint_ids]
-        self.joint_dofadr = self.model.jnt_dofadr[self.joint_ids]
-        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
         self.marker_site_ids = []
         for name in MARKER_SITE_NAMES:
             sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
@@ -260,6 +470,12 @@ class SO101BaseEnv(gym.Env):
         self.tag_cam_pos = tag_cam_world_pos(self.model, self.data)
 
         self.cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
+        assert self.cube_geom_id >= 0, "Cube geom 'cube_geom' not found in XML"
+        self.cube_body_id = int(self.model.geom_bodyid[self.cube_geom_id])
+        self.cube_tag_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE,
+                                                  CUBE_TAG_SITE_NAME)
+        assert self.cube_tag_site_id >= 0, \
+            f"Cube tag site '{CUBE_TAG_SITE_NAME}' not found in XML"
 
         self.fixed_jaw_geom_ids = set()
         self.moving_jaw_geom_ids = set()
@@ -273,10 +489,6 @@ class SO101BaseEnv(gym.Env):
             self.moving_jaw_geom_ids.add(gid)
         self.gripper_geom_ids = self.fixed_jaw_geom_ids | self.moving_jaw_geom_ids
 
-        self.floor_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
-        assert self.floor_geom_id >= 0, "Floor geom 'floor' not found in XML"
-        self.arm_geom_ids = {i for i in range(self.model.ngeom) if self.model.geom_group[i] == 3}
-
         cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
         self.cube_qpos_idx = self.model.jnt_qposadr[cube_joint_id]
         self.cube_dofadr = self.model.jnt_dofadr[cube_joint_id]
@@ -284,15 +496,7 @@ class SO101BaseEnv(gym.Env):
         # which face it stands on) is set in reset() as self.cube_rest_half_z.
         self.cube_half_extents = self.model.geom_size[self.cube_geom_id].copy()
 
-        self.joint_low = self.model.jnt_range[self.joint_ids, 0]
-        self.joint_high = self.model.jnt_range[self.joint_ids, 1]
-
-        # Common config
         cfg = env_cfg
-        self.action_scale = float(cfg["action_scale"])
-        self.use_servo_profile = bool(cfg["use_servo_profile"])
-        self.max_steps = int(cfg["max_steps"])
-        self.n_substeps = int(cfg["n_substeps"])
         self.cube_low = np.array(cfg["cube_low"])
         self.cube_high = np.array(cfg["cube_high"])
         self.cube_smallest_face_only = bool(cfg["cube_smallest_face_only"])
@@ -300,16 +504,8 @@ class SO101BaseEnv(gym.Env):
 
         self.gripper_idx = JOINT_NAMES.index("gripper")
 
-        self._prev_actions = np.zeros((self.prev_actions_n, self.n_joints), dtype=np.float32)
-
-        # Firmware motion-profile model: ctrl carries the profiled setpoint,
-        # not the raw tick target (see src/servo_profile.py).
-        self._servo_profile = ServoProfile(self.n_joints)
-        self._ctrl_target = None
-
         # Cube-drag metric: cube center within DRAG_HEIGHT_TOL of resting height
         # AND lateral speed above DRAG_SPEED_THRESH (m/s).
-        self._step_dt = self.model.opt.timestep * self.n_substeps
         self.DRAG_HEIGHT_TOL = 0.005
         self.DRAG_SPEED_THRESH = 0.01
 
@@ -328,21 +524,20 @@ class SO101BaseEnv(gym.Env):
         self._cam_frame: CamFrame | None = None
         # Hold-last-pose marker state: the obs serves each tag's most recent
         # detection plus its age; a last-capture time of -inf means never seen
-        # this episode (zero pose, age pinned at MARKER_AGE_CAP_S).
+        # this episode (zero pose, age pinned at MARKER_AGE_CAP_S). The cube
+        # tag holds the identical state.
         self._held_marker_pos = np.zeros((N_MARKERS, 3))
         self._held_marker_rot = np.zeros((N_MARKERS, 3))
         self._marker_last_capture_t = np.full(N_MARKERS, -np.inf)
+        self._held_cube_tag_pos = np.zeros(3)
+        self._held_cube_tag_rot = np.zeros(3)
+        self._cube_last_capture_t = -np.inf
         self._prev_qpos_obs = None
 
         self._parse_config(cfg)
 
-        self.action_space = spaces.Box(low=-1.0, high=1.0,
-                                       shape=(self.n_joints,), dtype=np.float32)
         obs_high = np.full(self.obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
-
-        self.step_count = 0
-        self.viewer = None
 
     def _parse_config(self, cfg):
         """Override for task-specific config."""
@@ -357,9 +552,16 @@ class SO101BaseEnv(gym.Env):
         """CamState snapshot of the current MjData — recorded per substep so
         CameraSim can capture frames at any past instant of the tick."""
         marker_pos, marker_rot = marker_world_poses(self.data, self.marker_site_ids)
+        (cube_tag_pos,), (cube_tag_rot,) = marker_world_poses(
+            self.data, [self.cube_tag_site_id])
+        cube_tag_normal = self.data.site_xmat[self.cube_tag_site_id].reshape(3, 3)[:, 2]
         return CamState(marker_pos=marker_pos, marker_rot=marker_rot,
                         marker_normal=marker_world_normals(self.data, self.marker_site_ids),
-                        cube_pos=self._get_cube_pos())
+                        cube_tag_pos=cube_tag_pos, cube_tag_rot=cube_tag_rot,
+                        cube_tag_normal=cube_tag_normal.copy(),
+                        cube_tag_occluded=cube_tag_occluded(
+                            self.model, self.data, cube_tag_pos,
+                            self.tag_cam_pos, self.cube_body_id))
 
     def _process_frame(self, state: CamState) -> CamFrame:
         """One simulated detection of a captured world state: roll the per-frame
@@ -370,6 +572,7 @@ class SO101BaseEnv(gym.Env):
         _ingest_frame folds into the held obs state."""
         if self.marker_always_visible:
             detected = np.ones(N_MARKERS, dtype=bool)
+            cube_detected = True
         else:
             if self.marker_dropout is None:
                 p_near = p_far = 0.0
@@ -379,59 +582,73 @@ class SO101BaseEnv(gym.Env):
             prob = marker_dropout_prob(state.marker_pos, state.marker_normal,
                                        self.tag_cam_pos, p_near, p_far)
             detected = self.np_random.random(N_MARKERS) >= prob
+            # The cube tag shares the arm tags' angle/height/dropout geometry
+            # plus the capture-time occlusion test (a blocked ray is a certain
+            # miss regardless of facing angle).
+            if state.cube_tag_occluded:
+                cube_prob = 1.0
+            else:
+                cube_prob = marker_dropout_prob(state.cube_tag_pos[None],
+                                                state.cube_tag_normal[None],
+                                                self.tag_cam_pos, p_near, p_far)[0]
+            cube_detected = bool(self.np_random.random() >= cube_prob)
 
         marker_pos = state.marker_pos.copy()
         marker_rot = state.marker_rot.copy()
-        cube_pos = state.cube_pos.copy()
+        cube_tag_pos = state.cube_tag_pos.copy()
+        cube_tag_rot = state.cube_tag_rot.copy()
         if self.obs_bias is not None:
             marker_pos = marker_pos + self._marker_pos_bias
             marker_rot = marker_rot + self._marker_rot_bias
-            cube_pos = cube_pos + self._cube_bias
+            cube_tag_pos = cube_tag_pos + self._cube_bias
+            cube_tag_rot = cube_tag_rot + self._cube_rot_bias
         if self.obs_noise is not None:
             rng = self.np_random
             marker_pos = marker_pos + rng.normal(0, self.obs_noise["marker_pos_sigma"],
                                                  size=marker_pos.shape)
             marker_rot = marker_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
                                                  size=marker_rot.shape)
-            cube_pos = cube_pos + rng.normal(0, self.obs_noise["cube_sigma"],
-                                             size=cube_pos.shape)
+            cube_tag_pos = cube_tag_pos + rng.normal(0, self.obs_noise["cube_sigma"],
+                                                     size=cube_tag_pos.shape)
+            cube_tag_rot = cube_tag_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
+                                                     size=cube_tag_rot.shape)
         return CamFrame(marker_pos=marker_pos, marker_rot=marker_rot,
-                        detected=detected, cube_pos=cube_pos)
+                        detected=detected, cube_tag_pos=cube_tag_pos,
+                        cube_tag_rot=cube_tag_rot, cube_detected=cube_detected)
 
     def _ingest_frame(self, capture_t, frame: CamFrame):
-        """Consume one camera frame: it becomes the current frame (cube obs,
-        render tint, hidden metric), and each detected tag's measurement
-        overwrites the held pose the marker obs serves — the same per-frame
-        update the real capture thread applies (real/marker_obs.py)."""
+        """Consume one camera frame: it becomes the current frame (render tint,
+        hidden metrics), and each detected tag's measurement — arm markers and
+        cube tag alike — overwrites the held pose the obs serves, the same
+        per-frame update the real capture thread applies (real/marker_obs.py)."""
         self._cam_frame = frame
         det = frame.detected
         self._held_marker_pos[det] = frame.marker_pos[det]
         self._held_marker_rot[det] = frame.marker_rot[det]
         self._marker_last_capture_t[det] = capture_t
         self._set_marker_render_colors(det)
+        if frame.cube_detected:
+            self._held_cube_tag_pos = frame.cube_tag_pos
+            self._held_cube_tag_rot = frame.cube_tag_rot
+            self._cube_last_capture_t = capture_t
+        self.model.site_rgba[self.cube_tag_site_id] = \
+            MARKER_VISIBLE_RGBA if frame.cube_detected else MARKER_HIDDEN_RGBA
 
     def _get_cube_pos(self):
         return self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3].copy()
 
-    def _get_ee_pos(self):
-        return self.data.site_xpos[self.ee_site_id].copy()
-
-    def _get_joint_pos(self):
-        return self.data.qpos[self.joint_qposadr].copy()
-
     def _obs_extra(self, cube_pos):
         """Return task-specific obs dimensions appended after [qpos, qvel, markers, cube].
 
-        Receives the (possibly noisy) cube_pos so derived quantities stay consistent
-        with the cube_pos visible to the agent.
+        Receives the held (possibly noisy/stale) cube tag position so derived
+        quantities stay consistent with what the agent sees.
         """
         raise NotImplementedError
 
     def _compute_obs(self):
         """Build the policy observation. qpos/qvel take the encoder path (fresh;
-        qvel differenced like real/rollout_common.ArmLoop); markers serve the
-        held per-tag detections with their age, cube comes from the newest
-        camera frame (self._cam_frame)."""
+        qvel differenced like real/rollout_common.ArmLoop); markers and the
+        cube tag serve the held per-tag detections with their ages."""
         qpos = self.data.qpos[self.joint_qposadr].copy()
         if self.obs_bias is not None:
             qpos = qpos + self._qpos_bias
@@ -458,9 +675,12 @@ class SO101BaseEnv(gym.Env):
         # can put a capture an epsilon after the obs instant.
         marker_age = np.clip(self.data.time - self._marker_last_capture_t,
                              0.0, MARKER_AGE_CAP_S)
-        cube_pos = self._cam_frame.cube_pos
-        return np.concatenate([qpos, qvel, markers, marker_age, cube_pos,
-                               self._obs_extra(cube_pos),
+        cube_age = np.clip(self.data.time - self._cube_last_capture_t,
+                           0.0, MARKER_AGE_CAP_S)
+        return np.concatenate([qpos, qvel, markers, marker_age,
+                               self._held_cube_tag_pos, self._held_cube_tag_rot,
+                               [cube_age],
+                               self._obs_extra(self._held_cube_tag_pos),
                                self._prev_actions.flatten()]).astype(np.float32)
 
     def _n_jaw_contacts(self):
@@ -509,50 +729,6 @@ class SO101BaseEnv(gym.Env):
         w = self.data.qvel[self.cube_dofadr + 3:self.cube_dofadr + 6]
         return float(np.linalg.norm(w))
 
-    def _has_arm_collision(self):
-        """Check if any arm/gripper geom has a contact (with environment or itself)."""
-        for i in range(self.data.ncon):
-            c = self.data.contact[i]
-            if c.geom1 in self.arm_geom_ids or c.geom2 in self.arm_geom_ids:
-                return True
-        return False
-
-    def _has_floor_contact(self):
-        """Check if any arm/gripper geom is in contact with the floor."""
-        for i in range(self.data.ncon):
-            c = self.data.contact[i]
-            g1, g2 = c.geom1, c.geom2
-            if g1 == self.floor_geom_id and g2 in self.arm_geom_ids:
-                return True
-            if g2 == self.floor_geom_id and g1 in self.arm_geom_ids:
-                return True
-        return False
-
-    def _min_arm_floor_dist(self, distmax: float) -> float:
-        """Min signed distance (m) between any arm geom and the floor, capped at distmax.
-        Negative values mean penetration. distmax bounds the broadphase work — pairs
-        further apart than distmax return distmax without doing exact collision math."""
-        min_dist = distmax
-        for gid in self.arm_geom_ids:
-            d = mujoco.mj_geomDistance(self.model, self.data, gid,
-                                       self.floor_geom_id, distmax, None)
-            if d < min_dist:
-                min_dist = d
-        return min_dist
-
-    def _arm_floor_contact_force(self):
-        """Sum of normal contact force magnitudes (N) between any arm geom and the floor."""
-        total = 0.0
-        wrench = np.zeros(6)
-        for i in range(self.data.ncon):
-            c = self.data.contact[i]
-            g1, g2 = c.geom1, c.geom2
-            if (g1 == self.floor_geom_id and g2 in self.arm_geom_ids) or \
-                    (g2 == self.floor_geom_id and g1 in self.arm_geom_ids):
-                mujoco.mj_contactForce(self.model, self.data, i, wrench)
-                total += abs(wrench[0])
-        return total
-
     def _detect_grasp(self):
         """Grasp = cube close to EE + gripper closing + contact."""
         ee_pos = self._get_ee_pos()
@@ -575,6 +751,56 @@ class SO101BaseEnv(gym.Env):
         """Return random cube xy position. Override for rejection sampling."""
         return self.np_random.uniform(self.cube_low, self.cube_high)
 
+    def _cube_arm_contact(self):
+        """Any contact between the cube and an arm/gripper geom."""
+        arm_ids = self.arm_geom_ids | self.gripper_geom_ids
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            if c.geom1 == self.cube_geom_id and c.geom2 in arm_ids:
+                return True
+            if c.geom2 == self.cube_geom_id and c.geom1 in arm_ids:
+                return True
+        return False
+
+    def _sample_visible_cube_spawn(self):
+        """Sample the cube spawn pose, rejecting any the camera cannot actually
+        see the tag of — matching the real protocol of placing the sponge where
+        the camera sees its tag. Requires the arm (and any task scenery) already
+        placed: a candidate must face the camera within the strict (non-grazing)
+        angle band, have an unobstructed ray past the arm and scenery, and not
+        touch the arm. Writes the accepted pose into qpos (data left forwarded)
+        and returns (cube_pos, cube_quat)."""
+        for attempt in range(200):
+            cube_xy = self._sample_cube_pos()
+            cube_quat, self.cube_rest_half_z = sample_cube_orientation(
+                self.np_random, self.cube_half_extents,
+                smallest_face_only=self.cube_smallest_face_only)
+            cube_pos = np.array([cube_xy[0], cube_xy[1], self.cube_rest_half_z])
+            self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
+            self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = cube_quat
+            mujoco.mj_forward(self.model, self.data)
+            tag_pos, _ = marker_world_poses(self.data, [self.cube_tag_site_id])
+            normal = self.data.site_xmat[self.cube_tag_site_id].reshape(3, 3)[:, 2]
+            # Strict band: p_near=1.0 rejects the flaky 65-70° grazing views,
+            # so the first camera frame comfortably detects.
+            if marker_dropout_prob(tag_pos, normal[None], self.tag_cam_pos,
+                                   p_near=1.0, p_far=0.0)[0] >= 1.0:
+                continue
+            if cube_tag_occluded(self.model, self.data, tag_pos[0],
+                                 self.tag_cam_pos, self.cube_body_id):
+                continue
+            if self._cube_arm_contact():
+                continue
+            return cube_pos, cube_quat
+        raise AssertionError(
+            "no camera-visible cube spawn found in 200 attempts; "
+            "check the spawn box against the tag camera")
+
+    def _randomize_scene(self):
+        """Hook for task scenery randomization (e.g. ring height). Runs before
+        the arm and cube are placed, so their rejection sampling (collision,
+        tag visibility) sees the final scene geometry."""
+
     def _on_reset(self, cube_pos):
         """Hook for task-specific reset state. Called after common reset."""
 
@@ -583,7 +809,8 @@ class SO101BaseEnv(gym.Env):
         sysid/replay_rollout.py to restart a sim episode from a recorded real
         pose): "qpos" (6,) sets the arm joints, "cube_pos" (3,) + "cube_quat"
         (4, wxyz — must come together) set the cube. Pinned states skip the
-        corresponding sampling but keep every other reset step identical."""
+        corresponding sampling (including the cube's tag-visible-spawn
+        rejection) but keep every other reset step identical."""
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
         self._prev_qpos_obs = None
@@ -592,47 +819,43 @@ class SO101BaseEnv(gym.Env):
         options = options or {}
         assert ("cube_pos" in options) == ("cube_quat" in options), \
             "cube_pos and cube_quat must be overridden together"
-        if "cube_pos" in options:
+
+        self._randomize_scene()
+
+        cube_pinned = "cube_pos" in options
+        if cube_pinned:
             cube_pos = np.asarray(options["cube_pos"], dtype=np.float64)
             cube_quat = np.asarray(options["cube_quat"], dtype=np.float64)
             # Spawn height = resting half height (cube spawns at rest).
             self.cube_rest_half_z = float(cube_pos[2])
+            self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
+            self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = cube_quat
         else:
-            cube_xy = self._sample_cube_pos()
-            cube_quat, self.cube_rest_half_z = sample_cube_orientation(
-                self.np_random, self.cube_half_extents,
-                smallest_face_only=self.cube_smallest_face_only)
-            cube_pos = np.array([cube_xy[0], cube_xy[1], self.cube_rest_half_z])
-        self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
-        self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = cube_quat
-
-        self._on_reset(cube_pos)
+            # Park the cube out of reach while the arm pose is sampled, so the
+            # arm's collision rejection doesn't test against a cube that has
+            # not been placed yet (the real spawn happens after, when tag
+            # visibility can account for the arm).
+            self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = (1.0, 1.0, 0.05)
 
         if "qpos" in options:
             joint_pos = np.asarray(options["qpos"], dtype=np.float64)
-            self.data.qpos[self.joint_qposadr] = joint_pos
-            self.data.ctrl[:self.n_joints] = joint_pos
-            if self.model.na > 0:
-                self.data.act[:] = joint_pos
-            mujoco.mj_forward(self.model, self.data)
+            self._write_arm_pose(joint_pos)
         else:
             # Sample random arm position, rejecting any arm-environment collisions
             attempt = 0
             while True:
                 joint_pos = self.np_random.uniform(self.joint_low, self.joint_high)
-                self.data.qpos[self.joint_qposadr] = joint_pos
-                self.data.ctrl[:self.n_joints] = joint_pos
-                # If actuators carry activation state (e.g. dyntype="filter"),
-                # initialize it at the joint position so the controller doesn't
-                # snap the arm from 0 toward joint_pos on the first step.
-                if self.model.na > 0:
-                    self.data.act[:] = joint_pos
-                mujoco.mj_forward(self.model, self.data)
+                self._write_arm_pose(joint_pos)
                 if not self._has_arm_collision():
                     break
                 attempt += 1
                 if attempt % 10 == 0:
                     print(f"WARNING: {attempt} arm position samples rejected (collision)")
+
+        if not cube_pinned:
+            cube_pos, cube_quat = self._sample_visible_cube_spawn()
+
+        self._on_reset(cube_pos)
         self._servo_profile.reset(joint_pos)
         self._ctrl_target = joint_pos.copy()
         self.step_count = 0
@@ -640,6 +863,7 @@ class SO101BaseEnv(gym.Env):
         self._floor_contact_steps = 0
         self._cube_drag_steps = 0
         self._markers_hidden_total = 0
+        self._cube_hidden_total = 0
         self._prev_cube_xy = cube_pos[:2].copy()
 
         # Sample obs biases AFTER physics randomization so toggling obs_bias does
@@ -652,10 +876,14 @@ class SO101BaseEnv(gym.Env):
             self._marker_rot_bias = rng.normal(0, self.obs_bias["marker_rot_sigma"],
                                                size=(N_MARKERS, 3))
             self._cube_bias = rng.normal(0, self.obs_bias["cube_sigma"], size=3)
+            self._cube_rot_bias = rng.normal(0, self.obs_bias["marker_rot_sigma"], size=3)
 
         self._held_marker_pos[:] = 0.0
         self._held_marker_rot[:] = 0.0
         self._marker_last_capture_t[:] = -np.inf
+        self._held_cube_tag_pos = np.zeros(3)
+        self._held_cube_tag_rot = np.zeros(3)
+        self._cube_last_capture_t = -np.inf
         capture_t, frame = self._camera.reset(self.np_random, self.data.time,
                                               self._capture_camera_state(),
                                               self._process_frame)
@@ -670,31 +898,12 @@ class SO101BaseEnv(gym.Env):
     def _on_episode_end(self, info):
         """Hook to add task-specific info at episode end. Mutate info dict."""
 
+    def _on_substep(self):
+        self._camera.record(self.data.time, self._capture_camera_state())
+
     def step(self, action):
         self.step_count += 1
-        action = np.clip(action, -1.0, 1.0).astype(np.float32)
-
-        if self.prev_actions_n > 0:
-            if self.prev_actions_n > 1:
-                self._prev_actions[:-1] = self._prev_actions[1:]
-            self._prev_actions[-1] = action
-
-        current = self.data.qpos[self.joint_qposadr].copy()
-        target = action_to_target(current, action, self.action_scale,
-                                  self.joint_low, self.joint_high)
-        if self.use_servo_profile:
-            setpoints = self._servo_profile.tick(self._ctrl_target, target,
-                                                 self.n_substeps, self.model.opt.timestep)
-            for k in range(self.n_substeps):
-                self.data.ctrl[:self.n_joints] = setpoints[k]
-                mujoco.mj_step(self.model, self.data)
-                self._camera.record(self.data.time, self._capture_camera_state())
-            self._ctrl_target = target
-        else:
-            self.data.ctrl[:self.n_joints] = target
-            for _ in range(self.n_substeps):
-                mujoco.mj_step(self.model, self.data)
-                self._camera.record(self.data.time, self._capture_camera_state())
+        self._apply_action(action)
 
         ee_pos = self._get_ee_pos()
         cube_pos = self._get_cube_pos()
@@ -717,13 +926,14 @@ class SO101BaseEnv(gym.Env):
 
         # Advance the camera to the obs instant and ingest every frame that
         # became available this tick (dropout/noise were frozen in at capture
-        # time): each detection refreshes the held marker poses; the newest
-        # frame provides the cube obs. Losing a tag freezes its pose while its
-        # age channel grows — there is deliberately no reward term for it.
+        # time): each detection — arm markers and cube tag alike — refreshes
+        # its held pose. Losing a tag freezes its pose while its age channel
+        # grows — there is deliberately no reward term for it.
         for capture_t, frame in self._camera.observe(self.data.time, self.np_random,
                                                      self._process_frame):
             self._ingest_frame(capture_t, frame)
         self._markers_hidden_total += N_MARKERS - int(self._cam_frame.detected.sum())
+        self._cube_hidden_total += not self._cam_frame.cube_detected
 
         truncated = self.step_count >= self.max_steps
         if terminated or truncated:
@@ -734,23 +944,10 @@ class SO101BaseEnv(gym.Env):
             # Fraction of marker-steps hidden from the camera (0 = always visible).
             info["marker_hidden_ratio"] = \
                 self._markers_hidden_total / (self.step_count * N_MARKERS)
+            info["cube_hidden_ratio"] = self._cube_hidden_total / self.step_count
             self._on_episode_end(info)
 
         if self.render_mode == "human":
             self._render_human()
 
         return self._compute_obs(), float(reward), terminated, truncated, info
-
-    def _render_human(self):
-        import time
-        if self.viewer is None:
-            import mujoco.viewer
-            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-        self.viewer.sync()
-        if self.slow_factor > 1:
-            time.sleep(self.model.opt.timestep * self.n_substeps * (self.slow_factor - 1))
-
-    def close(self):
-        if self.viewer is not None:
-            self.viewer.close()
-            self.viewer = None

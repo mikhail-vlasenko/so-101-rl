@@ -67,8 +67,8 @@ def _qvel_scale(model, action_scale: float, n_substeps: int) -> float:
 def build_obs_norm(prev_actions_n: int, marker_include_rot: bool,
                    action_scale: float, n_substeps: int) -> tuple[np.ndarray, np.ndarray]:
     """(center, scale) float32 arrays for the SO101BaseEnv obs layout
-    (obs_dim_for): qpos, qvel, markers, marker_age, cube_pos, extra,
-    prev_actions."""
+    (obs_dim_for): qpos, qvel, markers, marker_age, cube_tag (pos + rot),
+    cube_age, extra, prev_actions."""
     model = _load_model()
     qpos_center, qpos_scale = _qpos_norm(model)
     qvel_scale = _qvel_scale(model, action_scale, n_substeps)
@@ -85,8 +85,13 @@ def build_obs_norm(prev_actions_n: int, marker_include_rot: bool,
     # marker age: [0, cap] maps to [-1, 1]
     center.append(np.full(N_MARKERS, MARKER_AGE_CAP_S / 2.0))
     scale.append(np.full(N_MARKERS, MARKER_AGE_CAP_S / 2.0))
-    center.append(POS_CENTER)  # cube_pos
+    center.append(POS_CENTER)  # cube tag pos
     scale.append(POS_SCALE)
+    center.append(np.zeros(3))  # cube tag rot (axis-angle, like marker rot)
+    scale.append(np.full(3, ROT_SCALE))
+    # cube tag age: [0, cap] maps to [-1, 1], same as marker age
+    center.append(np.full(1, MARKER_AGE_CAP_S / 2.0))
+    scale.append(np.full(1, MARKER_AGE_CAP_S / 2.0))
     center.append(np.zeros(4))  # extra
     scale.append(EXTRA_SCALE)
     center.append(np.zeros(prev_actions_n * n_joints))  # already in [-1, 1]

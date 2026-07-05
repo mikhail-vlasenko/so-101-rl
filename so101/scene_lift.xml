@@ -33,6 +33,11 @@
       <geom name="cube_geom" type="box" size="0.03 0.02 0.0125" mass="0.008"
           rgba="0.95 0.85 0.25 1" condim="6" friction="1.5 0.01 0.001"
           contype="1" conaffinity="1" solref="0.01 1"/>
+      <!-- AprilTag id 1 (20 mm) glued to the center of one largest (6x4) face;
+           +z out of the printed face, same convention as the arm marker sites
+           in so101.xml. Site z offset = the geom's z half-extent. -->
+      <site name="cube_tag" type="box" group="2" size="0.01 0.01 0.0005"
+          pos="0 0 0.0125" rgba="0.1 0.8 0.1 1"/>
     </body>
   </worldbody>
 </mujoco>

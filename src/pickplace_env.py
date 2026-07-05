@@ -55,13 +55,16 @@ class SO101PickPlaceEnv(SO101BaseEnv):
             if dist_to_ring > self.ring_exclusion_radius:
                 return cube_xy
 
-    def _on_reset(self, cube_pos):
-        # Random ring height: sink the ring body into the floor
+    def _randomize_scene(self):
+        # Random ring height: sink the ring body into the floor. Runs before the
+        # arm/cube rejection sampling so collisions and tag occlusion see the
+        # episode's actual wall height.
         self.ring_height = self.np_random.uniform(self.ring_height_min, self.ring_height_max)
         ring_body_pos = self.model.body_pos[self.ring_body_id].copy()
         ring_body_pos[2] = self.ring_height - self.ring_wall_height
         self.model.body_pos[self.ring_body_id] = ring_body_pos
 
+    def _on_reset(self, cube_pos):
         self._prev_xy_dist = np.linalg.norm(cube_pos[:2] - self.place_target[:2])
         self._xy_progress_total = 0.0
         self._xy_regress_total = 0.0

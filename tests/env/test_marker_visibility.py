@@ -59,7 +59,7 @@ def env():
 
 
 # Obs layout: [qpos(6), qvel(6), pos_finger(3), rot_finger(3), pos_wrist(3),
-# rot_wrist(3), cube(3), extra(4), prev_actions]
+# rot_wrist(3), marker_age(2), cube_tag(6), cube_age(1), extra(4), prev_actions]
 MARKER_OBS_START = 12
 
 # Geometric-visibility tests must pose the arm under the 0.23 m height ceiling: the

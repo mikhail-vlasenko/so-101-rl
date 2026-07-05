@@ -87,7 +87,13 @@ def test_terminates_after_dwell_when_snapped_to_target():
 
     terminated = False
     for step in range(env.dwell_steps + 5):
-        _, _, terminated, _, info = env.step(np.zeros(env.n_joints, dtype=np.float32))
+        # Command toward the waypoint like a converged policy would. Zero
+        # action would NOT hold: action_to_target re-targets the current pose
+        # each tick, so gravity sag ratchets the elbow out of tolerance under
+        # the refit servo dynamics (reduced damping + 2/3 torque cap).
+        err = env.target_qpos - env._get_joint_pos()
+        action = np.clip(err / env.action_scale, -1.0, 1.0).astype(np.float32)
+        _, _, terminated, _, info = env.step(action)
         if terminated:
             assert info["dwell_count"] >= env.dwell_steps
             assert info["reached"] is True

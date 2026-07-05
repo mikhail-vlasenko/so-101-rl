@@ -1,26 +1,29 @@
-"""Roll out the trained lift policy on the real SO-101 arm with sim-provided cube state.
+"""Roll out the trained lift policy on the real SO-101 arm.
 
-The cube cannot be observed directly on the real rig, so we run a MuJoCo sim in
-lockstep with the real arm: each control tick, the real encoder readings are
-written into the sim, the sim is stepped forward, and the resulting sim cube
-position is fed into the policy observation. The real arm executes the policy's
-action; the sim is purely a passive cube-tracker driven by the real encoders.
+The cube obs is the raw pose (+ age) of the AprilTag on the sponge's largest
+face (src/base_env.py convention). Its source follows --marker-source:
 
-This will NOT actually grasp the real cube — there's no alignment between the
-sim cube and any physical object. It is a "what does the policy do on the real
-hardware when it thinks there is a cube there" tool.
+- camera: the real sponge. real/marker_obs.py measures tag id 1 and maps it to
+  the base frame; the policy chases the physical object, and success is dwell
+  on the measured sponge-center height (back-derived from the tag pose for
+  termination only). The lockstep sim cube is pinned to the measurement each
+  tick so the viewer shows the real sponge.
+- fk (default, dry-run): a lockstep MuJoCo sim cube driven by the real
+  encoders via contacts, run through the same sim visibility convention
+  (cube_tag_visible + hold-last + age), so dry-runs exercise the identical obs
+  contract with no physical sponge.
 
 Usage:
     python -m real.rollout_lift                         # dry-run, latest checkpoint
     python -m real.rollout_lift --execute               # actually drive the servos
+    python -m real.rollout_lift --marker-source camera --execute   # real sponge
     python -m real.rollout_lift --model best --execute  # best_model.zip
-    python -m real.rollout_lift --model logs/ppo_lift/checkpoints/ppo_4000000_steps.zip --execute
-    python -m real.rollout_lift --seed 0 --execute      # reproducible cube spawn
+    python -m real.rollout_lift --seed 0                # reproducible fk cube spawn
     python -m real.rollout_lift --slow 3 --execute      # 1/3 physical speed, no retraining
 
 Setup, safety gating, and per-tick command shaping (training-matched
 quantization, raw clamp, sub-target streaming, --slow time dilation) all live
-in real.rollout_common — this script owns only the lockstep cube sim,
+in real.rollout_common — this script owns only observation construction,
 termination, and plots. --execute is OFF by default; Ctrl-C disables torque.
 """
 
@@ -35,12 +38,15 @@ import matplotlib.pyplot as plt
 import mujoco
 import mujoco.viewer
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from src.base_env import (
+    CUBE_TAG_SITE_NAME,
     JOINT_NAMES,
     MARKER_AGE_CAP_S,
     MARKER_SITE_NAMES,
     N_MARKERS,
+    cube_tag_visible,
     marker_world_poses,
     markers_visible,
     obs_dim_for,
@@ -78,6 +84,20 @@ MAX_MARKER_AGE_S = 0.25
 # distribution (42-52 ms delay + 0-33 ms frame wait — conf/dr/full.yaml).
 FK_FRESH_AGE_S = 0.06
 
+# Camera-mode success dwell only counts while the measured cube pose is this
+# fresh: a tag that vanished mid-lift freezes its held pose, which must not
+# keep faking "above target height".
+CUBE_FRESH_DWELL_S = 0.15
+
+
+def tag_center_z(cube_tag_pos: np.ndarray, cube_tag_rot: np.ndarray, hz: float) -> float:
+    """Sponge-center height back-derived from the measured tag pose, for
+    termination only — the obs carries the raw tag pose. center = tag_pos -
+    hz * (tag +z axis); the offset runs along the tag's own normal, so the
+    uncalibrated in-plane glue yaw cannot affect it."""
+    z_axis = Rotation.from_rotvec(cube_tag_rot).as_matrix()[:, 2]
+    return float(cube_tag_pos[2] - hz * z_axis[2])
+
 
 def parse_args(lift_cfg: dict) -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -88,24 +108,27 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
     p.add_argument("--no-view", action="store_true",
                    help="Disable the MuJoCo passive viewer.")
     p.add_argument("--marker-source", default="fk", choices=["fk", "camera"],
-                   help="Where marker observations come from: 'fk' (default) "
-                        "fills them from the lockstep sim; 'camera' feeds measured "
-                        "AprilTag poses mapped to the base frame via the calibrated "
-                        "extrinsics (real/calibrate_qpos.py).")
+                   help="Where marker AND cube-tag observations come from: 'fk' "
+                        "(default) fills them from the lockstep sim; 'camera' feeds "
+                        "measured AprilTag poses (arm tags + the sponge's tag id 1) "
+                        "mapped to the base frame via the calibrated extrinsics "
+                        "(real/calibrate_qpos.py).")
     p.add_argument("--family", default="apriltag", choices=["apriltag", "aruco"],
                    help="Marker family for --marker-source camera.")
     return p.parse_args()
 
 
 def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
-              marker_rot: np.ndarray, marker_age: np.ndarray, cube_pos: np.ndarray,
+              marker_rot: np.ndarray, marker_age: np.ndarray,
+              cube_tag_pos: np.ndarray, cube_tag_rot: np.ndarray, cube_age: float,
               prev_actions: np.ndarray, marker_include_rot: bool) -> np.ndarray:
-    """Match SO101LiftEnv._compute_obs:
-    qpos+qvel+markers+marker_age+cube+[0,0,0,task_id]+prev_actions.
+    """Match SO101LiftEnv._compute_obs: qpos+qvel+markers+marker_age+
+    cube_tag(pos+rot)+cube_age+[0,0,0,task_id]+prev_actions.
 
-    Marker poses/ages come from the camera pipeline (--marker-source camera) or
-    the FK stand-in on the lockstep sim — held last-detected poses either way.
-    marker_include_rot mirrors the env: positions only when false.
+    Marker and cube-tag poses/ages come from the camera pipeline
+    (--marker-source camera) or the FK stand-in on the lockstep sim — held
+    last-detected poses either way. marker_include_rot mirrors the env:
+    marker positions only when false (the cube tag always carries its rot).
     """
     extra = np.array([0.0, 0.0, 0.0, LIFT_TASK_ID], dtype=np.float32)
     markers = (np.hstack([marker_pos, marker_rot]).flatten()
@@ -114,7 +137,9 @@ def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
                            qvel.astype(np.float32),
                            markers.astype(np.float32),
                            marker_age.astype(np.float32),
-                           cube_pos.astype(np.float32),
+                           cube_tag_pos.astype(np.float32),
+                           cube_tag_rot.astype(np.float32),
+                           np.array([cube_age], dtype=np.float32),
                            extra,
                            prev_actions.flatten().astype(np.float32)]).astype(np.float32)
 
@@ -166,10 +191,13 @@ def plot_rollout(out_path: Path, rows: list[dict], target_height: float,
     ax.grid(True, alpha=0.3)
 
     ax = axes[1, 1]
-    ax.plot(t, cube[:, 2], color="C2", label="cube_z (sim)")
+    ax.plot(t, cube[:, 2], color="C2", label="cube_z")
     ax.axhline(target_height, color="k", ls="--", lw=1.0, alpha=0.6,
                label=f"target_height={target_height}")
     ax.plot(t, ee_cube_dist, color="C3", label="‖ee − cube‖")
+    cube_age = np.array([r["cube_age"] for r in rows])
+    ax.plot(t, cube_age * 0.1, color="C4", ls=":", lw=1.0,
+            label="cube_age (0.1 = 1 s)")
     if grasped.any():
         ax.fill_between(t, 0, 1, where=grasped, transform=ax.get_xaxis_transform(),
                         color="C1", alpha=0.15, label="grasped (sim)")
@@ -211,6 +239,10 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
               + [f"mobs_{t}_{ax}" for t in tag_names for ax in "xyz"]
               + [f"mfk_{t}_{ax}" for t in tag_names for ax in "xyz"]
               + [f"mage_{t}_s" for t in tag_names]
+              # cube-tag obs the policy saw (raw tag pose + age)
+              + [f"ctag_{ax}" for ax in "xyz"]
+              + [f"ctag_r{ax}" for ax in "xyz"]
+              + ["cube_age_s"]
               + ["loop_ms", "predict_ms", "read_all_ms", "stream_ms", "window_ms",
                  "marker_age_ms", "cam_read_ms", "detect_ms"])
     with out_path.open("w", newline="") as f:
@@ -226,6 +258,9 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
                         *(f"{v:.6f}" for v in r["marker_obs"].flatten()),
                         *(f"{v:.6f}" for v in r["marker_fk"].flatten()),
                         *(f"{v:.4f}" for v in r["marker_age"]),
+                        *(f"{v:.6f}" for v in r["cube_tag_pos"]),
+                        *(f"{v:.6f}" for v in r["cube_tag_rot"]),
+                        f"{r['cube_age']:.4f}",
                         f"{r['loop_ms']:.2f}", f"{r['predict_ms']:.3f}",
                         f"{r['read_all_ms']:.2f}", f"{r['stream_ms']:.2f}",
                         f"{r['window_ms']:.2f}",
@@ -261,8 +296,14 @@ def main() -> int:
     tag_cam_pos = tag_cam_world_pos(model, data)
     cube_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
     cube_qposadr = int(model.jnt_qposadr[cube_joint_id])
+    cube_dofadr = int(model.jnt_dofadr[cube_joint_id])
     cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
     assert cube_geom_id >= 0, "geom 'cube_geom' not found in model"
+    cube_body_id = int(model.geom_bodyid[cube_geom_id])
+    cube_tag_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, CUBE_TAG_SITE_NAME)
+    assert cube_tag_site_id >= 0, f"site '{CUBE_TAG_SITE_NAME}' not found in model"
+    # Tag-face offset from the sponge center, sourced from the loaded scene XML.
+    cube_hz = float(model.geom_size[cube_geom_id][2])
 
     policy = load_policy(args.model, LOG_DIR,
                          obs_dim_for(prev_actions_n, marker_include_rot))
@@ -280,13 +321,17 @@ def main() -> int:
                    slow=args.slow, interp_hz=args.interp_hz,
                    qpos_bias=load_calibration(), compliance=load_compliance())
     print(f"seed={args.seed} {loop.describe()}")
-    print(f"sim cube spawn: ({cube_pos_init[0]:+.3f}, {cube_pos_init[1]:+.3f}, "
-          f"{cube_pos_init[2]:+.3f})  target_height={target_height}")
+    if args.marker_source == "fk":
+        print(f"sim cube spawn: ({cube_pos_init[0]:+.3f}, {cube_pos_init[1]:+.3f}, "
+              f"{cube_pos_init[2]:+.3f})  target_height={target_height}")
+    else:
+        print(f"cube = measured tag id 1 (camera)  target_height={target_height}")
 
     bus.connect()
     stopped = install_sigint_flag()
 
-    marker_source = CameraMarkerSource(args.family) if args.marker_source == "camera" else None
+    marker_source = (CameraMarkerSource(args.family, track_cube=True)
+                     if args.marker_source == "camera" else None)
 
     viewer = None if args.no_view else mujoco.viewer.launch_passive(model, data)
     publisher = None
@@ -321,10 +366,14 @@ def main() -> int:
         prev_iter_t = None
         # FK-branch hold-last state mirroring training (src/base_env.py): a tag
         # turned away from tag_cam keeps its last visible pose while its age
-        # grows; never-yet-visible tags read zero with age at the cap.
+        # grows; never-yet-visible tags read zero with age at the cap. The
+        # lockstep sim's cube tag goes through the identical convention.
         fk_pos = np.zeros((N_MARKERS, 3))
         fk_rot = np.zeros((N_MARKERS, 3))
         fk_seen_t = np.full(N_MARKERS, -np.inf)
+        fk_cube_pos = np.zeros(3)
+        fk_cube_rot = np.zeros(3)
+        fk_cube_seen_t = -np.inf
         while not stopped["flag"] and step < args.max_steps:
             iter_t = time.perf_counter()
             # Realized control period (start-to-start of consecutive ticks).
@@ -341,6 +390,7 @@ def main() -> int:
                 # Measured AprilTag poses in the base frame, held at the last
                 # detection per tag with their age (real/marker_obs.py).
                 marker_pos, marker_rot, marker_age = marker_source.marker_poses()
+                cube_tag_pos, cube_tag_rot, cube_age = marker_source.cube_pose()
                 # Latency of the newest frame, sampled the instant the policy
                 # consumes it — the whole-pipeline stall guard.
                 stale_s, cam_read_ms, detect_ms = marker_source.frame_stats()
@@ -353,6 +403,8 @@ def main() -> int:
             else:
                 # Match training (base_env._compute_obs): a tag turned away
                 # from tag_cam holds its last visible pose, age keeps growing.
+                # Same convention for the lockstep sim cube's tag, occlusion
+                # test included.
                 now = time.monotonic()
                 vis = markers_visible(data, marker_site_ids, tag_cam_pos)
                 fk_pos[vis] = fk_pos_now[vis]
@@ -360,11 +412,18 @@ def main() -> int:
                 fk_seen_t[vis] = now - FK_FRESH_AGE_S
                 marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
                 marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
+                if cube_tag_visible(model, data, cube_tag_site_id, tag_cam_pos,
+                                    cube_body_id):
+                    (fk_cube_pos,), (fk_cube_rot,) = marker_world_poses(
+                        data, [cube_tag_site_id])
+                    fk_cube_seen_t = now - FK_FRESH_AGE_S
+                cube_tag_pos, cube_tag_rot = fk_cube_pos.copy(), fk_cube_rot.copy()
+                cube_age = min(MARKER_AGE_CAP_S, now - fk_cube_seen_t)
                 marker_age_ms = cam_read_ms = detect_ms = float("nan")
 
             obs = build_obs(loop.qpos, loop.qvel, marker_pos, marker_rot,
-                            marker_age, cube_pos, loop.prev_actions,
-                            marker_include_rot)
+                            marker_age, cube_tag_pos, cube_tag_rot, cube_age,
+                            loop.prev_actions, marker_include_rot)
             t_pred = time.perf_counter()
             raw_action, _ = policy.predict(obs, deterministic=True)
             predict_ms = (time.perf_counter() - t_pred) * 1e3
@@ -381,6 +440,17 @@ def main() -> int:
             # by sim physics during the substep loop. Cube state is preserved.
             data.qpos[qposadr] = loop.qpos
             data.qvel[joint_dofadr] = loop.qvel
+            if marker_source is not None and cube_tag_pos.any():
+                # Pin the sim cube to the measurement so the viewer shows the
+                # real sponge (held pose while the tag is hidden). Center and
+                # orientation are back-derived from the tag pose for display;
+                # the obs carries the raw tag pose.
+                tag_R = Rotation.from_rotvec(cube_tag_rot)
+                data.qpos[cube_qposadr:cube_qposadr + 3] = \
+                    cube_tag_pos - cube_hz * tag_R.as_matrix()[:, 2]
+                x, y, z, w = tag_R.as_quat()  # scipy xyzw -> MuJoCo wxyz
+                data.qpos[cube_qposadr + 3:cube_qposadr + 7] = (w, x, y, z)
+                data.qvel[cube_dofadr:cube_dofadr + 6] = 0.0
             mujoco.mj_forward(model, data)
             if publisher is not None:
                 if marker_source is not None:
@@ -394,7 +464,16 @@ def main() -> int:
             ee_cube = float(np.linalg.norm(ee_pos - cube_pos))
             gripper_val = loop.qpos[JOINT_NAMES.index("gripper")]
             grasped_sim = ee_cube < 0.05 and gripper_val < 0.3
-            if cube_pos[2] >= target_height:
+            if marker_source is not None:
+                # Success = dwell on the measured sponge-center height, counted
+                # only while the measurement is fresh — a frozen held pose must
+                # not fake a lift.
+                center_z = tag_center_z(cube_tag_pos, cube_tag_rot, cube_hz)
+                if cube_age < CUBE_FRESH_DWELL_S and center_z >= target_height:
+                    dwell_count += 1
+                else:
+                    dwell_count = 0
+            elif cube_pos[2] >= target_height:
                 dwell_count += 1
             else:
                 dwell_count = 0
@@ -404,6 +483,8 @@ def main() -> int:
                 "ee": ee_pos.copy(), "cube": cube_pos.copy(), "grasped": grasped_sim,
                 "marker_obs": marker_pos.copy(), "marker_fk": fk_pos_now.copy(),
                 "marker_age": marker_age.copy(),
+                "cube_tag_pos": cube_tag_pos.copy(), "cube_tag_rot": cube_tag_rot.copy(),
+                "cube_age": cube_age,
                 "loop_ms": loop_ms, "predict_ms": predict_ms,
                 "read_all_ms": loop.last_read_ms, "stream_ms": loop.last_stream_ms,
                 "window_ms": loop.last_window_ms,
@@ -423,7 +504,8 @@ def main() -> int:
 
             if step % 15 == 0:
                 print(f"step={step:3d}  ee-cube={ee_cube:.3f}m  "
-                      f"cube_z={cube_pos[2]:.3f}m  grasped_sim={int(grasped_sim)}")
+                      f"cube_z={cube_pos[2]:.3f}m  cube_age={cube_age:.2f}s  "
+                      f"grasped_sim={int(grasped_sim)}")
                 lat = (f"          lat[ms]: loop={loop_ms:.0f} predict={predict_ms:.2f} "
                        f"read_all={loop.last_read_ms:.0f} stream={loop.last_stream_ms:.0f} "
                        f"window={loop.last_window_ms:.0f}")
@@ -436,7 +518,9 @@ def main() -> int:
             step += 1
 
             if dwell_count >= 5:
-                print(f"SIM cube reached target_height={target_height} at step {step}")
+                what = ("measured sponge center held above"
+                        if marker_source is not None else "SIM cube reached")
+                print(f"{what} target_height={target_height} at step {step}")
                 break
         else:
             if not stopped["flag"]:
