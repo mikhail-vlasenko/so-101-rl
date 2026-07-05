@@ -39,6 +39,7 @@ Usage:
 
 import argparse
 import json
+import time
 
 import mujoco
 import numpy as np
@@ -157,11 +158,31 @@ def main() -> int:
     print(f"kp groups: {[(kp, [JOINT_NAMES[j] for j in joints]) for kp, joints in KP_GROUPS]}")
     print(f"baseline loss (scales=1, friction=0, tau={baseline_tau:.3f}, "
           f"{len(real_data)} trajectories): {baseline_loss:.5f}")
+    n_params = len(PARAM_NAMES)
+    population = args.popsize * n_params
+    expected_evals = (args.maxiter + 1) * population
+    print(f"search budget: pop={population} ({args.popsize} x {n_params}), "
+          f"~{expected_evals} objective evals + polishing")
+
+    t0 = time.time()
+    progress = {"iter": 0}
+
+    def on_iter(xk: np.ndarray, convergence: float) -> bool:
+        progress["iter"] += 1
+        best = total_loss(xk, *loss_args)
+        elapsed_s = time.time() - t0
+        per_iter_s = elapsed_s / progress["iter"]
+        eta_s = max(0.0, (args.maxiter - progress["iter"]) * per_iter_s)
+        improve_pct = (1.0 - best / baseline_loss) * 100.0
+        print(f"iter {progress['iter']:>3}/{args.maxiter}: best={best:.8f}, "
+              f"improve={improve_pct:.1f}%, conv={convergence:.3e}, "
+              f"elapsed={elapsed_s / 60.0:.1f}m, eta={eta_s / 60.0:.1f}m")
+        return False
 
     result = differential_evolution(
         total_loss, PARAM_BOUNDS, args=loss_args,
         maxiter=args.maxiter, popsize=args.popsize, seed=args.seed,
-        polish=True, tol=1e-4, disp=True,
+        polish=True, tol=1e-4, callback=on_iter, disp=False,
     )
 
     print(f"\nbest loss: {result.fun:.5f}  (baseline: {baseline_loss:.5f}, "

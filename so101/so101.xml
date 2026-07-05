@@ -42,22 +42,22 @@
     <default class="sts3215">
       <geom contype="0" conaffinity="0"/>
       <!-- Fit by sysid against real-arm CSVs (sysid_logs/fit.json), re-recorded
-           2026-06-13 at the current servo settings (SERVO_ACCEL=10, per-joint
+           2026-07-05 at the current servo settings (SERVO_ACCEL=40, per-joint
            SERVO_POSITION_KP) with the firmware motion profile modeled in sim
            (src/servo_profile.py). With the profile carrying the accel ramp and
            the timeconst filter the residual bandwidth, damping/armature dropped
-           to roughly a third of the earlier (inflated) fit and friction to ~0 —
-           earlier fits had leaned on all three to fake the missing servo lag.
+           vs the older pre-profile fit; this re-fit reduced kp/kv further and
+           landed at moderate dry friction under the newer servo settings.
            damping/armature/friction/kv/timeconst are shared (same Feetech
            hardware on every joint); kp is per-actuator (below). -->
-      <joint damping="1.3132" frictionloss="0.0032" armature="0.10930"/>
+      <joint damping="0.9581" frictionloss="0.0506" armature="0.00601"/>
       <!-- forcerange = 2/3 of the 2.94 N·m STS3215 stall: mirrors the
            Torque_Limit register cap written to the real servos at every
            torque-on (real/twin/constants.SERVO_TORQUE_LIMIT_FRAC — the two
            sides are consistency-tested in tests/control/test_torque_limit.py).
            Stall is a peak figure the real servo can't sustain, so training
            against it lets policies lean on torque the arm doesn't really have. -->
-      <position kv="2.2113" forcerange="-1.96 1.96" timeconst="0.005"/>
+      <position kv="1.5185" forcerange="-1.96 1.96" timeconst="0.005"/>
     </default>
 
     <default class="backlash">
@@ -270,11 +270,11 @@
          scale_kp@{8,24,32}): the three SERVO_POSITION_KP groups — pan/gripper
          (Kp 8), shoulder_lift (Kp 24), elbow/wrist_flex/wrist_roll (Kp 32) —
          each get one fitted scale, so equal-gain joints share a kp. -->
-    <position class="sts3215" name="shoulder_pan"  joint="shoulder_pan"  kp="24.90"  ctrlrange="-1.91986 1.91986"/>
-    <position class="sts3215" name="shoulder_lift" joint="shoulder_lift" kp="128.79" ctrlrange="-1.74533 1.74533"/>
-    <position class="sts3215" name="elbow_flex"    joint="elbow_flex"    kp="144.89" ctrlrange="-1.69 1.69"/>
-    <position class="sts3215" name="wrist_flex"    joint="wrist_flex"    kp="144.89" ctrlrange="-1.65806 1.65806"/>
-    <position class="sts3215" name="wrist_roll"    joint="wrist_roll"    kp="144.89" ctrlrange="-2.74385 2.84121"/>
-    <position class="sts3215" name="gripper"       joint="gripper"       kp="24.90"  ctrlrange="-0.17453 1.74533"/>
+    <position class="sts3215" name="shoulder_pan"  joint="shoulder_pan"  kp="15.37" ctrlrange="-1.91986 1.91986"/>
+    <position class="sts3215" name="shoulder_lift" joint="shoulder_lift" kp="70.47" ctrlrange="-1.74533 1.74533"/>
+    <position class="sts3215" name="elbow_flex"    joint="elbow_flex"    kp="53.35" ctrlrange="-1.69 1.69"/>
+    <position class="sts3215" name="wrist_flex"    joint="wrist_flex"    kp="53.35" ctrlrange="-1.65806 1.65806"/>
+    <position class="sts3215" name="wrist_roll"    joint="wrist_roll"    kp="53.35" ctrlrange="-2.74385 2.84121"/>
+    <position class="sts3215" name="gripper"       joint="gripper"       kp="15.37" ctrlrange="-0.17453 1.74533"/>
   </actuator>
 </mujoco>
