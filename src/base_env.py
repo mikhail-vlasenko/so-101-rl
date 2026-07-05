@@ -152,20 +152,44 @@ def marker_dropout_prob(pos, normals, cam_pos, p_near, p_far):
 _CAM_GEOM_CLEARANCE_M = 0.06
 
 
-def cube_tag_occluded(model, data, tag_pos, cam_pos, cube_body_id):
-    """True when a geom blocks the cube tag's view of the camera.
+def cube_tag_sample_points(data, site_id, half_extents):
+    """The tag centre plus its four square corners, in world coordinates.
 
-    Casts an mj_ray from the tag toward the camera against all geoms (static
-    included — ring walls and floor block; so do the arm's visual meshes, the
-    shapes the camera actually sees). The cube's own body is excluded so a tag
-    facing away stays the angle check's job, not a self-occlusion.
+    Corners are the site box's ±x/±y half-extents mapped through the site's
+    world rotation — the printed AprilTag's quad, the geometry the detector must
+    see whole. z (tag thickness) is ignored: corners lie in the tag plane.
     """
-    vec = np.asarray(cam_pos, dtype=np.float64) - tag_pos
-    dist = float(np.linalg.norm(vec))
+    xmat = data.site_xmat[site_id].reshape(3, 3)
+    center = data.site_xpos[site_id]
+    hx, hy = half_extents[0], half_extents[1]
+    pts = [center]
+    for sx in (-1.0, 1.0):
+        for sy in (-1.0, 1.0):
+            pts.append(center + sx * hx * xmat[:, 0] + sy * hy * xmat[:, 1])
+    return pts
+
+
+def cube_tag_occluded(model, data, site_id, cam_pos, cube_body_id):
+    """True when a geom blocks the cube tag's view of the camera at its centre
+    or any of its four corners.
+
+    Casts an mj_ray from each sample point (see cube_tag_sample_points) toward
+    the camera against all geoms (static included — ring walls and floor block;
+    so do the arm's visual meshes, the shapes the camera actually sees). The
+    cube's own body is excluded so a tag facing away stays the angle check's
+    job, not a self-occlusion. Any blocked ray hides the tag: a real AprilTag
+    decode fails when part of its quad is occluded, not just its centre.
+    """
+    cam_pos = np.asarray(cam_pos, dtype=np.float64)
     geomid = np.zeros(1, dtype=np.int32)
-    hit = mujoco.mj_ray(model, data, tag_pos.astype(np.float64), vec / dist,
-                        None, 1, cube_body_id, geomid)
-    return 0.0 <= hit < dist - _CAM_GEOM_CLEARANCE_M
+    for pt in cube_tag_sample_points(data, site_id, model.site_size[site_id]):
+        vec = cam_pos - pt
+        dist = float(np.linalg.norm(vec))
+        hit = mujoco.mj_ray(model, data, pt.astype(np.float64), vec / dist,
+                            None, 1, cube_body_id, geomid)
+        if 0.0 <= hit < dist - _CAM_GEOM_CLEARANCE_M:
+            return True
+    return False
 
 
 def cube_tag_visible(model, data, site_id, cam_pos, cube_body_id):
@@ -177,7 +201,7 @@ def cube_tag_visible(model, data, site_id, cam_pos, cube_body_id):
     normal = data.site_xmat[site_id].reshape(3, 3)[:, 2]
     if marker_dropout_prob(pos, normal[None], cam_pos, p_near=0.0, p_far=0.0)[0] >= 1.0:
         return False
-    return not cube_tag_occluded(model, data, pos[0], cam_pos, cube_body_id)
+    return not cube_tag_occluded(model, data, site_id, cam_pos, cube_body_id)
 
 
 class CamState(NamedTuple):
@@ -560,7 +584,7 @@ class SO101BaseEnv(SO101ArmEnv):
                         cube_tag_pos=cube_tag_pos, cube_tag_rot=cube_tag_rot,
                         cube_tag_normal=cube_tag_normal.copy(),
                         cube_tag_occluded=cube_tag_occluded(
-                            self.model, self.data, cube_tag_pos,
+                            self.model, self.data, self.cube_tag_site_id,
                             self.tag_cam_pos, self.cube_body_id))
 
     def _process_frame(self, state: CamState) -> CamFrame:
@@ -799,7 +823,7 @@ class SO101BaseEnv(SO101ArmEnv):
             if marker_dropout_prob(tag_pos, normal[None], self.tag_cam_pos,
                                    p_near=1.0, p_far=0.0)[0] >= 1.0:
                 continue
-            if cube_tag_occluded(self.model, self.data, tag_pos[0],
+            if cube_tag_occluded(self.model, self.data, self.cube_tag_site_id,
                                  self.tag_cam_pos, self.cube_body_id):
                 continue
             if self._cube_arm_contact():

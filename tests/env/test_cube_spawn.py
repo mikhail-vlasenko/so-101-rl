@@ -95,7 +95,7 @@ def test_spawn_tag_visible(env):
         normal = env.data.site_xmat[env.cube_tag_site_id].reshape(3, 3)[:, 2]
         assert marker_dropout_prob(tag_pos, normal[None], env.tag_cam_pos,
                                    p_near=1.0, p_far=0.0)[0] < 1.0, seed
-        assert not cube_tag_occluded(env.model, env.data, tag_pos[0],
+        assert not cube_tag_occluded(env.model, env.data, env.cube_tag_site_id,
                                      env.tag_cam_pos, env.cube_body_id), seed
         assert not env._cube_arm_contact(), seed
 
