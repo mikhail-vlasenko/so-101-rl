@@ -24,6 +24,12 @@ Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/li
 
 - **Marker observations: tune sim dropout against measured real rates; site rotations still eyeballed.** Mostly done: the camera feeds measured tag poses into rollouts (`real/marker_obs.py`, `--marker-source camera`, holding undetected tags at their last pose with a growing age channel like training), the site *positions* are calibrated (`real/calibrate_qpos.py` writes the freed-mount solve back into `so101.xml`), and `tag_cam`'s sim pose is set from the solved extrinsics. Still open: the site *rotations* are an eyeballed estimate plus the `quarter_turns` in-plane snap — fine while the obs uses positions, revisit if marker_rot ever matters; and the sim visibility model (plane-angle cutoff + the `dr` group's `marker_dropout`, higher in the grazing 65–70° band) has never been checked against measured real-camera dropout rates. There is deliberately no reward term for a hidden tag: losing its pose is penalty enough.
 
+## Imitation learning pipeline from one model to the other
+
+I think it would help with the cold start of larger and more complex models.
+
+Also could be used to imitate the actions from a different observation. Say, one policy has GT cube position, and the other - a noisy or obscured or whatever. But maybe the correct actions are the same.
+
 ## Train a policy in PWM / torque-ish mode
 
 STS3215 servos expose a PWM / "current" mode via register writes. Bypassing the internal position PID lets the policy command motor effort directly — no trapezoidal-profile reset every tick (see `SERVO_ACCEL` comment), no 15 Hz lower bound, and a control interface much closer to what most MuJoCo-trained policies use.
