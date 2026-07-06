@@ -126,25 +126,14 @@ def _resolve_env(cfg, orig_dir, env_name):
     return env_cls, cfg[f"{env_name}_env"], os.path.join(orig_dir, env_cls.XML_PATH)
 
 
-def train(cfg: DictConfig):
-    # Hydra changes cwd — go back to original for MuJoCo XML paths
-    orig_dir = hydra.utils.get_original_cwd()
-    os.chdir(orig_dir)
+def env_specs(cfg, orig_dir, runtime_cfg: RuntimeEnvConfig, n_envs: int):
+    """(env_fns, eval_inner, n_substeps) for the configured env(s).
 
-    algo_name = cfg.algorithm
-    algo_cls, algo_kwargs_fn, policy_cls = ALGORITHM_REGISTRY[algo_name]
-
-    seed = cfg.seed if cfg.seed is not None else None
-    if seed is not None:
-        set_random_seed(int(seed))
-
-    gamma = cfg.train.gamma
-    n_envs = cfg.train.n_envs
-
-    runtime_cfg = runtime_cfg_from_hydra(cfg)
-    marker_include_rot = runtime_cfg.marker_include_rot
-    prev_actions_n = runtime_cfg.prev_actions_n
-
+    Encapsulates the multitask-vs-single branching so training and the
+    distillation rig (src/distill.py) build the identical env farm: a list of
+    SubprocVecEnv factory closures, one raw eval env (pickplace for multitask —
+    the harder task), and the shared control rate that fixes the obs_norm qvel
+    scale."""
     if cfg.env_name == "multitask":
         lift_cls, lift_cfg, lift_xml = _resolve_env(cfg, orig_dir, "lift")
         pp_cls, pp_cfg, pp_xml = _resolve_env(cfg, orig_dir, "pickplace")
@@ -154,7 +143,6 @@ def train(cfg: DictConfig):
             else _make_env_fn(pp_cls, pp_cfg, pp_xml, cfg=runtime_cfg)
             for i in range(n_envs)
         ]
-        # Eval on pickplace (the harder task)
         eval_inner = make_env(pp_cls, pp_cfg, pp_xml, cfg=runtime_cfg)
         assert int(lift_cfg["n_substeps"]) == int(pp_cfg["n_substeps"]), \
             "multitask envs must share a control rate for one obs_norm qvel scale"
@@ -165,6 +153,71 @@ def train(cfg: DictConfig):
                    for _ in range(n_envs)]
         eval_inner = make_env(env_cls, env_cfg, xml_path, cfg=runtime_cfg)
         n_substeps = int(env_cfg["n_substeps"])
+    return env_fns, eval_inner, n_substeps
+
+
+def obs_norm_for(cfg, n_substeps: int) -> tuple:
+    """Tiled (center, scale) lists for the policy's fixed ObsNorm, matching the
+    configured env layout and frame_stack. Single source shared by training and
+    distillation so a distilled student's input normalization is identical to a
+    trained one (the constants ship inside the checkpoint)."""
+    frame_stack = int(cfg.frame_stack)
+    if cfg.env_name == "reach":
+        obs_center, obs_scale = build_reach_obs_norm(
+            int(cfg.prev_actions_n), len(cfg.reach_env.waypoints),
+            float(cfg.action_scale), n_substeps)
+    else:
+        obs_center, obs_scale = build_obs_norm(
+            int(cfg.prev_actions_n), bool(cfg.marker_include_rot),
+            float(cfg.action_scale), n_substeps)
+    return obs_center.tolist() * frame_stack, obs_scale.tolist() * frame_stack
+
+
+def build_fresh_model(cfg, env, obs_norm, net_arch, seed, *,
+                      tensorboard_log=None, verbose=1):
+    """Construct a from-scratch SB3 model with the fixed ObsNorm baked into its
+    policy. Shared by training's cold start and the distillation rig's student,
+    so both carry the identical architecture, normalization, and algorithm
+    hyperparameters — and the student saves to a checkpoint `resume` restores
+    directly."""
+    algo_cls, algo_kwargs_fn, policy_cls = ALGORITHM_REGISTRY[cfg.algorithm]
+    return algo_cls(
+        policy_cls,
+        env,
+        learning_rate=make_lr_schedule(cfg.train.lr_schedule,
+                                       cfg.train.learning_rate, cfg.train.lr_min),
+        batch_size=cfg.train.batch_size,
+        gamma=cfg.train.gamma,
+        policy_kwargs={
+            "net_arch": list(net_arch),
+            "obs_norm": obs_norm,
+        },
+        stats_window_size=1,
+        verbose=verbose,
+        seed=int(seed) if seed is not None else None,
+        tensorboard_log=tensorboard_log,
+        **algo_kwargs_fn(cfg),
+    )
+
+
+def train(cfg: DictConfig):
+    # Hydra changes cwd — go back to original for MuJoCo XML paths
+    orig_dir = hydra.utils.get_original_cwd()
+    os.chdir(orig_dir)
+
+    algo_name = cfg.algorithm
+    algo_cls, _, _ = ALGORITHM_REGISTRY[algo_name]
+
+    seed = cfg.seed if cfg.seed is not None else None
+    if seed is not None:
+        set_random_seed(int(seed))
+
+    gamma = cfg.train.gamma
+    n_envs = cfg.train.n_envs
+
+    runtime_cfg = runtime_cfg_from_hydra(cfg)
+
+    env_fns, eval_inner, n_substeps = env_specs(cfg, orig_dir, runtime_cfg, n_envs)
 
     frame_stack = int(cfg.frame_stack)
 
@@ -172,14 +225,7 @@ def train(cfg: DictConfig):
     # stacked frames. Passed as plain lists inside policy_kwargs so they
     # save/load cleanly with the checkpoint and real rollouts inherit the
     # identical transform through the loaded policy.
-    if cfg.env_name == "reach":
-        obs_center, obs_scale = build_reach_obs_norm(
-            prev_actions_n, len(cfg.reach_env.waypoints),
-            float(cfg.action_scale), n_substeps)
-    else:
-        obs_center, obs_scale = build_obs_norm(
-            prev_actions_n, marker_include_rot, float(cfg.action_scale), n_substeps)
-    obs_norm = (obs_center.tolist() * frame_stack, obs_scale.tolist() * frame_stack)
+    obs_norm = obs_norm_for(cfg, n_substeps)
 
     vec_env = SubprocVecEnv(env_fns)
     if frame_stack > 1:
@@ -256,22 +302,9 @@ def train(cfg: DictConfig):
             **overrides,
         )
     else:
-        model = algo_cls(
-            policy_cls,
-            env,
-            learning_rate=make_lr_schedule(cfg.train.lr_schedule, cfg.train.learning_rate, cfg.train.lr_min),
-            batch_size=cfg.train.batch_size,
-            gamma=cfg.train.gamma,
-            policy_kwargs={
-                "net_arch": list(cfg.train.net_arch),
-                "obs_norm": obs_norm,
-            },
-            stats_window_size=1,
-            verbose=1,
-            seed=int(seed) if seed is not None else None,
-            tensorboard_log=os.path.join(orig_dir, "logs"),
-            **algo_kwargs_fn(cfg),
-        )
+        model = build_fresh_model(
+            cfg, env, obs_norm, list(cfg.train.net_arch), seed,
+            tensorboard_log=os.path.join(orig_dir, "logs"), verbose=1)
 
     print(f"Training {algo_name.upper()} ({cfg.env_name}) for {cfg.train.total_timesteps} steps...")
     model.learn(total_timesteps=cfg.train.total_timesteps, callback=callbacks, log_interval=cfg.train.log_interval)

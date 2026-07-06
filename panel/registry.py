@@ -100,6 +100,29 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
                     choices=("true", "false")),
         ),
     ),
+    ScriptSpec(
+        id="distill", title="Distill policy", page="train",
+        module="src.distill", arg_style="hydra",
+        description="DAgger-distill a trained teacher onto a fresh student across "
+                    "an architecture or obs-layout change (identical or privileged "
+                    "teacher view), then fine-tune the output via Train's resume.",
+        args=(
+            ArgSpec("env", "choice", "Environment", default="lift",
+                    choices=("lift", "pickplace", "multitask", "reach")),
+            ArgSpec("algorithm", "choice", "Algorithm", default="ppo",
+                    choices=("ppo", "sac")),
+            ArgSpec("distill.teacher", "str", "Teacher checkpoint (.zip)",
+                    checkpoint_picker="{algorithm}_{env}"),
+            ArgSpec("distill.teacher_obs", "choice", "Teacher obs view",
+                    default="identical", choices=("identical", "privileged")),
+            ArgSpec("distill.net_arch", "str", "Student net_arch (e.g. [512,512,512,512])"),
+            ArgSpec("distill.iterations", "int", "DAgger iterations"),
+            ArgSpec("distill.out", "str", "Output checkpoint (.zip)", default="distilled.zip"),
+            ArgSpec("seed", "int", "Seed"),
+            ArgSpec("wandb.enabled", "choice", "W&B logging",
+                    choices=("true", "false")),
+        ),
+    ),
     # ---- Sim ----
     ScriptSpec(
         id="eval", title="Evaluate checkpoint", page="sim",

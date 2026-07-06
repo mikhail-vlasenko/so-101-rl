@@ -107,3 +107,33 @@ wandb:
   project: robot-arm
   entity: mvlasenko
   enabled: true
+
+# DAgger distillation (src/distill.py): migrate a trained teacher checkpoint
+# onto a fresh student with a new architecture or observation layout without a
+# curriculum restart. The student is regressed onto the teacher's deterministic
+# action + value on states the (annealed teacher->student) rollout visits under
+# the student's deployment DR. Output is a resume-compatible checkpoint — always
+# follow distillation with a short PPO fine-tune via resume=. Only consulted by
+# src.distill; inert for src.train / src.eval.
+distill:
+  teacher: null          # REQUIRED: path to the trained teacher checkpoint .zip
+  # Which observation the teacher is queried on at each visited state:
+  #   identical  — teacher sees the student's own obs (architecture-only change,
+  #                e.g. wider net). Teacher and student obs spaces must match.
+  #   privileged — teacher sees the always-fresh-tag privileged view
+  #                (SO101BaseEnv.privileged_obs), i.e. what a
+  #                marker_always_visible=true policy sees, while the student
+  #                trains on the camera obs with dropout/hold-last-pose.
+  teacher_obs: identical
+  net_arch: null         # student hidden widths; null = reuse cfg.train.net_arch
+  iterations: 10         # DAgger rounds (collect -> aggregate -> regress)
+  steps_per_iter: 50_000 # env steps collected per round, across all envs
+  epochs: 4              # SGD passes over the aggregated dataset per round
+  batch_size: 4096
+  lr: 3.0e-4
+  vf_coef: 1.0           # weight on the value-distillation MSE (fresh critic trap)
+  beta_start: 1.0        # teacher's share of control at round 0 (pure teacher)
+  beta_end: 0.0          # teacher's share of control at the last round (pure student)
+  buffer_cap: 1_000_000  # max aggregated transitions retained (DAgger dataset, FIFO)
+  eval_episodes: 32      # paired teacher/student eval episodes (bug tripwire)
+  out: distilled.zip     # student checkpoint path (relative to repo root)

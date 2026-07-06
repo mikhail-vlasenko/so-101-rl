@@ -24,11 +24,9 @@ Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/li
 
 - **Marker observations: tune sim dropout against measured real rates; site rotations still eyeballed.** Mostly done: the camera feeds measured tag poses into rollouts (`real/marker_obs.py`, `--marker-source camera`, holding undetected tags at their last pose with a growing age channel like training), the site *positions* are calibrated (`real/calibrate_qpos.py` writes the freed-mount solve back into `so101.xml`), and `tag_cam`'s sim pose is set from the solved extrinsics. Still open: the site *rotations* are an eyeballed estimate plus the `quarter_turns` in-plane snap — fine while the obs uses positions, revisit if marker_rot ever matters; and the sim visibility model (plane-angle cutoff + the `dr` group's `marker_dropout`, higher in the grazing 65–70° band) has never been checked against measured real-camera dropout rates. There is deliberately no reward term for a hidden tag: losing its pose is penalty enough.
 
-## Imitation learning pipeline from one model to the other
+## Distillation: frame-stacked / history students
 
-I think it would help with the cold start of larger and more complex models.
-
-Also could be used to imitate the actions from a different observation. Say, one policy has GT cube position, and the other - a noisy or obscured or whatever. But maybe the correct actions are the same.
+The DAgger distillation rig is built (`src/distill.py`, see CLAUDE.md "Distillation"), but `privileged` mode asserts `frame_stack=1`: feeding a history-augmented teacher needs a stacked privileged-obs history. Build alongside the obs-history wrapper (`.claude/plans/obs_history_features.md`). The long-pole consumer — the tag→box obs migration (`.claude/plans/vision_multicam_longterm.md`) — is already designed around this rig existing.
 
 ## Train a policy in PWM / torque-ish mode
 

@@ -577,7 +577,21 @@ class SO101BaseEnv(SO101ArmEnv):
         self._held_cube_tag_pos = np.zeros(3)
         self._held_cube_tag_rot = np.zeros(3)
         self._cube_last_capture_t = -np.inf
+        # Privileged (always-fresh) mirror of the held-tag state: every frame
+        # overwrites it regardless of detection, so it serves exactly what a
+        # marker_always_visible=true policy sees — same frames, same
+        # noise/bias/latency, no dropout and no hold-last-pose. Read only by
+        # privileged_obs() (the distillation teacher view, src/distill.py);
+        # never fed to this env's own policy. Needs no reset: _ingest_frame
+        # overwrites all of it unconditionally, starting with the reset frame.
+        self._held_marker_pos_priv = np.zeros((N_MARKERS, 3))
+        self._held_marker_rot_priv = np.zeros((N_MARKERS, 3))
+        self._marker_last_capture_t_priv = np.full(N_MARKERS, -np.inf)
+        self._held_cube_tag_pos_priv = np.zeros(3)
+        self._held_cube_tag_rot_priv = np.zeros(3)
+        self._cube_last_capture_t_priv = -np.inf
         self._prev_qpos_obs = None
+        self._last_encoder_obs = None
 
         self._parse_config(task_cfg)
 
@@ -679,6 +693,17 @@ class SO101BaseEnv(SO101ArmEnv):
         self.model.site_rgba[self.cube_tag_site_id] = \
             MARKER_VISIBLE_RGBA if frame.cube_detected else MARKER_HIDDEN_RGBA
 
+        # Privileged mirror: fold every tag in unconditionally — no dropout,
+        # no hold-last-pose — so privileged_obs() serves exactly what a
+        # marker_always_visible=true policy would see on this same frame (same
+        # capture noise/bias/latency, ages that only reflect pipeline delay).
+        self._held_marker_pos_priv[:] = frame.marker_pos
+        self._held_marker_rot_priv[:] = frame.marker_rot
+        self._marker_last_capture_t_priv[:] = capture_t
+        self._held_cube_tag_pos_priv = frame.cube_tag_pos.copy()
+        self._held_cube_tag_rot_priv = frame.cube_tag_rot.copy()
+        self._cube_last_capture_t_priv = capture_t
+
     def _get_cube_pos(self):
         return self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3].copy()
 
@@ -690,10 +715,13 @@ class SO101BaseEnv(SO101ArmEnv):
         """
         raise NotImplementedError
 
-    def _compute_obs(self):
-        """Build the policy observation. qpos/qvel take the encoder path (fresh;
-        qvel differenced like real/rollout_common.ArmLoop); markers and the
-        cube tag serve the held per-tag detections with their ages."""
+    def _encoder_obs(self):
+        """(qpos, qvel) for this control tick: qpos on the encoder path (fresh,
+        biased+noisy), qvel its backward difference like
+        real/rollout_common.ArmLoop. Advances _prev_qpos_obs and caches the
+        result in _last_encoder_obs so a paired privileged_obs() reuses the
+        identical read — the student and teacher views must differ only in the
+        tag channels. Call exactly once per tick (from _compute_obs)."""
         qpos = self.data.qpos[self.joint_qposadr].copy()
         if self.obs_bias is not None:
             qpos = qpos + self._qpos_bias
@@ -709,23 +737,57 @@ class SO101BaseEnv(SO101ArmEnv):
         else:
             qvel = (qpos - self._prev_qpos_obs) / self._step_dt
         self._prev_qpos_obs = qpos
+        self._last_encoder_obs = (qpos, qvel)
+        return qpos, qvel
 
+    def _tag_obs(self, held_pos, held_rot, marker_last_t, cube_last_t):
+        """(markers, marker_age, cube_age) from a held-tag source: the arm
+        markers' obs slice and both age channels. Shared by the student view
+        (_compute_obs, hold-last-pose state) and the privileged teacher view
+        (privileged_obs, always-fresh mirror)."""
         if self.marker_include_rot:
             # hstack interleaves per marker: [pos_finger, rot_finger, pos_wrist, rot_wrist]
-            markers = np.hstack([self._held_marker_pos, self._held_marker_rot]).flatten()
+            markers = np.hstack([held_pos, held_rot]).flatten()
         else:
             # positions only: [pos_finger, pos_wrist]
-            markers = self._held_marker_pos.flatten()
+            markers = held_pos.flatten()
         # Clip below at 0: the frame schedule's float slack (CameraSim._EPS)
         # can put a capture an epsilon after the obs instant.
-        marker_age = np.clip(self.data.time - self._marker_last_capture_t,
-                             0.0, MARKER_AGE_CAP_S)
-        cube_age = np.clip(self.data.time - self._cube_last_capture_t,
-                           0.0, MARKER_AGE_CAP_S)
+        marker_age = np.clip(self.data.time - marker_last_t, 0.0, MARKER_AGE_CAP_S)
+        cube_age = np.clip(self.data.time - cube_last_t, 0.0, MARKER_AGE_CAP_S)
+        return markers, marker_age, cube_age
+
+    def _compute_obs(self):
+        """Build the policy observation. qpos/qvel take the encoder path (fresh;
+        qvel differenced like real/rollout_common.ArmLoop); markers and the
+        cube tag serve the held per-tag detections with their ages."""
+        qpos, qvel = self._encoder_obs()
+        markers, marker_age, cube_age = self._tag_obs(
+            self._held_marker_pos, self._held_marker_rot,
+            self._marker_last_capture_t, self._cube_last_capture_t)
         return np.concatenate([qpos, qvel, markers, marker_age,
                                self._held_cube_tag_pos, self._held_cube_tag_rot,
                                [cube_age],
                                self._obs_extra(self._held_cube_tag_pos),
+                               self._prev_actions.flatten()]).astype(np.float32)
+
+    def privileged_obs(self):
+        """The observation a marker_always_visible=true policy would see on the
+        current state: every tag pose fresh (the always-updated privileged
+        mirror, no hold-last-pose and no dropout), sharing the paired
+        _compute_obs's encoder read, task extras, and prev-actions so the two
+        views differ only in the tag channels. The distillation teacher view
+        (src/distill.py). Call once, immediately after the tick's _compute_obs."""
+        assert self._last_encoder_obs is not None, \
+            "privileged_obs() needs a _compute_obs earlier this tick"
+        qpos, qvel = self._last_encoder_obs
+        markers, marker_age, cube_age = self._tag_obs(
+            self._held_marker_pos_priv, self._held_marker_rot_priv,
+            self._marker_last_capture_t_priv, self._cube_last_capture_t_priv)
+        return np.concatenate([qpos, qvel, markers, marker_age,
+                               self._held_cube_tag_pos_priv, self._held_cube_tag_rot_priv,
+                               [cube_age],
+                               self._obs_extra(self._held_cube_tag_pos_priv),
                                self._prev_actions.flatten()]).astype(np.float32)
 
     def _n_jaw_contacts(self):
@@ -894,6 +956,7 @@ class SO101BaseEnv(SO101ArmEnv):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
         self._prev_qpos_obs = None
+        self._last_encoder_obs = None
         self._prev_actions[:] = 0.0
 
         options = options or {}

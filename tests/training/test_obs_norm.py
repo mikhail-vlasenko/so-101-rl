@@ -13,7 +13,6 @@ import pytest
 import torch
 from gymnasium import spaces
 from hydra import compose, initialize
-from omegaconf import OmegaConf
 from stable_baselines3 import PPO, SAC
 
 from src.base_env import obs_dim_for
@@ -21,6 +20,7 @@ from src.lift_env import SO101LiftEnv
 from src.networks import LayerNormActorCriticPolicy, LayerNormSACPolicy, ObsNorm
 from src.obs_norm import build_obs_norm, build_reach_obs_norm
 from src.pickplace_env import SO101PickPlaceEnv
+from src.train import runtime_cfg_from_hydra
 
 ACTION_SCALE = 0.07
 N_SUBSTEPS = 10
@@ -29,17 +29,6 @@ N_SUBSTEPS = 10
 def _compose(env_name):
     with initialize(config_path="../../conf", version_base=None):
         return compose(config_name="config", overrides=[f"env={env_name}"])
-
-
-def _dr_kwargs(cfg):
-    """Full-DR env kwargs straight from the composed (dr=full default) config."""
-    return {
-        "obs_noise": OmegaConf.to_container(cfg.obs_noise, resolve=True),
-        "cam_latency": OmegaConf.to_container(cfg.cam_latency, resolve=True),
-        "obs_bias": OmegaConf.to_container(cfg.obs_bias, resolve=True),
-        "marker_dropout": OmegaConf.to_container(cfg.marker_dropout, resolve=True),
-        "prev_actions_n": int(cfg.prev_actions_n),
-    }
 
 
 # ---------------------------------------------------------------- constants
@@ -72,7 +61,7 @@ def test_rollout_obs_within_bounds(env_name, env_cls, cfg_key, xml):
     stays within a few units. If this fails after a workspace/task change, the
     boxes in src/obs_norm.py need re-centering."""
     cfg = _compose(env_name)
-    env = env_cls(env_cfg=cfg[cfg_key], xml_path=xml, **_dr_kwargs(cfg))
+    env = env_cls(env_cfg=cfg[cfg_key], xml_path=xml, cfg=runtime_cfg_from_hydra(cfg))
     center, scale = build_obs_norm(int(cfg.prev_actions_n), False,
                                    float(cfg.action_scale), int(cfg[cfg_key].n_substeps))
     assert center.shape == (env.obs_dim,)
