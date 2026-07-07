@@ -1,10 +1,12 @@
 """Tests for per-episode observation bias (sim2real domain randomization).
 
 Bias is sampled once at reset() and held constant for the whole episode. It
-adds to qpos / marker poses / cube_pos in the observation. Marker biases are
-drawn independently per marker (uncorrelated glue/extrinsics error per tag).
-No qvel bias — velocity from differentiating biased qpos has zero DC offset.
-Reward path always reads self.data (true state).
+adds to qpos / marker poses / cube_pos in the observation. The per-tag marker
+biases are independent (each tag's own glue/pose-estimate error), plus a
+marker_common_sigma shift shared by ALL tags (the camera re-anchor / table
+calibration offset the real pipeline propagates to every tag). No qvel bias —
+velocity from differentiating biased qpos has zero DC offset. Reward path always
+reads self.data (true state).
 """
 
 import numpy as np
@@ -18,17 +20,18 @@ from src.pickplace_env import SO101PickPlaceEnv
 
 SIGMAS = {
     "qpos_sigma": 0.01,
-    "marker_pos_sigma": 0.005,
+    "marker_pos_sigma": 0.005,     # independent per-tag
     "marker_rot_sigma": 0.05,
-    "cube_sigma": 0.008,
+    "cube_sigma": 0.008,           # independent, cube
+    "marker_common_sigma": 0.004,  # shared shift on all tags
 }
 
 NOISE_SIGMAS = {
     "qpos_sigma": 0.005,
-    "qvel_sigma": 0.05,
-    "marker_pos_sigma": 0.002,
     "marker_rot_sigma": 0.02,
-    "cube_sigma": 0.003,
+    "tag_px_noise": 0.4,
+    "tag_depth_factor": 2.0,
+    "cam_common_sigma": 0.0005,
 }
 
 QPOS = slice(0, 6)
@@ -104,11 +107,13 @@ def test_bias_changes_across_episodes(cfg):
     assert not np.allclose(diff0[CUBE], diff1[CUBE])
 
 
-def test_marker_biases_uncorrelated(cfg):
-    """Finger and wrist marker biases are drawn independently (per-tag glue error)."""
+def test_marker_bias_common_plus_independent(cfg):
+    """Finger and wrist biases share a common-mode shift (camera re-anchor / table
+    calib) plus an independent per-tag term. Their per-axis covariance recovers the
+    common variance; each tag's total variance is common + independent."""
     env_clean = _pickplace(cfg, obs_bias=None, marker_always_visible=True)
     env_biased = _pickplace(cfg, obs_bias=SIGMAS, marker_always_visible=True)
-    n = 500
+    n = 1500
     finger = np.empty((n, 3))
     wrist = np.empty((n, 3))
     for i in range(n):
@@ -118,9 +123,15 @@ def test_marker_biases_uncorrelated(cfg):
         obs_b, *_ = env_biased.step(_zero_action())
         finger[i] = obs_b[MARKER_FINGER_POS] - obs_c[MARKER_FINGER_POS]
         wrist[i] = obs_b[MARKER_WRIST_POS] - obs_c[MARKER_WRIST_POS]
+    common_var = SIGMAS["marker_common_sigma"] ** 2
+    total_var = common_var + SIGMAS["marker_pos_sigma"] ** 2
     for axis in range(3):
-        corr = np.corrcoef(finger[:, axis], wrist[:, axis])[0, 1]
-        assert abs(corr) < 0.15
+        cov = np.cov(finger[:, axis], wrist[:, axis])
+        # The shared component is the whole cross-covariance between the two tags.
+        np.testing.assert_allclose(cov[0, 1], common_var, rtol=0.25)
+        # Each tag's marginal variance is common + its own independent term.
+        np.testing.assert_allclose(cov[0, 0], total_var, rtol=0.2)
+        np.testing.assert_allclose(cov[1, 1], total_var, rtol=0.2)
 
 
 def test_bias_magnitude_matches_sigmas(cfg):
@@ -145,12 +156,14 @@ def test_bias_magnitude_matches_sigmas(cfg):
         marker_rot_diffs[i, 3:] = obs_b[MARKER_WRIST_ROT] - obs_c[MARKER_WRIST_ROT]
         cube_diffs[i] = obs_b[CUBE] - obs_c[CUBE]
         cube_rot_diffs[i] = obs_b[CUBE_ROT] - obs_c[CUBE_ROT]
+    # Each tag's per-axis bias is common + independent, so its std combines both.
+    marker_pos_std = np.sqrt(SIGMAS["marker_common_sigma"] ** 2 + SIGMAS["marker_pos_sigma"] ** 2)
+    cube_std = np.sqrt(SIGMAS["marker_common_sigma"] ** 2 + SIGMAS["cube_sigma"] ** 2)
     np.testing.assert_allclose(qpos_diffs.std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.15)
-    np.testing.assert_allclose(marker_pos_diffs.std(axis=0).mean(),
-                               SIGMAS["marker_pos_sigma"], rtol=0.15)
+    np.testing.assert_allclose(marker_pos_diffs.std(axis=0).mean(), marker_pos_std, rtol=0.15)
     np.testing.assert_allclose(marker_rot_diffs.std(axis=0).mean(),
                                SIGMAS["marker_rot_sigma"], rtol=0.15)
-    np.testing.assert_allclose(cube_diffs.std(axis=0).mean(), SIGMAS["cube_sigma"], rtol=0.15)
+    np.testing.assert_allclose(cube_diffs.std(axis=0).mean(), cube_std, rtol=0.15)
     # The cube tag's rot bias reuses marker_rot_sigma (same AprilTag pipeline).
     np.testing.assert_allclose(cube_rot_diffs.std(axis=0).mean(),
                                SIGMAS["marker_rot_sigma"], rtol=0.15)

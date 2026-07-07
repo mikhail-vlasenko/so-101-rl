@@ -23,11 +23,11 @@ def env():
 def test_make_env_can_map_runtime_cfg():
     env_cfg, _, _ = load_env_cfg("lift")
     runtime_cfg = {
-        "obs_noise": {"qpos_sigma": 0.0, "marker_pos_sigma": 0.0,
-                      "marker_rot_sigma": 0.0, "cube_sigma": 0.0},
+        "obs_noise": {"qpos_sigma": 0.0, "marker_rot_sigma": 0.0,
+                      "tag_px_noise": 0.0, "tag_depth_factor": 2.0, "cam_common_sigma": 0.0},
         "cam_latency": None,
         "obs_bias": {"qpos_sigma": 0.0, "marker_pos_sigma": 0.0,
-                     "marker_rot_sigma": 0.0, "cube_sigma": 0.0},
+                     "marker_rot_sigma": 0.0, "cube_sigma": 0.0, "marker_common_sigma": 0.0},
         "marker_dropout": {"near": 0.0, "far": 0.0},
         "marker_always_visible": True,
         "marker_include_rot": False,

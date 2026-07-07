@@ -7,15 +7,17 @@
 
 obs_noise:
   qpos_sigma: 0.0
-  marker_pos_sigma: 0.0
   marker_rot_sigma: 0.0
-  cube_sigma: 0.0
+  tag_px_noise: 0.0        # zero px error -> zero anisotropic marker/cube noise
+  tag_depth_factor: 2.0    # unused at tag_px_noise=0; kept so the key set matches dr=full/light
+  cam_common_sigma: 0.0
 
 obs_bias:
   qpos_sigma: 0.0
   marker_pos_sigma: 0.0
   marker_rot_sigma: 0.0
   cube_sigma: 0.0
+  marker_common_sigma: 0.0
 
 # Synchronous zero-latency camera: marker/cube obs are the current state.
 # (qvel is still the backward difference of qpos over the tick — that's the

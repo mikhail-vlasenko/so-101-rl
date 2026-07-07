@@ -13,8 +13,10 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from src.camera_sim import CameraSim
+from src.marker_noise import anisotropic_pos_noise, load_focal_px
 from src.servo_profile import ServoProfile
 from src.units import action_to_target
+from real.marker_spec import ARM_TAG_TO_SITE, CUBE_TAG_ID, TAG_SIZE_MM
 
 
 def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
@@ -467,10 +469,13 @@ class SO101BaseEnv(SO101ArmEnv):
         super().__init__(render_mode=render_mode, slow_factor=slow_factor,
                          xml_path=xml_path, prev_actions_n=cfg.prev_actions_n,
                          env_cfg=env_cfg)
-        # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
-        # cube_sigma; or None. No qvel key: the qvel obs is the backward
-        # difference of consecutive qpos obs (matching the real pipeline), so
-        # its noise is inherited from qpos_sigma, not configured.
+        # dict with keys qpos_sigma, marker_rot_sigma, tag_px_noise,
+        # tag_depth_factor, cam_common_sigma; or None. Marker/cube position noise
+        # is anisotropic in the camera frame (src/marker_noise.py) instead of a
+        # single sigma: tag_px_noise/tag_depth_factor derive the depth-vs-lateral
+        # split, cam_common_sigma is the shared per-frame jitter. No qvel key: the
+        # qvel obs is the backward difference of consecutive qpos obs (matching the
+        # real pipeline), so its noise is inherited from qpos_sigma, not configured.
         self.obs_noise = cfg.obs_noise
         # AprilTag detector dropout (DR): dict with keys "near"/"far" giving the
         # per-frame probability a geometrically-visible tag is missed (near-boundary
@@ -488,16 +493,23 @@ class SO101BaseEnv(SO101ArmEnv):
         # once the control period is known.
         self.cam_latency = cfg.cam_latency
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
-        # cube_sigma; or None. Marker biases are sampled independently per
-        # marker (uncorrelated: each tag has its own glue/pose-estimate error).
-        # The cube tag's pos bias uses cube_sigma; its rot bias reuses
-        # marker_rot_sigma (same AprilTag pose pipeline).
+        # cube_sigma, marker_common_sigma; or None. The per-tag marker biases are
+        # sampled independently (each tag's own glue/pose-estimate error); the cube
+        # tag's pos bias uses cube_sigma and its rot bias reuses marker_rot_sigma
+        # (same AprilTag pipeline). marker_common_sigma adds a separate shared shift
+        # applied to every tag (the camera re-anchor / table calibration offset,
+        # correlated across tags) — see _common_pos_bias.
         self.obs_bias = cfg.obs_bias
         self._qpos_bias = np.zeros(len(JOINT_NAMES))
         self._marker_pos_bias = np.zeros((N_MARKERS, 3))
         self._marker_rot_bias = np.zeros((N_MARKERS, 3))
         self._cube_bias = np.zeros(3)
         self._cube_rot_bias = np.zeros(3)
+        # Common-mode shift shared by every tag (arm markers + cube) for the whole
+        # episode: the real pipeline re-anchors the camera from one table tag
+        # (real/marker_obs.py), so its calibration/detection error moves all tags
+        # together, not independently. Drawn in reset from obs_bias.
+        self._common_pos_bias = np.zeros(3)
         self.obs_dim = obs_dim_for(self.prev_actions_n, self.marker_include_rot)
 
         self.marker_site_ids = []
@@ -506,6 +518,16 @@ class SO101BaseEnv(SO101ArmEnv):
             assert sid >= 0, f"Marker site '{name}' not found in XML"
             self.marker_site_ids.append(sid)
         self.tag_cam_pos = tag_cam_world_pos(self.model, self.data)
+        # Camera geometry for the anisotropic (camera-frame) marker noise: focal
+        # length from the solved intrinsics and each obs tag's printed edge length,
+        # both the same calibration the real solvePnP pipeline uses (src/marker_noise.py,
+        # real/marker_spec.py). All arm/cube tags happen to be 20 mm, but map through
+        # marker_spec so the obs slots stay the single source of truth.
+        self._focal_px = load_focal_px()
+        site_to_tag = {site: tag for tag, site in ARM_TAG_TO_SITE.items()}
+        self._marker_tag_sizes = np.array(
+            [TAG_SIZE_MM[site_to_tag[name]] / 1000.0 for name in MARKER_SITE_NAMES])
+        self._cube_tag_size = TAG_SIZE_MM[CUBE_TAG_ID] / 1000.0
 
         self.cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
         assert self.cube_geom_id >= 0, "Cube geom 'cube_geom' not found in XML"
@@ -657,20 +679,36 @@ class SO101BaseEnv(SO101ArmEnv):
         cube_tag_pos = state.cube_tag_pos.copy()
         cube_tag_rot = state.cube_tag_rot.copy()
         if self.obs_bias is not None:
-            marker_pos = marker_pos + self._marker_pos_bias
+            # _common_pos_bias hits both arm markers and the cube (shared camera
+            # re-anchor error); the per-tag biases stay independent.
+            marker_pos = marker_pos + self._marker_pos_bias + self._common_pos_bias
             marker_rot = marker_rot + self._marker_rot_bias
-            cube_tag_pos = cube_tag_pos + self._cube_bias
+            cube_tag_pos = cube_tag_pos + self._cube_bias + self._common_pos_bias
             cube_tag_rot = cube_tag_rot + self._cube_rot_bias
         if self.obs_noise is not None:
             rng = self.np_random
-            marker_pos = marker_pos + rng.normal(0, self.obs_noise["marker_pos_sigma"],
-                                                 size=marker_pos.shape)
+            px = self.obs_noise["tag_px_noise"]
+            depth_factor = self.obs_noise["tag_depth_factor"]
+            # Per-tag anisotropic position noise: small in the image plane, large
+            # along each tag's own camera ray (solvePnP range from apparent size).
+            # The ray uses the TRUE pose (state.*), so its depth axis is the real
+            # line of sight rather than a circular function of the noise.
+            for i in range(N_MARKERS):
+                marker_pos[i] += anisotropic_pos_noise(
+                    rng, state.marker_pos[i], self.tag_cam_pos,
+                    self._marker_tag_sizes[i], self._focal_px, px, depth_factor)
+            cube_tag_pos = cube_tag_pos + anisotropic_pos_noise(
+                rng, state.cube_tag_pos, self.tag_cam_pos,
+                self._cube_tag_size, self._focal_px, px, depth_factor)
             marker_rot = marker_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
                                                  size=marker_rot.shape)
-            cube_tag_pos = cube_tag_pos + rng.normal(0, self.obs_noise["cube_sigma"],
-                                                     size=cube_tag_pos.shape)
             cube_tag_rot = cube_tag_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
                                                      size=cube_tag_rot.shape)
+            # Per-frame common-mode residual: one shared jitter added to every tag
+            # (table re-anchor error the real camera EMA leaves behind).
+            common = rng.normal(0, self.obs_noise["cam_common_sigma"], size=3)
+            marker_pos = marker_pos + common
+            cube_tag_pos = cube_tag_pos + common
         return CamFrame(marker_pos=marker_pos, marker_rot=marker_rot,
                         detected=detected, cube_tag_pos=cube_tag_pos,
                         cube_tag_rot=cube_tag_rot, cube_detected=cube_detected)
@@ -1042,6 +1080,9 @@ class SO101BaseEnv(SO101ArmEnv):
                                                size=(N_MARKERS, 3))
             self._cube_bias = rng.normal(0, self.obs_bias["cube_sigma"], size=3)
             self._cube_rot_bias = rng.normal(0, self.obs_bias["marker_rot_sigma"], size=3)
+            # Shared across all tags (see _common_pos_bias init): one draw the whole
+            # episode, added to every marker and the cube in _process_frame.
+            self._common_pos_bias = rng.normal(0, self.obs_bias["marker_common_sigma"], size=3)
 
         self._held_marker_pos[:] = 0.0
         self._held_marker_rot[:] = 0.0

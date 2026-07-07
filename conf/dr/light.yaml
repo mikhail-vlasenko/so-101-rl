@@ -7,17 +7,21 @@
 # Only the DR knobs differ from full; prev_actions_n / frame_stack live in
 # config.yaml and MUST stay identical across stages (they change obs dim).
 
+# Anisotropic marker/cube position noise (src/marker_noise.py): same shape as dr=full,
+# lower magnitude (tag_px_noise scaled down; depth_factor kept, it is a geometry ratio).
 obs_noise:
   qpos_sigma: 0.005
-  marker_pos_sigma: 0.001
   marker_rot_sigma: 0.01
-  cube_sigma: 0.003
+  tag_px_noise: 0.25
+  tag_depth_factor: 2.0
+  cam_common_sigma: 0.0003
 
 obs_bias:
   qpos_sigma: 0.01
   marker_pos_sigma: 0.002
   marker_rot_sigma: 0.02
   cube_sigma: 0.002
+  marker_common_sigma: 0.0015
 
 # Same as dr=full: latency is measured hardware timing, not a difficulty knob.
 cam_latency:

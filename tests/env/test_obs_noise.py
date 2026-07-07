@@ -16,14 +16,29 @@ from omegaconf import OmegaConf
 
 from src.base_env import RuntimeEnvConfig, cube_tag_visible, markers_visible
 from src.lift_env import SO101LiftEnv
+from src.marker_noise import pos_noise_sigmas
 from src.pickplace_env import SO101PickPlaceEnv
 
 
+# The obs_noise block conf/dr/full.yaml carries — the deployment DR default the
+# config-match smoke test pins.
+DEFAULT_OBS_NOISE = {
+    "qpos_sigma": 0.005,
+    "marker_rot_sigma": 0.02,
+    "tag_px_noise": 0.4,
+    "tag_depth_factor": 2.0,
+    "cam_common_sigma": 0.0005,
+}
+
+# Behavioral tests isolate the per-tag anisotropic noise: cam_common_sigma=0 so
+# each tag's per-frame diff is its own independent camera-frame draw (the shared
+# common-mode residual is exercised separately in test_common_mode_noise_shared).
 SIGMAS = {
     "qpos_sigma": 0.005,
-    "marker_pos_sigma": 0.002,
     "marker_rot_sigma": 0.02,
-    "cube_sigma": 0.003,
+    "tag_px_noise": 0.4,
+    "tag_depth_factor": 2.0,
+    "cam_common_sigma": 0.0,
 }
 
 # Obs layout: [qpos(6), qvel(6), markers(2*6), marker_age(2), cube_tag_pos(3),
@@ -67,9 +82,9 @@ def _zero_action():
 
 
 def test_default_config_matches_expected_sigmas(cfg):
-    """Smoke check that conf/config.yaml carries the documented sigmas."""
+    """Smoke check that conf/config.yaml (dr=full) carries the documented knobs."""
     obs_noise = OmegaConf.to_container(cfg.obs_noise, resolve=True)
-    assert obs_noise == SIGMAS
+    assert obs_noise == DEFAULT_OBS_NOISE
 
 
 def test_no_noise_produces_deterministic_obs(cfg):
@@ -127,56 +142,127 @@ def test_cube_to_target_uses_noisy_cube_pos(cfg):
     np.testing.assert_allclose(obs[C2T], expected_c2t, atol=1e-7)
 
 
-def test_per_step_noise_magnitude_matches_sigmas(cfg):
-    """Aggregate noise std across many steps should match configured sigmas."""
+def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
+    """Per-tag position noise is anisotropic in the camera frame: projected onto
+    each tag's own ray, the depth component matches the depth sigma and the
+    lateral component the lateral sigma that src.marker_noise derives from that
+    tag's live distance and size. qpos/qvel and the rotation channels stay
+    isotropic. cam_common_sigma=0 here so each tag's diff is its own draw."""
     env_clean = _pickplace(cfg, obs_noise=None)
     env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
 
-    n_samples = 1000
-    diffs = np.empty((n_samples, OBS_DIM), dtype=np.float64)
-    visible = np.empty((n_samples, 2), dtype=bool)
-    cube_visible = np.empty(n_samples, dtype=bool)
+    cam = env_noisy.tag_cam_pos
+    focal = env_noisy._focal_px
+    px, kdepth = SIGMAS["tag_px_noise"], SIGMAS["tag_depth_factor"]
+    # (obs pos slice, obs rot slice, tag size) per tag, in obs order.
+    tags = [(slice(12, 15), slice(15, 18), env_noisy._marker_tag_sizes[0]),
+            (slice(18, 21), slice(21, 24), env_noisy._marker_tag_sizes[1]),
+            (CUBE, CUBE_ROT, env_noisy._cube_tag_size)]
+
+    n_samples = 1500
+    norm_depth = []      # depth component / depth_sigma  -> N(0,1)
+    norm_lat_sq = []     # |lateral|^2 / lateral_sigma^2  -> chi^2 with 2 dof (mean 2)
+    rot_diffs = []       # rotation channels stay isotropic
+    qpos_diffs = np.empty((n_samples, 6))
+    qvel_diffs = np.empty((n_samples, 6))
     for i in range(n_samples):
         env_clean.reset(seed=i)
         env_noisy.reset(seed=i)
         oc, *_ = env_clean.step(_zero_action())
         on, *_ = env_noisy.step(_zero_action())
-        diffs[i] = on - oc
-        # Hidden tags hold a stale pose in both envs (identical dynamics, so
-        # identical visibility) — a tag hidden since reset is zero in both,
-        # so exclude hidden tags from the marker noise statistics.
-        visible[i] = markers_visible(env_noisy.data, env_noisy.marker_site_ids,
-                                     env_noisy.tag_cam_pos)
-        cube_visible[i] = cube_tag_visible(env_noisy.model, env_noisy.data,
-                                           env_noisy.cube_tag_site_id,
-                                           env_noisy.tag_cam_pos,
-                                           env_noisy.cube_body_id)
-    # Marker noise is measured per tag, so each tag (not both at once) just needs
-    # enough visible samples. Under the 0.23 m height ceiling both-visible is rare
-    # (~7%), but each tag alone clears this comfortably over the random poses.
-    assert visible[:, 0].sum() > 50 and visible[:, 1].sum() > 50, "too few tag-visible samples"
-    marker_pos_diffs = np.concatenate([diffs[visible[:, 0], 12:15].ravel(),
-                                       diffs[visible[:, 1], 18:21].ravel()])
-    marker_rot_diffs = np.concatenate([diffs[visible[:, 0], 15:18].ravel(),
-                                       diffs[visible[:, 1], 21:24].ravel()])
+        qpos_diffs[i] = on[QPOS] - oc[QPOS]
+        qvel_diffs[i] = on[QVEL] - oc[QVEL]
+        marker_vis = markers_visible(env_noisy.data, env_noisy.marker_site_ids, cam)
+        cube_vis = cube_tag_visible(env_noisy.model, env_noisy.data,
+                                    env_noisy.cube_tag_site_id, cam, env_noisy.cube_body_id)
+        for slot, (pos_sl, rot_sl, size) in enumerate(tags):
+            if not (cube_vis if slot == 2 else marker_vis[slot]):
+                continue  # a hidden tag holds a stale pose in both envs -> zero diff
+            true_pos = oc[pos_sl]
+            noise = on[pos_sl] - oc[pos_sl]
+            lat_s, dep_s, depth_dir = pos_noise_sigmas(true_pos, cam, size, focal, px, kdepth)
+            depth_c = noise @ depth_dir
+            lat_c = noise - depth_c * depth_dir
+            norm_depth.append(depth_c / dep_s)
+            norm_lat_sq.append((lat_c @ lat_c) / (lat_s * lat_s))
+            rot_diffs.append(on[rot_sl] - oc[rot_sl])
 
-    # Noise std should be within ~10% of configured sigma.
-    np.testing.assert_allclose(diffs[:, QPOS].std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.1)
-    # qvel = (qpos_t - qpos_{t-1})/dt of the noisy qpos, so its noise std is
-    # sqrt(2)*qpos_sigma/control_dt — inherited, not configured.
+    norm_depth = np.array(norm_depth)
+    norm_lat_sq = np.array(norm_lat_sq)
+    rot_diffs = np.array(rot_diffs)
+    assert len(norm_depth) > 300, "too few tag-visible samples"
+
+    # After dividing by its own derived sigma, the depth component is unit-normal.
+    np.testing.assert_allclose(norm_depth.std(), 1.0, rtol=0.1)
+    np.testing.assert_allclose(norm_depth.mean(), 0.0, atol=0.1)
+    # The lateral part spans the 2D image plane: |lateral|^2/lateral_sigma^2 is
+    # chi-squared with 2 dof, mean 2.
+    np.testing.assert_allclose(norm_lat_sq.mean(), 2.0, rtol=0.1)
+    # Rotation noise is unchanged (isotropic marker_rot_sigma on every axis).
+    np.testing.assert_allclose(rot_diffs.std(), SIGMAS["marker_rot_sigma"], rtol=0.1)
+
+    # qpos noise std matches; qvel = (qpos_t - qpos_{t-1})/dt inherits sqrt(2)*qpos_sigma/dt.
+    np.testing.assert_allclose(qpos_diffs.std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.1)
     qvel_sigma = np.sqrt(2.0) * SIGMAS["qpos_sigma"] / env_noisy._step_dt
-    np.testing.assert_allclose(diffs[:, QVEL].std(axis=0).mean(), qvel_sigma, rtol=0.1)
-    np.testing.assert_allclose(marker_pos_diffs.std(), SIGMAS["marker_pos_sigma"], rtol=0.1)
-    np.testing.assert_allclose(marker_rot_diffs.std(), SIGMAS["marker_rot_sigma"], rtol=0.1)
-    assert cube_visible.sum() > 50, "too few cube-visible samples"
-    np.testing.assert_allclose(diffs[cube_visible][:, CUBE].std(axis=0).mean(),
-                               SIGMAS["cube_sigma"], rtol=0.1)
-    # The cube tag's rot shares the arm tags' marker_rot_sigma (same pipeline).
-    np.testing.assert_allclose(diffs[cube_visible][:, CUBE_ROT].std(axis=0).mean(),
-                               SIGMAS["marker_rot_sigma"], rtol=0.1)
-    # cube_to_target inherits cube_sigma (same draw, derived).
-    np.testing.assert_allclose(diffs[cube_visible][:, C2T].std(axis=0).mean(),
-                               SIGMAS["cube_sigma"], rtol=0.1)
+    np.testing.assert_allclose(qvel_diffs.std(axis=0).mean(), qvel_sigma, rtol=0.1)
+
+
+def test_depth_noise_dominates_lateral(cfg):
+    """The whole point of the anisotropy: along the camera ray the position noise
+    is many times larger than in the image plane."""
+    env_clean = _pickplace(cfg, obs_noise=None)
+    env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
+    cam = env_noisy.tag_cam_pos
+    depth_abs, lat_abs = [], []
+    for i in range(400):
+        env_clean.reset(seed=i)
+        env_noisy.reset(seed=i)
+        oc, *_ = env_clean.step(_zero_action())
+        on, *_ = env_noisy.step(_zero_action())
+        vis = markers_visible(env_noisy.data, env_noisy.marker_site_ids, cam)
+        for slot, pos_sl in enumerate((slice(12, 15), slice(18, 21))):
+            if not vis[slot]:
+                continue
+            depth_dir = (oc[pos_sl] - cam) / np.linalg.norm(oc[pos_sl] - cam)
+            noise = on[pos_sl] - oc[pos_sl]
+            depth_c = noise @ depth_dir
+            depth_abs.append(abs(depth_c))
+            lat_abs.append(np.linalg.norm(noise - depth_c * depth_dir))
+    assert np.mean(depth_abs) > 5.0 * np.mean(lat_abs)
+
+
+def test_common_mode_noise_shared_across_tags(cfg):
+    """With only cam_common_sigma set (no per-tag noise), every tag gets the
+    identical per-frame shift — the table re-anchor common-mode. Finger, wrist and
+    cube diffs are equal, and their magnitude matches cam_common_sigma.
+    marker_always_visible feeds every tag each frame so the shared shift is the
+    whole diff (no dropout / hold-last to gate around)."""
+    common_sigma = 0.004
+    shared = {"qpos_sigma": 0.0, "marker_rot_sigma": 0.0, "tag_px_noise": 0.0,
+              "tag_depth_factor": 2.0, "cam_common_sigma": common_sigma}
+
+    def _env(obs_noise):
+        return SO101PickPlaceEnv(env_cfg=cfg.pickplace_env,
+                                 xml_path="so101/scene_pickplace.xml",
+                                 cfg=RuntimeEnvConfig(obs_noise=obs_noise,
+                                                      marker_include_rot=True,
+                                                      marker_always_visible=True))
+    env_clean = _env(None)
+    env_noisy = _env(shared)
+    finger_diffs = []
+    for i in range(400):
+        env_clean.reset(seed=i)
+        env_noisy.reset(seed=i)
+        oc, *_ = env_clean.step(_zero_action())
+        on, *_ = env_noisy.step(_zero_action())
+        finger = on[12:15] - oc[12:15]
+        # atol at float32 resolution: obs is float32, so subtracting ~0.1-0.5 m
+        # positions leaves ~1e-8 rounding even when the added shift is identical.
+        np.testing.assert_allclose(finger, on[18:21] - oc[18:21], atol=1e-6)
+        np.testing.assert_allclose(finger, on[CUBE] - oc[CUBE], atol=1e-6)
+        finger_diffs.append(finger)
+    np.testing.assert_allclose(np.array(finger_diffs).std(axis=0).mean(),
+                               common_sigma, rtol=0.1)
 
 
 def test_noise_does_not_corrupt_true_state(cfg):

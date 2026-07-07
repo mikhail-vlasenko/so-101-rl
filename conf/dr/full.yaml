@@ -12,22 +12,31 @@
 # inherited rather than configured.
 obs_noise:
   qpos_sigma: 0.005        # rad,   joint encoder jitter (~0.3°)
-  marker_pos_sigma: 0.002  # m,     per-frame AprilTag position jitter (solvePnP)
   marker_rot_sigma: 0.02   # rad,   per-frame AprilTag orientation jitter (~1°); also the cube tag's rot
-  cube_sigma: 0.003        # m,     cube tag position (same AprilTag pipeline)
+  # Marker/cube position noise is anisotropic in the camera frame (src/marker_noise.py):
+  # small in the image plane, large along each tag's own camera ray (solvePnP range from
+  # apparent size). lateral = (Z/f)*tag_px_noise, depth = (Z**2/(f*W))*tag_px_noise*tag_depth_factor,
+  # with f (~968 px) from camera_intrinsics.yaml and W (0.02 m) the printed tag edge.
+  # At Z=0.3 m: ~0.12 mm lateral, ~3.7 mm depth. Replaces the old isotropic marker_pos_sigma/cube_sigma.
+  tag_px_noise: 0.4        # px,    effective solvePnP corner error (calib reproj 0.21, inflated for deploy blur/lighting)
+  tag_depth_factor: 2.0    #        depth-error amplification over the image-plane baseline
+  cam_common_sigma: 0.0005 # m,     per-frame common-mode residual shared by every tag (EMA'd camera re-anchor)
 
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
 # differentiating biased qpos has zero DC offset, so a velocity bias is non-physical.
-# Marker biases are drawn independently per tag (glue placement + camera extrinsics error
-# don't correlate between the two tags). qpos/cube biases are the small residual
-# left after the real rig subtracts the bulk calibration offset pre-policy — see
-# calibration_plan.md.
+# marker_pos_sigma/cube_sigma are per-tag independent (each tag's own glue placement /
+# pose-estimate error); marker_common_sigma is a separate shift shared by ALL tags — the
+# real pipeline re-anchors the camera from one table tag every frame and EMAs it
+# (real/marker_obs.py), so that anchor's calibration offset settles into a common-mode
+# shift on finger, wrist, and cube alike. qpos biases are the small residual left after
+# the real rig subtracts the bulk calibration offset pre-policy — see calibration_plan.md.
 obs_bias:
   qpos_sigma: 0.01
-  marker_pos_sigma: 0.005  # m,    tag glue placement + extrinsics offset
-  marker_rot_sigma: 0.05   # rad,  tag alignment error (~3°)
+  marker_pos_sigma: 0.005    # m,    per-tag glue placement / pose-estimate error
+  marker_rot_sigma: 0.05     # rad,  tag alignment error (~3°)
   cube_sigma: 0.005
+  marker_common_sigma: 0.0025 # m,   shared shift on all tags (table calib; ~extrinsics.yaml spread_mm 2.28)
 
 # Observation latency (sim2real): only camera-derived obs (markers, cube) lag.
 # Encoder reads are ~2 ms on the bus — effectively fresh at a 66.7 ms tick — so

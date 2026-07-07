@@ -30,7 +30,9 @@ from real.detect import make_detector
 from real.extrinsics import (
     base_cam_from_table,
     load_extrinsics,
+    mat_to_pos_quat,
     mat_to_pos_rotvec,
+    pos_quat_to_mat,
     quarter_turn_mat,
     rt_to_mat,
 )
@@ -43,6 +45,13 @@ from real.marker_spec import (
 )
 from real.pose import PoseEstimator, load_intrinsics
 from src.base_env import MARKER_AGE_CAP_S, MARKER_SITE_NAMES, N_MARKERS
+
+# EMA weight for the re-anchored camera pose. The camera is bolted down (static
+# within a session), so smoothing base_cam_from_table across frames denoises the
+# per-frame table-tag detection jitter that otherwise moves every arm/cube tag in
+# common. At 30 fps, 0.05 is a ~0.7 s time constant: heavy denoising while still
+# tracking a real bump within a couple of seconds.
+CAM_EMA_ALPHA = 0.05
 
 # The marker-age obs is consume-time minus *capture* time (src/camera_sim.py),
 # but the thread only knows when cap.read() returned; the probe
@@ -91,6 +100,11 @@ class CameraMarkerSource:
         self._cube_pos = np.zeros(3)
         self._cube_rot = np.zeros(3)
         self._cube_last_capture_t = -np.inf
+        # EMA state for the re-anchored camera pose (see CAM_EMA_ALPHA). Seeded by
+        # the first table-tag solve; touched only from the capture thread, so no
+        # lock needed.
+        self._cam_ema_pos = None
+        self._cam_ema_quat = None
         self._recv_t: float | None = None
         self._read_ms = float("nan")
         self._detect_ms = float("nan")
@@ -149,6 +163,25 @@ class CameraMarkerSource:
         except Exception as exc:   # surface to the consumer thread; a dead camera
             self.error = exc       # must fail loud, not freeze the last poses
 
+    def _ema_camera(self, T_base_cam):
+        """EMA the per-frame re-anchored camera pose (CAM_EMA_ALPHA). Blends
+        translation linearly and orientation by quaternion nlerp (sign-aligned,
+        renormalized); the first solve seeds the state. Returns the smoothed 4x4."""
+        pos, quat = mat_to_pos_quat(T_base_cam)
+        if self._cam_ema_pos is None:
+            self._cam_ema_pos = pos
+            self._cam_ema_quat = quat
+        else:
+            a = CAM_EMA_ALPHA
+            self._cam_ema_pos = (1.0 - a) * self._cam_ema_pos + a * pos
+            # quat and -quat are the same rotation; align sign before averaging so
+            # the blend takes the short way round.
+            if self._cam_ema_quat @ quat < 0.0:
+                quat = -quat
+            blended = (1.0 - a) * self._cam_ema_quat + a * quat
+            self._cam_ema_quat = blended / np.linalg.norm(blended)
+        return pos_quat_to_mat(self._cam_ema_pos, self._cam_ema_quat)
+
     def _poses_to_base(self, poses: dict):
         """Camera-frame tag poses -> raw per-frame base-frame
         (pos (N,3), rot (N,3), detected (N,) bool, cube_pose); undetected/
@@ -162,7 +195,8 @@ class CameraMarkerSource:
         if TABLE_TAG_ID not in poses:
             # No table tag this frame -> can't re-anchor the camera.
             return pos, rot, detected, None
-        T_base_cam = base_cam_from_table(self.T_base_table, *poses[TABLE_TAG_ID])
+        T_base_cam = self._ema_camera(
+            base_cam_from_table(self.T_base_table, *poses[TABLE_TAG_ID]))
         for i, tag in enumerate(self.slot_tags):
             if tag in poses:
                 # Un-rotate the glue offset so marker_rot matches the sim convention.
