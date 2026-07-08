@@ -151,7 +151,7 @@ def test_hidden_marker_holds_last_measurement():
     noise and bias included, no re-noising of held poses — while its age
     channel grows; a freshly detected tag reads age 0 (synchronous camera)."""
     noise = {"qpos_sigma": 0.01, "marker_rot_sigma": 0.02,
-             "tag_px_noise": 0.4, "tag_depth_factor": 2.0, "cam_common_sigma": 0.0005}
+             "tag_px_noise": 0.4, "cube_px_noise": 0.4, "tag_depth_factor": 2.0}
     bias = {"qpos_sigma": 0.01, "marker_pos_sigma": 0.005,
             "marker_rot_sigma": 0.02, "cube_sigma": 0.005, "marker_common_sigma": 0.003}
     env = SO101LiftEnv(env_cfg=_cfg(),

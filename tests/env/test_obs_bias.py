@@ -30,8 +30,8 @@ NOISE_SIGMAS = {
     "qpos_sigma": 0.005,
     "marker_rot_sigma": 0.02,
     "tag_px_noise": 0.4,
+    "cube_px_noise": 0.4,
     "tag_depth_factor": 2.0,
-    "cam_common_sigma": 0.0005,
 }
 
 QPOS = slice(0, 6)

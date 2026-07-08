@@ -8,13 +8,15 @@
 # config.yaml and MUST stay identical across stages (they change obs dim).
 
 # Anisotropic marker/cube position noise (src/marker_noise.py): same shape as dr=full,
-# lower magnitude (tag_px_noise scaled down; depth_factor kept, it is a geometry ratio).
+# lower magnitude on the arm markers (tag_px_noise scaled down; depth_factor kept, it is
+# a geometry ratio). The cube tag keeps the full-level px error (~4 mm vec RMS at its mean
+# distance) — the curriculum eases the arm's self-perception, not the manipulated object.
 obs_noise:
   qpos_sigma: 0.005
   marker_rot_sigma: 0.01
-  tag_px_noise: 0.25
+  tag_px_noise: 0.1
+  cube_px_noise: 0.2
   tag_depth_factor: 2.0
-  cam_common_sigma: 0.0003
 
 obs_bias:
   qpos_sigma: 0.01

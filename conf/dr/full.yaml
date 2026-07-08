@@ -17,10 +17,15 @@ obs_noise:
   # small in the image plane, large along each tag's own camera ray (solvePnP range from
   # apparent size). lateral = (Z/f)*tag_px_noise, depth = (Z**2/(f*W))*tag_px_noise*tag_depth_factor,
   # with f (~968 px) from camera_intrinsics.yaml and W (0.02 m) the printed tag edge.
-  # At Z=0.3 m: ~0.12 mm lateral, ~3.7 mm depth. Replaces the old isotropic marker_pos_sigma/cube_sigma.
-  tag_px_noise: 0.4        # px,    effective solvePnP corner error (calib reproj 0.21, inflated for deploy blur/lighting)
+  # At the scene's mean tag distance Z~0.44 m: ~0.09 mm lateral, ~4 mm depth — on par with
+  # the old isotropic marker_pos_sigma/cube_sigma (3.5/5.2 mm vector RMS) this replaced, so
+  # the DR stage is no harder overall, just squashed onto the ray. px_noise sits at the
+  # calibrated reproj residual (0.21 px) un-inflated: per-frame i.i.d. redraws overstate the
+  # temporal churn of the real error (mostly pose-locked — see TODO.md), so the honest
+  # deploy-conditions inflation waits for the pose-locked/temporal split.
+  tag_px_noise: 0.2        # px,    effective solvePnP corner error, arm marker tags
+  cube_px_noise: 0.2       # px,    same for the cube tag (own knob: light eases markers but not the cube)
   tag_depth_factor: 2.0    #        depth-error amplification over the image-plane baseline
-  cam_common_sigma: 0.0005 # m,     per-frame common-mode residual shared by every tag (EMA'd camera re-anchor)
 
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from

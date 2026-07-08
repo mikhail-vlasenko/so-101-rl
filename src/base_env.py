@@ -470,12 +470,16 @@ class SO101BaseEnv(SO101ArmEnv):
                          xml_path=xml_path, prev_actions_n=cfg.prev_actions_n,
                          env_cfg=env_cfg)
         # dict with keys qpos_sigma, marker_rot_sigma, tag_px_noise,
-        # tag_depth_factor, cam_common_sigma; or None. Marker/cube position noise
-        # is anisotropic in the camera frame (src/marker_noise.py) instead of a
-        # single sigma: tag_px_noise/tag_depth_factor derive the depth-vs-lateral
-        # split, cam_common_sigma is the shared per-frame jitter. No qvel key: the
-        # qvel obs is the backward difference of consecutive qpos obs (matching the
-        # real pipeline), so its noise is inherited from qpos_sigma, not configured.
+        # cube_px_noise, tag_depth_factor; or None. Marker/cube position noise is
+        # anisotropic in the camera frame (src/marker_noise.py) instead of a
+        # single sigma: tag_px_noise (arm markers) / cube_px_noise (cube tag)
+        # with tag_depth_factor derive the depth-vs-lateral split. The
+        # camera re-anchor's common-mode error is per-episode only
+        # (obs_bias.marker_common_sigma): the real pipeline EMAs the static
+        # camera pose (real/marker_obs.py), leaving no meaningful per-frame
+        # common jitter. No qvel key: the qvel obs is the backward difference of
+        # consecutive qpos obs (matching the real pipeline), so its noise is
+        # inherited from qpos_sigma, not configured.
         self.obs_noise = cfg.obs_noise
         # AprilTag detector dropout (DR): dict with keys "near"/"far" giving the
         # per-frame probability a geometrically-visible tag is missed (near-boundary
@@ -699,16 +703,12 @@ class SO101BaseEnv(SO101ArmEnv):
                     self._marker_tag_sizes[i], self._focal_px, px, depth_factor)
             cube_tag_pos = cube_tag_pos + anisotropic_pos_noise(
                 rng, state.cube_tag_pos, self.tag_cam_pos,
-                self._cube_tag_size, self._focal_px, px, depth_factor)
+                self._cube_tag_size, self._focal_px,
+                self.obs_noise["cube_px_noise"], depth_factor)
             marker_rot = marker_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
                                                  size=marker_rot.shape)
             cube_tag_rot = cube_tag_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
                                                      size=cube_tag_rot.shape)
-            # Per-frame common-mode residual: one shared jitter added to every tag
-            # (table re-anchor error the real camera EMA leaves behind).
-            common = rng.normal(0, self.obs_noise["cam_common_sigma"], size=3)
-            marker_pos = marker_pos + common
-            cube_tag_pos = cube_tag_pos + common
         return CamFrame(marker_pos=marker_pos, marker_rot=marker_rot,
                         detected=detected, cube_tag_pos=cube_tag_pos,
                         cube_tag_rot=cube_tag_rot, cube_detected=cube_detected)
