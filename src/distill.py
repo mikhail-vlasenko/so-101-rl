@@ -2,8 +2,9 @@
 architecture or observation-layout change, without a curriculum restart.
 
 Every net-width, history-feature, or obs-layout change invalidates checkpoints,
-and the only same-obs recovery is `widen_checkpoint` (function-preserving, one
-case). Distillation turns the general "retrain from scratch" into a supervised
+and the only function-preserving shortcut left is `asymmetrize_checkpoint`
+(appending the privileged tail with the actor unchanged — one narrow case).
+Distillation turns the general "retrain from scratch" into a supervised
 problem: regress a fresh student onto the teacher's deterministic action *and*
 value on the states an (annealed teacher->student) rollout visits under the
 student's own deployment DR. DAgger — not plain behavior cloning — because the
@@ -92,9 +93,8 @@ class DistillBuffer:
 
 def _policy_outputs(policy, obs_np, device):
     """(deterministic mean action, value estimate) for a batch of raw obs, no
-    grad. The Gaussian mean is the teacher's deterministic action (widen-style),
-    unclipped — the env clips at execution and the student regresses the raw
-    target."""
+    grad. The Gaussian mean is the teacher's deterministic action, unclipped —
+    the env clips at execution and the student regresses the raw target."""
     obs_t = torch.as_tensor(np.asarray(obs_np, dtype=np.float32), device=device)
     with torch.no_grad():
         mean = policy.get_distribution(obs_t).distribution.mean

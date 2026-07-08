@@ -17,14 +17,13 @@ from hydra import compose, initialize
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.asymmetrize_checkpoint import asymmetrize_model
+from src.asymmetrize_checkpoint import _SpacesEnv, asymmetrize_model
 from src.base_env import RuntimeEnvConfig, priv_dim_for
 from src.lift_env import SO101LiftEnv
 from src.networks import LayerNormActorCriticPolicy, TakeFirst
 from src.train import (
     actor_obs_dim_for, build_fresh_model, obs_norm_for, runtime_cfg_from_hydra,
 )
-from src.widen_checkpoint import _SpacesEnv
 
 # Privileged tail layout for marker_include_rot=False (base_env._priv_tail),
 # relative to the tail start.

@@ -26,7 +26,7 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
-from gymnasium import spaces
+from gymnasium import Env, spaces
 from hydra import compose, initialize
 from stable_baselines3.common.vec_env import DummyVecEnv
 
@@ -35,7 +35,22 @@ from src.networks import ObsNorm, TakeFirst
 from src.train import (
     ALGORITHM_REGISTRY, actor_obs_dim_for, build_fresh_model, obs_norm_for,
 )
-from src.widen_checkpoint import _SpacesEnv
+
+
+class _SpacesEnv(Env):
+    """Minimal env exposing given spaces so an SB3 model can be constructed to
+    copy weights into. reset/step are never called -- model construction reads
+    only the spaces."""
+
+    def __init__(self, observation_space, action_space):
+        self.observation_space = observation_space
+        self.action_space = action_space
+
+    def reset(self, *, seed=None, options=None):
+        return self.observation_space.sample(), {}
+
+    def step(self, action):
+        return self.observation_space.sample(), 0.0, False, False, {}
 
 
 def _copy_same_graph(old_mods: list, new_mods: list) -> None:
