@@ -106,7 +106,7 @@ from real.twin.constants import (
 )
 from real.twin.mapping import JOINT_NAMES, load_joint_maps, raw_to_rad
 from real.twin.servo_io import ServoBus
-from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_world_pos
+from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_model
 from src.units import max_raw_delta_per_step
 from sysid.record_real import CONFIG_YAML, HOMING_S, SETTLE_S, smooth_ramp, stream
 from sysid.trajectories import SYSID_HZ
@@ -191,14 +191,14 @@ GRID_X = np.linspace(0.20, 0.36, 8)   # forward reach, m
 # bias being measured (up to ~8 deg on the elbow -> a few cm at the EE) can drop the
 # real fingertip below the nominal sim pose. The floor trades a little contact-regime
 # coverage for not pressing the uncalibrated arm into the table; ncon==0 (sim
-# collision-free) is enforced on top. The marker_visible() 0.23 m ceiling culls the
-# top of frame; these low poses sit far below it.
+# collision-free) is enforced on top. The camera FOV culls tags out the top of frame;
+# these low poses sit comfortably inside it.
 MIN_EE_Z = 0.013          # hard floor on the realized gripperframe z, m (real-arm clearance)
 GRID_Z = np.linspace(0.025, 0.08, 4)  # height, m  (8x4 = 32 targets at pan=middle)
 GRID_Z_DITHER = 0.01       # checkerboard height jitter -> lift & elbow both move between neighbours
 REACH_TOL = 0.025          # accept a pan=middle target only if the EE reaches within this, m
 PAN_OFFSETS_DEG = (-35.0, -17.5, 17.5, 35.0)   # extra blocks; past ~35 deg a tag
-# leaves the 0.23 m frame ceiling so both-visible IK no longer solves
+# leaves the camera frame so both-visible IK no longer solves
 OFF_X = np.linspace(0.22, 0.34, 6)
 OFF_Z = (0.025, 0.06)      # low, matching the grid band so panned poses stay near the table
 W_POS_GRID = 20.0          # IK position-vs-visibility weight at pan=middle (reach dominates)
@@ -311,7 +311,7 @@ def generate_poses(model, data, jm):
     assert ee_id >= 0, "site 'gripperframe' not found in model"
     marker_sids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, n)
                    for n in MARKER_SITE_NAMES]
-    cam_pos = tag_cam_world_pos(model, data)
+    cam = tag_cam_model(model, data)
 
     def attempt(pan, target, seed, w_pos, parity):
         sign = 1.0 if parity else -1.0
@@ -320,14 +320,14 @@ def generate_poses(model, data, jm):
         res = least_squares(
             _ik_residual, np.clip(seed, b_lo, b_hi), bounds=(b_lo, b_hi),
             args=(pan, target, w_pos, roll_bias, flex_bias, model, data,
-                  qposadr, ee_id, marker_sids, cam_pos))
+                  qposadr, ee_id, marker_sids, cam.pos))
         q = np.zeros(6)
         q[0], q[5] = pan, GRIPPER_FIXED
         q[list(FREE_JOINTS)] = res.x
         data.qpos[qposadr] = q
         mujoco.mj_forward(model, data)
         reached = float(np.linalg.norm(data.site_xpos[ee_id] - target))
-        ok = (bool(markers_visible(data, marker_sids, cam_pos).all())
+        ok = (bool(markers_visible(data, marker_sids, cam).all())
               and data.ncon == 0
               and data.site_xpos[ee_id][2] >= MIN_EE_Z)
         return q, ok, reached

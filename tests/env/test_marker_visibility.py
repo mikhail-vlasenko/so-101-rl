@@ -9,18 +9,34 @@ import numpy as np
 import pytest
 
 from src.base_env import (
-    MARKER_AGE_CAP_S, MARKER_VIS_MAX_ANGLE_DEG, MARKER_VIS_MAX_HEIGHT_M,
-    MARKER_VIS_NEAR_ANGLE_DEG, N_MARKERS, RuntimeEnvConfig, marker_dropout_prob,
-    marker_world_normals, marker_world_poses, markers_visible, tag_cam_world_pos,
+    MARKER_AGE_CAP_S, MARKER_VIS_MAX_ANGLE_DEG,
+    MARKER_VIS_NEAR_ANGLE_DEG, N_MARKERS, CameraModel, RuntimeEnvConfig,
+    marker_dropout_prob, marker_world_normals, marker_world_poses, markers_visible,
+    tag_cam_model,
 )
 from src.lift_env import SO101LiftEnv
+from src.marker_noise import load_camera_intrinsics
 
 
-def _prob(data, site_ids, cam_pos, p_near, p_far):
+def _prob(data, site_ids, cam, p_near, p_far):
     """marker_dropout_prob evaluated at the current MjData pose."""
     pos, _ = marker_world_poses(data, site_ids)
     normals = marker_world_normals(data, site_ids)
-    return marker_dropout_prob(pos, normals, cam_pos, p_near, p_far)
+    return marker_dropout_prob(pos, normals, cam, p_near, p_far)
+
+
+def _cam_looking_at(pos, target, intr):
+    """A CameraModel at `pos` aimed straight at world `target` (so the target
+    projects to the image center, always inside the frame) with intrinsics `intr`.
+    Lets the facing-angle bound be tested in isolation from the FOV bound."""
+    pos = np.asarray(pos, dtype=np.float64)
+    forward = np.asarray(target, dtype=np.float64) - pos
+    forward /= np.linalg.norm(forward)
+    z_axis = -forward                       # MuJoCo camera +z points opposite the view
+    x_axis = np.cross([0.0, 0.0, 1.0], z_axis)
+    x_axis /= np.linalg.norm(x_axis)
+    y_axis = np.cross(z_axis, x_axis)
+    return CameraModel(pos=pos, mat=np.column_stack([x_axis, y_axis, z_axis]), intr=intr)
 
 
 def _refresh_detection(env):
@@ -63,11 +79,12 @@ def env():
 # rot_wrist(3), marker_age(2), cube_tag(6), cube_age(1), extra(4), prev_actions]
 MARKER_OBS_START = 12
 
-# Geometric-visibility tests must pose the arm under the 0.23 m height ceiling: the
-# home pose puts marker_finger at ~0.275 m (above it), so the height cut-off would
-# mask the angle/dropout logic. This forward-low pose faces both tags at the camera
-# with the finger ~0.14 m up, and rolling wrist_roll from here still flips the
-# finger across the angle bound (height stays ~0.14 m, so the flip is purely angle).
+# Geometric-visibility tests pose the arm so both tags face the tag camera and sit
+# well inside its frame: the home pose puts marker_finger at ~0.275 m out the top of
+# the real frame, which would mask the angle/dropout logic. This forward-low pose
+# faces both tags at the camera with the finger ~0.14 m up, and rolling wrist_roll
+# from here flips the finger across the facing-angle bound while it stays in frame,
+# so the flip is purely angle.
 LOW_BOTH_VISIBLE = np.array([0.0, -0.2174, 0.3455, 1.5381, 0.6928, 0.5])
 
 
@@ -76,18 +93,40 @@ def _pose_low(env):
     mujoco.mj_forward(env.model, env.data)
 
 
+def test_in_view_frustum():
+    """CameraModel.in_view projects a world point through the calibrated camera
+    matrix and tests the image bounds — the real FOV, not a world-height proxy:
+    on-axis points are in view, points past the horizontal half-FOV are out, and
+    points behind the camera are out."""
+    intr = load_camera_intrinsics()
+    # Camera at the origin in MuJoCo default orientation (identity): +x right,
+    # +y up, view along local -z. A world point (x, y, -d) is then in front.
+    cam = CameraModel(pos=np.zeros(3), mat=np.eye(3), intr=intr)
+    d = 1.0
+    half_h = np.arctan((intr.width / 2) / intr.fx)   # horizontal half-FOV, radians
+    assert cam.in_view([[0.0, 0.0, -d]])[0]                          # optical axis
+    assert cam.in_view([[d * np.tan(0.9 * half_h), 0.0, -d]])[0]     # inside horizontal FOV
+    assert not cam.in_view([[d * np.tan(1.1 * half_h), 0.0, -d]])[0]  # past the frame edge
+    assert not cam.in_view([[0.0, 0.0, d]])[0]                       # behind the camera
+    mask = cam.in_view([[0.0, 0.0, -d], [d * np.tan(1.1 * half_h), 0.0, -d]])
+    assert mask.tolist() == [True, False]                            # one bool per point
+
+
 def test_angle_threshold(env):
-    """Visibility flips exactly at the 70° plane angle, per synthetic cam_pos."""
+    """Visibility flips exactly at the 70° facing angle. The synthetic camera is
+    aimed at the tag (centered in frame) so only the angle bound is exercised."""
     env.reset(seed=0)
     _pose_low(env)
     sid = env.marker_site_ids[0]
     site_pos = env.data.site_xpos[sid].copy()
     mat = env.data.site_xmat[sid].reshape(3, 3)
     normal, tangent = mat[:, 2], mat[:, 0]
+    intr = load_camera_intrinsics()
 
     def cam_at(angle_deg, dist=0.4):
         a = np.radians(angle_deg)
-        return site_pos + dist * (np.cos(a) * normal + np.sin(a) * tangent)
+        pos = site_pos + dist * (np.cos(a) * normal + np.sin(a) * tangent)
+        return _cam_looking_at(pos, site_pos, intr)
 
     assert markers_visible(env.data, [sid], cam_at(0.0))[0]        # head-on
     assert markers_visible(env.data, [sid], cam_at(69.0))[0]       # just inside
@@ -97,24 +136,24 @@ def test_angle_threshold(env):
     assert MARKER_VIS_MAX_ANGLE_DEG == 70.0
 
 
-def test_height_ceiling_hides_high_tag(env):
-    """A tag above MARKER_VIS_MAX_HEIGHT_M is undetected even when facing the camera
-    head-on — it has left the top of the real camera frame. The home pose puts
-    marker_finger above the ceiling, so reset(seed=0) gives a ready high tag."""
+def test_out_of_frame_hides_facing_tag(env):
+    """A tag squarely facing the camera but projecting outside the image frame is
+    undetected — the real camera's FOV, not a world-height cutoff, is what hides it.
+    The same tag centered in frame is detected, isolating the FOV bound."""
     env.reset(seed=0)
-    sid = env.marker_site_ids[0]
-    assert env.data.site_xpos[sid][2] > MARKER_VIS_MAX_HEIGHT_M
-    normal = env.data.site_xmat[sid].reshape(3, 3)[:, 2]
-    cam_head_on = env.data.site_xpos[sid] + 0.4 * normal   # angle check passes
-    assert not markers_visible(env.data, [sid], cam_head_on)[0]
-    assert _prob(env.data, [sid], cam_head_on, 0.2, 0.05)[0] == 1.0
-    # The same tag, lowered under the ceiling and facing the camera, is visible.
     _pose_low(env)
-    sid_low = env.marker_site_ids[0]
-    assert env.data.site_xpos[sid_low][2] <= MARKER_VIS_MAX_HEIGHT_M
-    normal = env.data.site_xmat[sid_low].reshape(3, 3)[:, 2]
-    assert markers_visible(env.data, [sid_low], env.data.site_xpos[sid_low] + 0.4 * normal)[0]
-    assert MARKER_VIS_MAX_HEIGHT_M == 0.23
+    sid = env.marker_site_ids[0]
+    site_pos = env.data.site_xpos[sid].copy()
+    mat = env.data.site_xmat[sid].reshape(3, 3)
+    normal, tangent = mat[:, 2], mat[:, 0]
+    cam_pos = site_pos + 0.4 * normal          # head-on: the facing-angle check passes
+    intr = load_camera_intrinsics()
+    # Aimed at the tag -> centered -> visible.
+    assert markers_visible(env.data, [sid], _cam_looking_at(cam_pos, site_pos, intr))[0]
+    # Same pose, camera panned ~56° off the tag -> tag leaves the frame -> hidden,
+    # despite still facing the camera head-on.
+    off_target = site_pos + 0.6 * tangent
+    assert not markers_visible(env.data, [sid], _cam_looking_at(cam_pos, off_target, intr))[0]
 
 
 def test_wrist_roll_sweep_flips_finger_visibility(env):
@@ -132,7 +171,7 @@ def test_wrist_roll_sweep_flips_finger_visibility(env):
         mujoco.mj_forward(env.model, env.data)
         # Detection is rolled separately from _compute_obs; refresh it for this pose.
         _refresh_detection(env)
-        visible = markers_visible(env.data, env.marker_site_ids, env.tag_cam_pos)
+        visible = markers_visible(env.data, env.marker_site_ids, env.tag_cam)
         seen.add(bool(visible[0]))
         obs = env._compute_obs()
         finger_slice = obs[MARKER_OBS_START:MARKER_OBS_START + 6]
@@ -163,7 +202,7 @@ def test_hidden_marker_holds_last_measurement():
     checked = 0
     for _ in range(40):
         obs, _, term, trunc, _ = env.step(env.action_space.sample())
-        visible = markers_visible(env.data, env.marker_site_ids, env.tag_cam_pos)
+        visible = markers_visible(env.data, env.marker_site_ids, env.tag_cam)
         for i in range(N_MARKERS):
             sl = obs[MARKER_OBS_START + 6 * i:MARKER_OBS_START + 6 * (i + 1)]
             if visible[i]:
@@ -189,10 +228,12 @@ def test_dropout_prob_bands(env):
     site_pos = env.data.site_xpos[sid].copy()
     mat = env.data.site_xmat[sid].reshape(3, 3)
     normal, tangent = mat[:, 2], mat[:, 0]
+    intr = load_camera_intrinsics()
 
     def cam_at(angle_deg, dist=0.4):
         a = np.radians(angle_deg)
-        return site_pos + dist * (np.cos(a) * normal + np.sin(a) * tangent)
+        pos = site_pos + dist * (np.cos(a) * normal + np.sin(a) * tangent)
+        return _cam_looking_at(pos, site_pos, intr)
 
     pn, pf = 0.2, 0.05
     assert _prob(env.data, [sid], cam_at(0.0), pn, pf)[0] == pf
@@ -229,7 +270,7 @@ def test_dropout_rate_matches_prob():
     env = SO101LiftEnv(env_cfg=_cfg(),
                        cfg=RuntimeEnvConfig(marker_dropout=probs))
     env.reset(seed=2)
-    expected = _prob(env.data, env.marker_site_ids, env.tag_cam_pos,
+    expected = _prob(env.data, env.marker_site_ids, env.tag_cam,
                      probs["near"], probs["far"])
     n = 4000
     drops = np.zeros(N_MARKERS)
@@ -280,9 +321,9 @@ def test_tag_cam_placement(env):
     """Camera sits to the right of the arm (-y), ~40 cm out, above the floor.
 
     The camera now hangs off a fixed mount body, so its world position comes
-    from tag_cam_world_pos (cam_xpos), not the body-relative model.cam_pos."""
+    from tag_cam_model (cam_xpos), not the body-relative model.cam_pos."""
     pos = env.tag_cam_pos
-    np.testing.assert_allclose(pos, tag_cam_world_pos(env.model, env.data), atol=1e-9)
+    np.testing.assert_allclose(pos, tag_cam_model(env.model, env.data).pos, atol=1e-9)
     assert pos[1] < -0.2, "camera should be on the arm's right (-y)"
     assert pos[2] > 0.1, "camera should be above the workspace floor"
     assert 0.3 < np.linalg.norm(pos) < 0.5, "camera should be ~40 cm from the arm base"

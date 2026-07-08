@@ -94,20 +94,30 @@ def test_spawn_tag_visible(env):
         env.reset(seed=seed)
         tag_pos, _ = marker_world_poses(env.data, [env.cube_tag_site_id])
         normal = env.data.site_xmat[env.cube_tag_site_id].reshape(3, 3)[:, 2]
-        assert marker_dropout_prob(tag_pos, normal[None], env.tag_cam_pos,
+        assert marker_dropout_prob(tag_pos, normal[None], env.tag_cam,
                                    p_near=1.0, p_far=0.0)[0] < 1.0, seed
         assert not cube_tag_occluded(env.model, env.data, env.cube_tag_site_id,
                                      env.tag_cam_pos, env.cube_body_id), seed
         assert not env._cube_arm_contact(), seed
 
 
-def test_marker_obs_match_site_poses(env):
-    """Clean obs marker dims must equal FK world poses of the marker sites.
+# Forward-low pose that faces both arm tags at the camera and keeps them inside
+# its frame (shared with tests/env/test_marker_visibility.py). A raised reset pose
+# leaves the tags out of frame, where the obs holds a stale pose instead.
+LOW_BOTH_VISIBLE = np.array([0.0, -0.2174, 0.3455, 1.5381, 0.6928, 0.5])
 
-    Seed 5 spawns the arm with both tags facing tag_cam — hidden tags would
-    hold their last detection instead (covered by test_marker_visibility.py)."""
-    obs, _ = env.reset(seed=5)
-    assert markers_visible(env.data, env.marker_site_ids, env.tag_cam_pos).all()
+
+def test_marker_obs_match_site_poses(env):
+    """Clean obs marker dims must equal FK world poses of the marker sites when
+    both tags are visible — hidden tags would hold their last detection instead
+    (covered by test_marker_visibility.py)."""
+    env.reset(seed=5)
+    env.data.qpos[env.joint_qposadr] = LOW_BOTH_VISIBLE
+    mujoco.mj_forward(env.model, env.data)
+    assert markers_visible(env.data, env.marker_site_ids, env.tag_cam).all()
+    # Re-roll a camera detection of this posed state and rebuild the obs from it.
+    env._ingest_frame(env.data.time, env._process_frame(env._capture_camera_state()))
+    obs = env._compute_obs()
     marker_pos, marker_rot = marker_world_poses(env.data, env.marker_site_ids)
     np.testing.assert_allclose(obs[MARKER_FINGER_POS], marker_pos[0], atol=1e-6)
     np.testing.assert_allclose(obs[MARKER_FINGER_ROT], marker_rot[0], atol=1e-6)

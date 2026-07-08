@@ -33,7 +33,7 @@ from real.calibration import load_calibration, load_compliance, save_calibration
 from real.compliance import COMP_JOINTS, gravity_deflection
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import load_joint_maps
-from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_world_pos
+from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_model
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 XML = REPO_ROOT / "so101" / "scene.xml"
@@ -311,14 +311,14 @@ def test_generated_poses_are_valid(setup):
     assert len(poses) > n_grid           # plus some panned poses
     qposadr = jm.qposadr()
     lo, hi = jm.xml_low(), jm.xml_high()
-    cam_pos = tag_cam_world_pos(model, data)
+    cam = tag_cam_model(model, data)
     arm_sites = list(site_ids.values())
     for q in poses:
         assert np.all(q >= lo) and np.all(q <= hi)
         data.qpos[qposadr] = q
         mujoco.mj_forward(model, data)
         assert data.ncon == 0
-        assert markers_visible(data, arm_sites, cam_pos).all()   # both tags visible
+        assert markers_visible(data, arm_sites, cam).all()   # both tags visible
 
 
 def test_sweep_exercises_every_joint(setup):

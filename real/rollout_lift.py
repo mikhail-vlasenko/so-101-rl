@@ -52,7 +52,7 @@ from src.base_env import (
     obs_dim_for,
     priv_dim_for,
     sample_cube_orientation,
-    tag_cam_world_pos,
+    tag_cam_model,
 )
 
 from .rollout_common import (
@@ -301,7 +301,7 @@ def main() -> int:
         sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
         assert sid >= 0, f"site '{name}' not found in model"
         marker_site_ids.append(sid)
-    tag_cam_pos = tag_cam_world_pos(model, data)
+    tag_cam = tag_cam_model(model, data)
     cube_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
     cube_qposadr = int(model.jnt_qposadr[cube_joint_id])
     cube_dofadr = int(model.jnt_dofadr[cube_joint_id])
@@ -426,13 +426,13 @@ def main() -> int:
                 # Same convention for the lockstep sim cube's tag, occlusion
                 # test included.
                 now = time.monotonic()
-                vis = markers_visible(data, marker_site_ids, tag_cam_pos)
+                vis = markers_visible(data, marker_site_ids, tag_cam)
                 fk_pos[vis] = fk_pos_now[vis]
                 fk_rot[vis] = fk_rot_now[vis]
                 fk_seen_t[vis] = now - FK_FRESH_AGE_S
                 marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
                 marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
-                if cube_tag_visible(model, data, cube_tag_site_id, tag_cam_pos,
+                if cube_tag_visible(model, data, cube_tag_site_id, tag_cam,
                                     cube_body_id):
                     (fk_cube_pos,), (fk_cube_rot,) = marker_world_poses(
                         data, [cube_tag_site_id])

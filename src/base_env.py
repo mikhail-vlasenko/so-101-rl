@@ -13,7 +13,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from src.camera_sim import CameraSim
-from src.marker_noise import anisotropic_pos_noise, load_focal_px
+from src.marker_noise import CameraIntrinsics, anisotropic_pos_noise, load_camera_intrinsics
 from src.servo_profile import ServoProfile
 from src.units import action_to_target
 from real.marker_spec import ARM_TAG_TO_SITE, CUBE_TAG_ID, TAG_SIZE_MM
@@ -79,22 +79,18 @@ CUBE_TAG_SITE_NAME = "cube_tag"
 MARKER_AGE_CAP_S = 1.0
 
 # Fixed camera in so101.xml standing in for the physical webcam that watches
-# the tags. A tag counts as visible when the angle between its outward normal
-# (+z of the site frame) and the tag->camera ray is under this — past that the
-# AprilTag detector loses the grazing view. Deliberately a plane-angle check
-# only: no FOV or occlusion test. NEAR marks a softer band: from NEAR up to MAX
-# the view grazes and the detector flakes, so the DR dropout (marker_dropout_prob)
-# drops those tags more often than tags comfortably facing the camera.
+# the tags. A tag counts as visible when it projects inside the camera frame
+# (CameraModel.in_view — the real camera's field of view) *and* the angle between
+# its outward normal (+z of the site frame) and the tag->camera ray is under
+# MAX — past that the AprilTag detector loses the grazing view. NEAR marks a
+# softer band: from NEAR up to MAX the view grazes and the detector flakes, so
+# the DR dropout (marker_dropout_prob) drops those tags more often than tags
+# comfortably facing the camera.
 TAG_CAM_NAME = "tag_cam"
 MARKER_VIS_MAX_ANGLE_DEG = 70.0
 MARKER_VIS_NEAR_ANGLE_DEG = 65.0
 _MARKER_VIS_COS_MIN = np.cos(np.radians(MARKER_VIS_MAX_ANGLE_DEG))
 _MARKER_VIS_COS_NEAR = np.cos(np.radians(MARKER_VIS_NEAR_ANGLE_DEG))
-# Field-of-view proxy: the plane-angle check above models grazing, not the camera
-# frame bounds. On the real rig the webcam clips tags near this height off the
-# ground, so a tag whose world z exceeds it has left the top of the image and
-# counts as undetected regardless of facing angle.
-MARKER_VIS_MAX_HEIGHT_M = 0.23
 
 # Render-only tints for the marker sites: green when the tag is detected this
 # frame, red when not (over-angle or dropped). Visual only — never read by obs.
@@ -136,43 +132,87 @@ def marker_world_normals(data, site_ids):
     return np.stack([data.site_xmat[sid].reshape(3, 3)[:, 2] for sid in site_ids])
 
 
+@dataclass(frozen=True)
+class CameraModel:
+    """The fixed tag camera as a calibrated pinhole: its world pose (cam_xpos /
+    cam_xmat, MuJoCo convention — the camera looks down its local -z with +y up)
+    plus the intrinsics from real/camera_intrinsics.yaml.
+
+    in_view() is the field-of-view test the marker-visibility pipeline uses in
+    place of the old world-height proxy: a world point is projected through the
+    real camera matrix and must land inside the image, exactly the bound a real
+    detection has (a tag off the frame is simply never seen). Distortion is
+    ignored — the coeffs are small and this is a coarse in/out gate softened by
+    the grazing-angle band and the DR dropout.
+    """
+    pos: np.ndarray   # (3,) world position
+    mat: np.ndarray   # (3,3) world rotation, columns = camera-frame axes in world
+    intr: CameraIntrinsics
+
+    def in_view(self, points):
+        """Bool (N,) — each world point of `points` (N,3) projects inside the frame."""
+        pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
+        # World -> camera frame: (R^T @ rel) per row is (rel @ R) for row vectors.
+        cam = (pts - self.pos) @ self.mat
+        depth = -cam[:, 2]                       # camera looks down -z; in front -> depth > 0
+        in_front = depth > 0
+        safe_depth = np.where(in_front, depth, 1.0)  # avoid 0-division for points behind
+        # MuJoCo cam frame is +y up; the OpenCV pixel v axis points down, so flip y.
+        u = self.intr.fx * (cam[:, 0] / safe_depth) + self.intr.cx
+        v = self.intr.fy * (-cam[:, 1] / safe_depth) + self.intr.cy
+        return (in_front & (u >= 0) & (u < self.intr.width)
+                & (v >= 0) & (v < self.intr.height))
+
+
 def tag_cam_world_pos(model, data):
     """World position of TAG_CAM_NAME. The camera hangs off a fixed mount body,
     so cam_xpos (filled by forward kinematics) is its constant world position;
     model.cam_pos is body-relative and would be wrong. Runs mj_kinematics so the
     caller need not have forwarded data first (the mount is qpos-independent)."""
+    return tag_cam_model(model, data).pos
+
+
+def tag_cam_model(model, data):
+    """CameraModel for TAG_CAM_NAME: its world pose (cam_xpos / cam_xmat, both
+    filled by mj_camlight — the mount is qpos-independent, so this needs no prior
+    forward) plus the calibrated intrinsics. Single source for the camera geometry
+    the marker-visibility FOV check consumes."""
     cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, TAG_CAM_NAME)
     assert cam_id >= 0, f"Camera '{TAG_CAM_NAME}' not found in model"
-    # cam_xpos is filled by mj_camlight, which needs body frames from mj_kinematics.
+    # cam_xpos/cam_xmat are filled by mj_camlight, which needs body frames from mj_kinematics.
     mujoco.mj_kinematics(model, data)
     mujoco.mj_camlight(model, data)
-    return data.cam_xpos[cam_id].copy()
+    return CameraModel(pos=data.cam_xpos[cam_id].copy(),
+                       mat=data.cam_xmat[cam_id].reshape(3, 3).copy(),
+                       intr=load_camera_intrinsics())
 
 
-def markers_visible(data, site_ids, cam_pos):
-    """Per-marker geometric visibility from cam_pos as a bool array: plane angle
-    under MARKER_VIS_MAX_ANGLE_DEG *and* world height under MARKER_VIS_MAX_HEIGHT_M
-    (see TAG_CAM_NAME doc). No stochastic dropout — used by tests and the real-arm
-    twin rollout."""
+def markers_visible(data, site_ids, cam):
+    """Per-marker geometric visibility from the CameraModel `cam` as a bool array:
+    inside the camera frame (cam.in_view) *and* plane angle under
+    MARKER_VIS_MAX_ANGLE_DEG (see TAG_CAM_NAME doc). No stochastic dropout — used
+    by tests and the real-arm twin rollout."""
     pos, _ = marker_world_poses(data, site_ids)
     normals = marker_world_normals(data, site_ids)
-    return marker_dropout_prob(pos, normals, cam_pos, p_near=0.0, p_far=0.0) < 1.0
+    return marker_dropout_prob(pos, normals, cam, p_near=0.0, p_far=0.0) < 1.0
 
 
-def marker_dropout_prob(pos, normals, cam_pos, p_near, p_far):
+def marker_dropout_prob(pos, normals, cam, p_near, p_far):
     """Per-marker probability the tag is undetected this frame (its held pose
-    goes stale), from the tags' world positions (N,3) and outward normals (N,3).
+    goes stale), from the tags' world positions (N,3) and outward normals (N,3)
+    and the CameraModel `cam`.
 
-    Above MARKER_VIS_MAX_HEIGHT_M (out the top of frame) or past
+    Projecting outside the camera frame (cam.in_view — the real FOV) or past
     MARKER_VIS_MAX_ANGLE_DEG the camera can't see the tag at all -> 1.0.
     In the near-boundary band [NEAR, MAX] the grazing view is flaky -> p_near.
     Comfortably facing the camera (angle < NEAR) -> p_far (rare detector miss).
     """
+    in_view = cam.in_view(pos)
     prob = np.empty(len(pos))
     for i in range(len(pos)):
-        to_cam = cam_pos - pos[i]
+        to_cam = cam.pos - pos[i]
         cos = (normals[i] @ to_cam) / np.linalg.norm(to_cam)
-        if pos[i][2] > MARKER_VIS_MAX_HEIGHT_M or cos < _MARKER_VIS_COS_MIN:
+        if not in_view[i] or cos < _MARKER_VIS_COS_MIN:
             prob[i] = 1.0
         elif cos < _MARKER_VIS_COS_NEAR:
             prob[i] = p_near
@@ -228,16 +268,16 @@ def cube_tag_occluded(model, data, site_id, cam_pos, cube_body_id):
     return False
 
 
-def cube_tag_visible(model, data, site_id, cam_pos, cube_body_id):
-    """Geometric visibility of the cube tag from cam_pos: the markers_visible
-    checks (plane angle under MARKER_VIS_MAX_ANGLE_DEG, height under
-    MARKER_VIS_MAX_HEIGHT_M) plus an unobstructed ray to the camera. No
+def cube_tag_visible(model, data, site_id, cam, cube_body_id):
+    """Geometric visibility of the cube tag from the CameraModel `cam`: the
+    markers_visible checks (inside the camera frame, plane angle under
+    MARKER_VIS_MAX_ANGLE_DEG) plus an unobstructed ray to the camera. No
     stochastic dropout — used by tests and the real-arm rollout's FK branch."""
     pos, _ = marker_world_poses(data, [site_id])
     normal = data.site_xmat[site_id].reshape(3, 3)[:, 2]
-    if marker_dropout_prob(pos, normal[None], cam_pos, p_near=0.0, p_far=0.0)[0] >= 1.0:
+    if marker_dropout_prob(pos, normal[None], cam, p_near=0.0, p_far=0.0)[0] >= 1.0:
         return False
-    return not cube_tag_occluded(model, data, site_id, cam_pos, cube_body_id)
+    return not cube_tag_occluded(model, data, site_id, cam.pos, cube_body_id)
 
 
 class CamState(NamedTuple):
@@ -544,13 +584,17 @@ class SO101BaseEnv(SO101ArmEnv):
             sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
             assert sid >= 0, f"Marker site '{name}' not found in XML"
             self.marker_site_ids.append(sid)
-        self.tag_cam_pos = tag_cam_world_pos(self.model, self.data)
+        # Full pinhole camera (world pose + calibrated intrinsics): the FOV
+        # visibility check reads its frame bounds, the noise/occlusion paths its
+        # position (self.tag_cam_pos below).
+        self.tag_cam = tag_cam_model(self.model, self.data)
+        self.tag_cam_pos = self.tag_cam.pos
         # Camera geometry for the anisotropic (camera-frame) marker noise: focal
         # length from the solved intrinsics and each obs tag's printed edge length,
         # both the same calibration the real solvePnP pipeline uses (src/marker_noise.py,
         # real/marker_spec.py). All arm/cube tags happen to be 20 mm, but map through
         # marker_spec so the obs slots stay the single source of truth.
-        self._focal_px = load_focal_px()
+        self._focal_px = self.tag_cam.intr.focal_px
         site_to_tag = {site: tag for tag, site in ARM_TAG_TO_SITE.items()}
         self._marker_tag_sizes = np.array(
             [TAG_SIZE_MM[site_to_tag[name]] / 1000.0 for name in MARKER_SITE_NAMES])
@@ -688,7 +732,7 @@ class SO101BaseEnv(SO101ArmEnv):
                 p_near = self.marker_dropout["near"]
                 p_far = self.marker_dropout["far"]
             prob = marker_dropout_prob(state.marker_pos, state.marker_normal,
-                                       self.tag_cam_pos, p_near, p_far)
+                                       self.tag_cam, p_near, p_far)
             detected = self.np_random.random(N_MARKERS) >= prob
             # The cube tag shares the arm tags' angle/height/dropout geometry
             # plus the capture-time occlusion test (a blocked ray is a certain
@@ -698,7 +742,7 @@ class SO101BaseEnv(SO101ArmEnv):
             else:
                 cube_prob = marker_dropout_prob(state.cube_tag_pos[None],
                                                 state.cube_tag_normal[None],
-                                                self.tag_cam_pos, p_near, p_far)[0]
+                                                self.tag_cam, p_near, p_far)[0]
             cube_detected = bool(self.np_random.random() >= cube_prob)
 
         marker_pos = state.marker_pos.copy()
@@ -998,7 +1042,7 @@ class SO101BaseEnv(SO101ArmEnv):
             normal = self.data.site_xmat[self.cube_tag_site_id].reshape(3, 3)[:, 2]
             # Strict band: p_near=1.0 rejects the flaky 65-70° grazing views,
             # so the first camera frame comfortably detects.
-            if marker_dropout_prob(tag_pos, normal[None], self.tag_cam_pos,
+            if marker_dropout_prob(tag_pos, normal[None], self.tag_cam,
                                    p_near=1.0, p_far=0.0)[0] >= 1.0:
                 continue
             if cube_tag_occluded(self.model, self.data, self.cube_tag_site_id,

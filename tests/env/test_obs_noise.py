@@ -152,7 +152,7 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
     env_clean = _pickplace(cfg, obs_noise=None)
     env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
 
-    cam = env_noisy.tag_cam_pos
+    cam = env_noisy.tag_cam_pos       # position, for the camera-frame noise geometry
     focal = env_noisy._focal_px
     kdepth = SIGMAS["tag_depth_factor"]
     # (obs pos slice, obs rot slice, tag size, px knob) per tag, in obs order —
@@ -174,9 +174,10 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
         on, *_ = env_noisy.step(_zero_action())
         qpos_diffs[i] = on[QPOS] - oc[QPOS]
         qvel_diffs[i] = on[QVEL] - oc[QVEL]
-        marker_vis = markers_visible(env_noisy.data, env_noisy.marker_site_ids, cam)
+        marker_vis = markers_visible(env_noisy.data, env_noisy.marker_site_ids, env_noisy.tag_cam)
         cube_vis = cube_tag_visible(env_noisy.model, env_noisy.data,
-                                    env_noisy.cube_tag_site_id, cam, env_noisy.cube_body_id)
+                                    env_noisy.cube_tag_site_id, env_noisy.tag_cam,
+                                    env_noisy.cube_body_id)
         for slot, (pos_sl, rot_sl, size, px) in enumerate(tags):
             if not (cube_vis if slot == 2 else marker_vis[slot]):
                 continue  # a hidden tag holds a stale pose in both envs -> zero diff
@@ -214,14 +215,14 @@ def test_depth_noise_dominates_lateral(cfg):
     is many times larger than in the image plane."""
     env_clean = _pickplace(cfg, obs_noise=None)
     env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
-    cam = env_noisy.tag_cam_pos
+    cam = env_noisy.tag_cam_pos       # position, for the camera-frame noise geometry
     depth_abs, lat_abs = [], []
     for i in range(400):
         env_clean.reset(seed=i)
         env_noisy.reset(seed=i)
         oc, *_ = env_clean.step(_zero_action())
         on, *_ = env_noisy.step(_zero_action())
-        vis = markers_visible(env_noisy.data, env_noisy.marker_site_ids, cam)
+        vis = markers_visible(env_noisy.data, env_noisy.marker_site_ids, env_noisy.tag_cam)
         for slot, pos_sl in enumerate((slice(12, 15), slice(18, 21))):
             if not vis[slot]:
                 continue

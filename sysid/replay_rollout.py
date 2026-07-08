@@ -50,7 +50,7 @@ from src.base_env import (
     obs_dim_for,
     priv_dim_for,
     sample_cube_orientation,
-    tag_cam_world_pos,
+    tag_cam_model,
 )
 from src.lift_env import SO101LiftEnv
 from src.train import make_env, runtime_cfg_from_hydra
@@ -156,7 +156,7 @@ def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float) -> 
     joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n)
                  for n in JOINT_NAMES]
     qposadr = model.jnt_qposadr[joint_ids]
-    cam_pos = tag_cam_world_pos(model, data)
+    cam = tag_cam_model(model, data)
 
     n = len(rec["actions"])
     held_pos = np.zeros((N_MARKERS, 3))
@@ -170,7 +170,7 @@ def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float) -> 
         data.qpos[qposadr] = q
         mujoco.mj_kinematics(model, data)
         pos_now, _ = marker_world_poses(data, site_ids)
-        vis = markers_visible(data, site_ids, cam_pos)
+        vis = markers_visible(data, site_ids, cam)
         held_pos[vis] = pos_now[vis]
         held_age[vis] = rec["marker_age_s"][k]
         held_age[~vis] = np.minimum(MARKER_AGE_CAP_S, held_age[~vis] + control_dt)

@@ -104,7 +104,7 @@ def test_turned_away_tag_freezes_and_ages(env):
     env.data.qpos[env.cube_qpos_idx + 3:env.cube_qpos_idx + 7] = flipped
     mujoco.mj_forward(env.model, env.data)
     assert not cube_tag_visible(env.model, env.data, env.cube_tag_site_id,
-                                env.tag_cam_pos, env.cube_body_id)
+                                env.tag_cam, env.cube_body_id)
 
     prev_age = 0.0
     for _ in range(5):
@@ -244,7 +244,7 @@ def test_arm_occlusion_forces_miss(env):
     frame = _refresh_detection(env)
     assert not frame.cube_detected
     assert not cube_tag_visible(env.model, env.data, env.cube_tag_site_id,
-                                env.tag_cam_pos, env.cube_body_id)
+                                env.tag_cam, env.cube_body_id)
 
 
 def test_cube_hidden_ratio_in_info(env):
