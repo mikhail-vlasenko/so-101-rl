@@ -48,6 +48,7 @@ from src.base_env import (
     marker_world_poses,
     markers_visible,
     obs_dim_for,
+    priv_dim_for,
     sample_cube_orientation,
     tag_cam_world_pos,
 )
@@ -185,6 +186,10 @@ def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float) -> 
             rec["cube"][k - 1],
             np.array([0.0, 0.0, 0.0, LIFT_TASK_ID]),
             rec["actions"][k - 1],
+            # Privileged pad: critic-only dims, never read by the actor
+            # (real/rollout_lift.build_obs does the same). This function's
+            # layout is positions-only markers, i.e. marker_include_rot=False.
+            np.zeros(priv_dim_for(False)),
         ]).astype(np.float32)
         action, _ = policy.predict(obs, deterministic=True)
         pred[k] = np.clip(action, -1.0, 1.0)
@@ -300,7 +305,8 @@ def main() -> int:
     )
 
     policy = load_policy(args.model, LOG_DIR,
-                         obs_dim_for(prev_actions_n, marker_include_rot))
+                         obs_dim_for(prev_actions_n, marker_include_rot)
+                         + priv_dim_for(marker_include_rot))
 
     xml_path = str(REPO_ROOT / SO101LiftEnv.XML_PATH)
     # Open-loop replay ignores observations entirely -> fully clean env.

@@ -148,7 +148,7 @@ def test_default_obs_drops_marker_rotations():
     assert env.obs_dim == obs_dim_for(env.prev_actions_n, marker_include_rot=True) - 6
 
     obs, _ = env.reset(seed=0)
-    assert obs.shape == (env.obs_dim,)
+    assert obs.shape == (env.obs_dim + env.priv_dim,)
     marker_pos, _ = marker_world_poses(env.data, env.marker_site_ids)
     # qpos(6)+qvel(6)=12, then pos_finger(3), pos_wrist(3), marker_age(2),
     # then cube_tag pos(3).

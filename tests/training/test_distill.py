@@ -17,7 +17,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from src.distill import DistillBuffer, _policy_outputs, distill, regress
 from src.lift_env import SO101LiftEnv
 from src.train import (
-    build_fresh_model, obs_norm_for, resume_overrides, runtime_cfg_from_hydra,
+    actor_obs_dim_for, build_fresh_model, obs_norm_for, resume_overrides,
+    runtime_cfg_from_hydra,
 )
 
 REPO_ROOT = "."
@@ -74,8 +75,11 @@ def test_regress_drives_student_toward_teacher(lift_cfg):
     labels must sharply cut the action MSE between them on the label states."""
     venv = _lift_venv(lift_cfg)
     obs_norm = obs_norm_for(lift_cfg, n_substeps=10)
-    student = build_fresh_model(lift_cfg, venv, obs_norm, [64, 64], seed=1, verbose=0)
-    teacher = build_fresh_model(lift_cfg, venv, obs_norm, [64, 64], seed=2, verbose=0)
+    actor_dim = actor_obs_dim_for(lift_cfg)
+    student = build_fresh_model(lift_cfg, venv, obs_norm, [64, 64], seed=1,
+                                actor_obs_dim=actor_dim, verbose=0)
+    teacher = build_fresh_model(lift_cfg, venv, obs_norm, [64, 64], seed=2,
+                                actor_obs_dim=actor_dim, verbose=0)
     teacher.policy.set_training_mode(False)
     device = student.device
 
@@ -108,7 +112,8 @@ def test_regress_leaves_log_std_untouched(lift_cfg):
     """log_std is copied, not regressed — the optimizer must never move it."""
     venv = _lift_venv(lift_cfg)
     obs_norm = obs_norm_for(lift_cfg, n_substeps=10)
-    student = build_fresh_model(lift_cfg, venv, obs_norm, [64, 64], seed=1, verbose=0)
+    student = build_fresh_model(lift_cfg, venv, obs_norm, [64, 64], seed=1,
+                                actor_obs_dim=actor_obs_dim_for(lift_cfg), verbose=0)
     device = student.device
     obs_dim = student.observation_space.shape[0]
     act_dim = student.action_space.shape[0]
@@ -140,7 +145,8 @@ def test_distill_end_to_end_and_resumes(lift_cfg, tmp_path):
     saved to a checkpoint that `resume` loads and fine-tunes."""
     obs_norm = obs_norm_for(lift_cfg, n_substeps=10)
     venv = _lift_venv(lift_cfg)
-    teacher = build_fresh_model(lift_cfg, venv, obs_norm, [64, 64], seed=7, verbose=0)
+    teacher = build_fresh_model(lift_cfg, venv, obs_norm, [64, 64], seed=7,
+                                actor_obs_dim=actor_obs_dim_for(lift_cfg), verbose=0)
     teacher_path = tmp_path / "teacher.zip"
     teacher.save(teacher_path)
     venv.close()
@@ -164,7 +170,8 @@ def test_distill_end_to_end_and_resumes(lift_cfg, tmp_path):
 
     resume_venv = _lift_venv(cfg)
     resumed = PPO.load(out_path, env=resume_venv, **resume_overrides(cfg))
-    weight_key = "mlp_extractor.policy_net.1.weight"
+    # policy_net = [TakeFirst, ObsNorm, Linear, ...] — index 2 is the first Linear.
+    weight_key = "mlp_extractor.policy_net.2.weight"
     before = resumed.policy.state_dict()[weight_key].clone()
     resumed.learn(total_timesteps=16)
     after = resumed.policy.state_dict()[weight_key]

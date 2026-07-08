@@ -51,8 +51,8 @@ from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack
 
 from src.train import (
-    ALGORITHM_REGISTRY, build_fresh_model, env_specs, obs_norm_for,
-    runtime_cfg_from_hydra,
+    ALGORITHM_REGISTRY, actor_obs_dim_for, build_fresh_model, env_specs,
+    obs_norm_for, runtime_cfg_from_hydra,
 )
 
 
@@ -231,6 +231,7 @@ def distill(cfg: DictConfig, orig_dir: str):
     obs_norm = obs_norm_for(cfg, n_substeps)
     net_arch = list(dcfg.net_arch) if dcfg.net_arch is not None else list(cfg.train.net_arch)
     student = build_fresh_model(cfg, vec_env, obs_norm, net_arch, seed,
+                                actor_obs_dim=actor_obs_dim_for(cfg),
                                 tensorboard_log=None, verbose=0)
     device = student.device
 

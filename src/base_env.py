@@ -20,8 +20,11 @@ from real.marker_spec import ARM_TAG_TO_SITE, CUBE_TAG_ID, TAG_SIZE_MM
 
 
 def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
-    """OBS_DIM = qpos(6) + qvel(6) + markers(2*M) + marker_age(2) + cube_tag(6)
-    + cube_age(1) + extra(4) + prev_actions(N*6).
+    """Actor block: qpos(6) + qvel(6) + markers(2*M) + marker_age(2) + cube_tag(6)
+    + cube_age(1) + extra(4) + prev_actions(N*6). The full env observation is
+    [this actor block | priv_dim_for privileged tail]; only the critic may read
+    the tail (asymmetric critic — the actor structurally slices it off, see
+    src/networks.TakeFirst).
 
     Each marker contributes its world xyz (M=3); when marker_include_rot is true it
     also contributes a world rotation vector (axis-angle, +3 dims, M=6) — the same
@@ -40,6 +43,23 @@ def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
     marker_dim = 6 if marker_include_rot else 3
     # 12 = qpos(6) + qvel(6); 11 = cube_tag(3+3) + cube_age(1) + extra(4)
     return 12 + N_MARKERS * marker_dim + N_MARKERS + 11 + prev_actions_n * 6
+
+
+def priv_dim_for(marker_include_rot: bool = False) -> int:
+    """Privileged tail appended after the actor block (asymmetric critic):
+    true cube pose (3+3, world pos + axis-angle) + cube velocity (6, free-joint
+    qvel) + jaw contact flags (2) + the episode's sampled DR latents: qpos bias
+    (6), per-tag marker pos bias (2*3), marker rot bias (2*3, only when the rot
+    obs it perturbs is in the actor block), cube tag pos/rot bias (3+3),
+    common-mode pos bias (3), camera pipeline delay (1), sponge half extents
+    (3). Contents built by SO101BaseEnv._priv_tail; normalization constants in
+    src/obs_norm.py."""
+    # 3+3+6+2 cube pose/vel + jaws; 6 qpos bias; 3+3+3 cube/cube-rot/common
+    # bias; 1 cam delay; 3 half extents
+    dim = 14 + 6 + N_MARKERS * 3 + 9 + 1 + 3
+    if marker_include_rot:
+        dim += N_MARKERS * 3
+    return dim
 
 
 # AprilTags glued to the arm (ids per real/marker_spec.py ROLES): "finger" on
@@ -514,7 +534,10 @@ class SO101BaseEnv(SO101ArmEnv):
         # (real/marker_obs.py), so its calibration/detection error moves all tags
         # together, not independently. Drawn in reset from obs_bias.
         self._common_pos_bias = np.zeros(3)
+        # Actor block width; the full observation appends the privileged tail
+        # (asymmetric critic — see _priv_tail).
         self.obs_dim = obs_dim_for(self.prev_actions_n, self.marker_include_rot)
+        self.priv_dim = priv_dim_for(self.marker_include_rot)
 
         self.marker_site_ids = []
         for name in MARKER_SITE_NAMES:
@@ -621,7 +644,7 @@ class SO101BaseEnv(SO101ArmEnv):
 
         self._parse_config(task_cfg)
 
-        obs_high = np.full(self.obs_dim, np.inf, dtype=np.float32)
+        obs_high = np.full(self.obs_dim + self.priv_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
     def _parse_config(self, cfg):
@@ -795,10 +818,37 @@ class SO101BaseEnv(SO101ArmEnv):
         cube_age = np.clip(self.data.time - cube_last_t, 0.0, MARKER_AGE_CAP_S)
         return markers, marker_age, cube_age
 
+    def _priv_tail(self):
+        """Privileged tail appended after the actor block (asymmetric critic,
+        priv_dim_for): ground truth plus the episode's sampled DR latents. Only
+        the value function reads these dims — the actor slices them off before
+        its first layer (src/networks.TakeFirst) — so the "policy sees no GT"
+        contract holds structurally, and the critic is discarded at deployment
+        (real rollouts pad these dims with zeros that are never read). Latents
+        whose DR knob is off stay at their zero init — truthfully "no error".
+        marker_dropout near/far are run constants, not per-episode samples, so
+        they carry no information and are not included."""
+        cube_quat = self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7]
+        cube_rot = np.empty(3)
+        mujoco.mju_quat2Vel(cube_rot, cube_quat, 1.0)
+        # Free-joint qvel: linear (world frame) + angular (body frame).
+        cube_vel = self.data.qvel[self.cube_dofadr:self.cube_dofadr + 6]
+        fixed_contact, moving_contact = self._jaw_contact_flags()
+        parts = [self._get_cube_pos(), cube_rot, cube_vel,
+                 [float(fixed_contact), float(moving_contact)],
+                 self._qpos_bias, self._marker_pos_bias.flatten()]
+        if self.marker_include_rot:
+            parts.append(self._marker_rot_bias.flatten())
+        parts.extend([self._cube_bias, self._cube_rot_bias, self._common_pos_bias,
+                      [self._camera.pipeline_delay_s], self.cube_half_extents])
+        return np.concatenate(parts)
+
     def _compute_obs(self):
-        """Build the policy observation. qpos/qvel take the encoder path (fresh;
-        qvel differenced like real/rollout_common.ArmLoop); markers and the
-        cube tag serve the held per-tag detections with their ages."""
+        """Build the policy observation: [actor block | privileged tail].
+        qpos/qvel take the encoder path (fresh; qvel differenced like
+        real/rollout_common.ArmLoop); markers and the cube tag serve the held
+        per-tag detections with their ages; the tail is critic-only ground
+        truth (_priv_tail)."""
         qpos, qvel = self._encoder_obs()
         markers, marker_age, cube_age = self._tag_obs(
             self._held_marker_pos, self._held_marker_rot,
@@ -807,7 +857,8 @@ class SO101BaseEnv(SO101ArmEnv):
                                self._held_cube_tag_pos, self._held_cube_tag_rot,
                                [cube_age],
                                self._obs_extra(self._held_cube_tag_pos),
-                               self._prev_actions.flatten()]).astype(np.float32)
+                               self._prev_actions.flatten(),
+                               self._priv_tail()]).astype(np.float32)
 
     def privileged_obs(self):
         """The observation a marker_always_visible=true policy would see on the
@@ -826,10 +877,11 @@ class SO101BaseEnv(SO101ArmEnv):
                                self._held_cube_tag_pos_priv, self._held_cube_tag_rot_priv,
                                [cube_age],
                                self._obs_extra(self._held_cube_tag_pos_priv),
-                               self._prev_actions.flatten()]).astype(np.float32)
+                               self._prev_actions.flatten(),
+                               self._priv_tail()]).astype(np.float32)
 
-    def _n_jaw_contacts(self):
-        """Number of distinct gripper jaws (0, 1, or 2) currently touching the cube."""
+    def _jaw_contact_flags(self):
+        """(fixed, moving): whether each gripper jaw currently touches the cube."""
         fixed_contact = False
         moving_contact = False
         for i in range(self.data.ncon):
@@ -845,6 +897,11 @@ class SO101BaseEnv(SO101ArmEnv):
                 fixed_contact = True
             if other in self.moving_jaw_geom_ids:
                 moving_contact = True
+        return fixed_contact, moving_contact
+
+    def _n_jaw_contacts(self):
+        """Number of distinct gripper jaws (0, 1, or 2) currently touching the cube."""
+        fixed_contact, moving_contact = self._jaw_contact_flags()
         return int(fixed_contact) + int(moving_contact)
 
     def _has_gripper_contact(self):

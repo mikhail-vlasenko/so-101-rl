@@ -15,7 +15,7 @@ from gymnasium import spaces
 from hydra import compose, initialize
 from stable_baselines3 import PPO, SAC
 
-from src.base_env import obs_dim_for
+from src.base_env import obs_dim_for, priv_dim_for
 from src.lift_env import SO101LiftEnv
 from src.networks import LayerNormActorCriticPolicy, LayerNormSACPolicy, ObsNorm
 from src.obs_norm import build_obs_norm, build_reach_obs_norm
@@ -38,7 +38,7 @@ def test_shapes_match_obs_layout():
     for prev_n in (0, 1, 2):
         for include_rot in (False, True):
             center, scale = build_obs_norm(prev_n, include_rot, ACTION_SCALE, N_SUBSTEPS)
-            expected = obs_dim_for(prev_n, include_rot)
+            expected = obs_dim_for(prev_n, include_rot) + priv_dim_for(include_rot)
             assert center.shape == scale.shape == (expected,)
             assert np.all(scale > 0)
             assert np.all(np.isfinite(center)) and np.all(np.isfinite(scale))
@@ -64,7 +64,7 @@ def test_rollout_obs_within_bounds(env_name, env_cls, cfg_key, xml):
     env = env_cls(env_cfg=cfg[cfg_key], xml_path=xml, cfg=runtime_cfg_from_hydra(cfg))
     center, scale = build_obs_norm(int(cfg.prev_actions_n), False,
                                    float(cfg.action_scale), int(cfg[cfg_key].n_substeps))
-    assert center.shape == (env.obs_dim,)
+    assert center.shape == (env.obs_dim + env.priv_dim,)
 
     worst = 0.0
     obs, _ = env.reset(seed=0)

@@ -42,7 +42,7 @@ import torch
 import torch.nn as nn
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.networks import ObsNorm
+from src.networks import ObsNorm, TakeFirst
 from src.train import ALGORITHM_REGISTRY
 
 
@@ -110,7 +110,11 @@ def _widen_sequential(old_seq, new_seq, rng, noise):
     in_cols, in_facs = None, None          # None -> this layer's input isn't widened
     last_map, last_facs = None, None
     for old_m, new_m in zip(old_seq, new_seq):
-        if isinstance(old_m, ObsNorm):
+        if isinstance(old_m, TakeFirst):
+            # Asymmetric-critic actor slice: width-only widening never changes
+            # the obs layout, so the slice must carry over unchanged.
+            assert old_m.n == new_m.n, (old_m.n, new_m.n)
+        elif isinstance(old_m, ObsNorm):
             new_m.center.copy_(old_m.center)
             new_m.scale.copy_(old_m.scale)
         elif isinstance(old_m, nn.Linear):

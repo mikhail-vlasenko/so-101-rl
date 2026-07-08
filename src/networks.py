@@ -16,6 +16,24 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.sac.policies import Actor, SACPolicy
 
 
+class TakeFirst(nn.Module):
+    """Pass through only the first n input dims.
+
+    The asymmetric critic's actor slice: the env obs is [actor block |
+    privileged tail] and this module, prepended to the actor MLP, makes it
+    structurally impossible for the policy to read the tail. Living in the
+    network graph (rather than in calling convention), the constraint rides
+    through checkpoints and every predict/rollout path untouched.
+    """
+
+    def __init__(self, n: int):
+        super().__init__()
+        self.n = int(n)
+
+    def forward(self, x):
+        return x[..., :self.n]
+
+
 class ObsNorm(nn.Module):
     """Fixed affine input normalization: (x - center) / scale.
 
@@ -83,6 +101,7 @@ class LayerNormMlpExtractor(nn.Module):
         activation_fn: type[nn.Module],  # ignored — always LayerNorm + GELU
         device: str = "auto",
         obs_norm: tuple | None = None,
+        actor_obs_dim: int | None = None,
     ):
         super().__init__()
         if isinstance(net_arch, dict):
@@ -92,7 +111,22 @@ class LayerNormMlpExtractor(nn.Module):
             pi_arch = list(net_arch)
             vf_arch = list(net_arch)
 
-        self.policy_net = build_mlp(feature_dim, pi_arch, obs_norm=obs_norm)
+        if actor_obs_dim is None:
+            # Symmetric: both heads consume the full observation.
+            self.policy_net = build_mlp(feature_dim, pi_arch, obs_norm=obs_norm)
+        else:
+            # Asymmetric critic: the obs is [actor block | privileged tail];
+            # the actor slices its block off before its first layer (its
+            # ObsNorm covers only those dims), while the value net below
+            # consumes the full vector, privileged tail included.
+            assert 0 < actor_obs_dim < feature_dim, (actor_obs_dim, feature_dim)
+            actor_norm = None
+            if obs_norm is not None:
+                actor_norm = (np.asarray(obs_norm[0])[:actor_obs_dim],
+                              np.asarray(obs_norm[1])[:actor_obs_dim])
+            self.policy_net = nn.Sequential(
+                TakeFirst(actor_obs_dim),
+                *build_mlp(actor_obs_dim, pi_arch, obs_norm=actor_norm))
         self.value_net = build_mlp(feature_dim, vf_arch, obs_norm=obs_norm)
         self.latent_dim_pi = pi_arch[-1]
         self.latent_dim_vf = vf_arch[-1]
@@ -108,10 +142,17 @@ class LayerNormMlpExtractor(nn.Module):
 
 
 class LayerNormActorCriticPolicy(ActorCriticPolicy):
-    """ActorCriticPolicy (PPO/A2C) using LayerNorm + GELU MLPs."""
+    """ActorCriticPolicy (PPO/A2C) using LayerNorm + GELU MLPs.
 
-    def __init__(self, *args, obs_norm: tuple | None = None, **kwargs):
+    actor_obs_dim (asymmetric critic): when set, the actor consumes only the
+    first actor_obs_dim obs dims (TakeFirst) while the critic sees the full
+    vector including the privileged tail. Rides in policy_kwargs, so
+    checkpoints restore the slice with the weights."""
+
+    def __init__(self, *args, obs_norm: tuple | None = None,
+                 actor_obs_dim: int | None = None, **kwargs):
         self._obs_norm = obs_norm
+        self._actor_obs_dim = actor_obs_dim
         super().__init__(*args, **kwargs)
 
     def _build_mlp_extractor(self) -> None:
@@ -121,6 +162,7 @@ class LayerNormActorCriticPolicy(ActorCriticPolicy):
             activation_fn=self.activation_fn,
             device=self.device,
             obs_norm=self._obs_norm,
+            actor_obs_dim=self._actor_obs_dim,
         )
 
 

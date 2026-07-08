@@ -10,7 +10,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecNormalize
-from src.base_env import RuntimeEnvConfig
+from src.base_env import RuntimeEnvConfig, obs_dim_for
 from src.callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EpisodeLengthCallback,
     EvalStatsCallback, EvalStatsTracker, FloorContactCallback, LiftSuccessCallback,
@@ -173,7 +173,25 @@ def obs_norm_for(cfg, n_substeps: int) -> tuple:
     return obs_center.tolist() * frame_stack, obs_scale.tolist() * frame_stack
 
 
-def build_fresh_model(cfg, env, obs_norm, net_arch, seed, *,
+def actor_obs_dim_for(cfg) -> int | None:
+    """Actor input width for the asymmetric critic (src/networks.TakeFirst).
+
+    The cube envs' observation is [actor block | privileged tail]
+    (base_env.obs_dim_for / priv_dim_for) and only the critic may read the
+    tail; the actor's slice width is the per-frame actor block. None for
+    reach, which has no privileged tail (symmetric nets)."""
+    if cfg.env_name == "reach":
+        return None
+    assert cfg.algorithm == "ppo", \
+        "the asymmetric-critic obs layout is wired for PPO only (the SAC actor " \
+        "would consume the privileged tail)"
+    assert int(cfg.frame_stack) == 1, \
+        "frame_stack > 1 would fold the privileged tail into the actor slice; " \
+        "decide the stacked layout when the obs-history feature lands"
+    return obs_dim_for(int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+
+
+def build_fresh_model(cfg, env, obs_norm, net_arch, seed, *, actor_obs_dim,
                       tensorboard_log=None, verbose=1):
     """Construct a from-scratch SB3 model with the fixed ObsNorm baked into its
     policy. Shared by training's cold start and the distillation rig's student,
@@ -181,6 +199,14 @@ def build_fresh_model(cfg, env, obs_norm, net_arch, seed, *,
     hyperparameters — and the student saves to a checkpoint `resume` restores
     directly."""
     algo_cls, algo_kwargs_fn, policy_cls = ALGORITHM_REGISTRY[cfg.algorithm]
+    policy_kwargs = {
+        "net_arch": list(net_arch),
+        "obs_norm": obs_norm,
+    }
+    # Only the PPO policy accepts the asymmetric-critic slice; reach (the one
+    # symmetric layout, actor_obs_dim None) omits the key so SAC stays valid.
+    if actor_obs_dim is not None:
+        policy_kwargs["actor_obs_dim"] = int(actor_obs_dim)
     return algo_cls(
         policy_cls,
         env,
@@ -188,10 +214,7 @@ def build_fresh_model(cfg, env, obs_norm, net_arch, seed, *,
                                        cfg.train.learning_rate, cfg.train.lr_min),
         batch_size=cfg.train.batch_size,
         gamma=cfg.train.gamma,
-        policy_kwargs={
-            "net_arch": list(net_arch),
-            "obs_norm": obs_norm,
-        },
+        policy_kwargs=policy_kwargs,
         stats_window_size=1,
         verbose=verbose,
         seed=int(seed) if seed is not None else None,
@@ -304,6 +327,7 @@ def train(cfg: DictConfig):
     else:
         model = build_fresh_model(
             cfg, env, obs_norm, list(cfg.train.net_arch), seed,
+            actor_obs_dim=actor_obs_dim_for(cfg),
             tensorboard_log=os.path.join(orig_dir, "logs"), verbose=1)
 
     print(f"Training {algo_name.upper()} ({cfg.env_name}) for {cfg.train.total_timesteps} steps...")

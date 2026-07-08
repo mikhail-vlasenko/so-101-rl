@@ -64,6 +64,7 @@ def main(cfg: DictConfig):
         publisher = SimStreamPublisher(inner_env.model, int(cfg.stream_port))
 
     drag_ratios = []
+    successes = []
     try:
         for ep in range(episodes):
             seed = (base_seed + ep) if base_seed is not None else int(np.random.SeedSequence().entropy % (2**31))
@@ -82,15 +83,21 @@ def main(cfg: DictConfig):
                     publisher.publish(inner_env.data)
             extras = f"  seed={seed}"
             if "placed" in info:
+                successes.append(float(info["placed"]))
                 extras += f"  placed={info['placed']}"
+            elif "lift_success" in info:
+                successes.append(float(info["lift_success"]))
+                extras += f"  lift_success={info['lift_success']}"
             if "max_cube_height" in info:
                 extras += f"  max_height={info['max_cube_height']:.3f}"
             if "cube_drag_ratio" in info:
                 drag_ratios.append(info["cube_drag_ratio"])
                 extras += f"  drag={info['cube_drag_ratio']:.3f}"
             print(f"Episode {ep + 1}/{episodes}: return={total_reward:.2f}{extras}")
+        if successes:
+            print(f"\nSuccess rate over {len(successes)} episodes: {np.mean(successes):.3f}")
         if drag_ratios:
-            print(f"\nMean cube_drag_ratio over {len(drag_ratios)} episodes: {np.mean(drag_ratios):.3f}")
+            print(f"Mean cube_drag_ratio over {len(drag_ratios)} episodes: {np.mean(drag_ratios):.3f}")
     except KeyboardInterrupt:
         pass
     finally:

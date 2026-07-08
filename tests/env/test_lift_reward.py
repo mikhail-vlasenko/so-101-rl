@@ -33,7 +33,7 @@ def _cfg():
 def test_env_resets_and_steps():
     env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     obs, _ = env.reset(seed=0)
-    assert obs.shape == (env.obs_dim,)
+    assert obs.shape == (env.obs_dim + env.priv_dim,)
     for _ in range(5):
         obs, reward, term, trunc, info = env.step(env.action_space.sample())
         assert np.isfinite(reward)

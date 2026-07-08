@@ -9,8 +9,10 @@ stale tags leaking in, or a desynced encoder read — silently corrupts every
 label.
 
 Obs layout (lift/pickplace, prev_actions_n=1, marker_include_rot=False):
-[qpos(6), qvel(6), markers(2*3), marker_age(2), cube_tag_pos(3),
- cube_tag_rot(3), cube_age(1), extra(4), prev_actions(6)] = 37 dims.
+actor block [qpos(6), qvel(6), markers(2*3), marker_age(2), cube_tag_pos(3),
+ cube_tag_rot(3), cube_age(1), extra(4), prev_actions(6)] = 37 dims, followed
+by the privileged tail (priv_dim_for = 39 dims, critic-only ground truth) —
+identical in both views, since it is GT either way.
 """
 
 import numpy as np
@@ -18,7 +20,7 @@ import pytest
 from hydra import compose, initialize
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.base_env import RuntimeEnvConfig
+from src.base_env import RuntimeEnvConfig, priv_dim_for
 from src.lift_env import SO101LiftEnv
 from src.pickplace_env import SO101PickPlaceEnv
 
@@ -160,5 +162,5 @@ def test_env_method_privileged_obs_through_vec_env():
         env_cfg=_LIFT_ENV_CFG, xml_path="so101/scene_lift.xml", cfg=runtime)])
     venv.reset()
     priv = np.stack(venv.env_method("privileged_obs"))
-    assert priv.shape == (1, 37)
+    assert priv.shape == (1, 37 + priv_dim_for(False))
     venv.close()

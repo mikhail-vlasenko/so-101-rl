@@ -50,6 +50,7 @@ from src.base_env import (
     marker_world_poses,
     markers_visible,
     obs_dim_for,
+    priv_dim_for,
     sample_cube_orientation,
     tag_cam_world_pos,
 )
@@ -123,12 +124,17 @@ def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
               cube_tag_pos: np.ndarray, cube_tag_rot: np.ndarray, cube_age: float,
               prev_actions: np.ndarray, marker_include_rot: bool) -> np.ndarray:
     """Match SO101LiftEnv._compute_obs: qpos+qvel+markers+marker_age+
-    cube_tag(pos+rot)+cube_age+[0,0,0,task_id]+prev_actions.
+    cube_tag(pos+rot)+cube_age+[0,0,0,task_id]+prev_actions+privileged pad.
 
     Marker and cube-tag poses/ages come from the camera pipeline
     (--marker-source camera) or the FK stand-in on the lockstep sim — held
     last-detected poses either way. marker_include_rot mirrors the env:
     marker positions only when false (the cube tag always carries its rot).
+
+    The trailing priv_dim_for dims are the asymmetric critic's privileged
+    tail: only the value function reads them in training and the actor
+    structurally slices them off (src/networks.TakeFirst), so at deployment
+    they are zero-padded and never read.
     """
     extra = np.array([0.0, 0.0, 0.0, LIFT_TASK_ID], dtype=np.float32)
     markers = (np.hstack([marker_pos, marker_rot]).flatten()
@@ -141,7 +147,9 @@ def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
                            cube_tag_rot.astype(np.float32),
                            np.array([cube_age], dtype=np.float32),
                            extra,
-                           prev_actions.flatten().astype(np.float32)]).astype(np.float32)
+                           prev_actions.flatten().astype(np.float32),
+                           np.zeros(priv_dim_for(marker_include_rot),
+                                    dtype=np.float32)]).astype(np.float32)
 
 
 def plot_rollout(out_path: Path, rows: list[dict], target_height: float,
@@ -312,7 +320,8 @@ def main() -> int:
     cube_tag_site_pos = model.site_pos[cube_tag_site_id].copy()
 
     policy = load_policy(args.model, LOG_DIR,
-                         obs_dim_for(prev_actions_n, marker_include_rot))
+                         obs_dim_for(prev_actions_n, marker_include_rot)
+                         + priv_dim_for(marker_include_rot))
 
     rng = np.random.default_rng(args.seed)
     cube_xy_init = rng.uniform(cube_low, cube_high)

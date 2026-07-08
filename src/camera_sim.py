@@ -59,6 +59,13 @@ class CameraSim:
         self._next_capture_t = 0.0
         self._delay = 0.0
 
+    @property
+    def pipeline_delay_s(self) -> float:
+        """This episode's sampled capture->available delay (drawn in reset;
+        0.0 for a synchronous camera). A privileged DR latent for the
+        asymmetric critic (SO101BaseEnv._priv_tail)."""
+        return self._delay
+
     @classmethod
     def synchronous(cls, control_dt: float) -> "CameraSim":
         """Zero-latency camera (dr=none / plain env construction): one frame is

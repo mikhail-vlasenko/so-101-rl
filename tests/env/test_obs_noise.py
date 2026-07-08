@@ -14,7 +14,7 @@ import pytest
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
-from src.base_env import RuntimeEnvConfig, cube_tag_visible, markers_visible
+from src.base_env import RuntimeEnvConfig, cube_tag_visible, markers_visible, priv_dim_for
 from src.lift_env import SO101LiftEnv
 from src.marker_noise import pos_noise_sigmas
 from src.pickplace_env import SO101PickPlaceEnv
@@ -41,8 +41,9 @@ SIGMAS = {
     "tag_depth_factor": 2.0,
 }
 
-# Obs layout: [qpos(6), qvel(6), markers(2*6), marker_age(2), cube_tag_pos(3),
-# cube_tag_rot(3), cube_age(1), task_extra(4), prev_actions(2*6)]
+# Actor-block layout: [qpos(6), qvel(6), markers(2*6), marker_age(2),
+# cube_tag_pos(3), cube_tag_rot(3), cube_age(1), task_extra(4),
+# prev_actions(2*6)]; the privileged tail (priv_dim_for) follows.
 QPOS = slice(0, 6)
 QVEL = slice(6, 12)
 MARKER_AGE = slice(24, 26)
@@ -53,7 +54,7 @@ C2T = slice(33, 35)
 RING_H = 35
 TASK_ID = 36
 PREV_ACTIONS = slice(37, 49)
-OBS_DIM = 49
+OBS_DIM = 49 + priv_dim_for(True)
 
 
 @pytest.fixture(scope="module")
