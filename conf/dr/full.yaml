@@ -38,10 +38,10 @@ obs_noise:
 # the real rig subtracts the bulk calibration offset pre-policy — see calibration_plan.md.
 obs_bias:
   qpos_sigma: 0.01
-  marker_pos_sigma: 0.005    # m,    per-tag glue placement / pose-estimate error
-  marker_rot_sigma: 0.05     # rad,  tag alignment error (~3°)
-  cube_sigma: 0.005
-  marker_common_sigma: 0.0025 # m,   shared shift on all tags (table calib; ~extrinsics.yaml spread_mm 2.28)
+  marker_pos_sigma: 0.002    # m,    per-tag glue placement / pose-estimate error
+  marker_rot_sigma: 0.02     # rad,  tag alignment error (~3°)
+  cube_sigma: 0.002
+  marker_common_sigma: 0.0015 # m,   shared shift on all tags (table calib; ~extrinsics.yaml spread_mm 2.28)
 
 # Observation latency (sim2real): only camera-derived obs (markers, cube) lag.
 # Encoder reads are ~2 ms on the bus — effectively fresh at a 66.7 ms tick — so
