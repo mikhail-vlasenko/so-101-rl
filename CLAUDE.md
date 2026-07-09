@@ -1,125 +1,111 @@
 # MuJoCo RL Training — SO-101
 
-## Goal
+Train RL policies in MuJoCo for the SO-101 arm and run them on the real arm.
+Scene: `so101/scene.xml`, meshes from
+[MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101).
+Long-term tasks and known sim-to-real gaps live in `TODO.md` — check it, and add
+follow-ups there instead of inlining them.
 
-Train RL policies in MuJoCo to make the SO-101 arm perform basic manipulation tasks.
+Module docstrings and `conf/*.yaml` comments are the primary documentation. This
+file holds only cross-file contracts, gotchas, and commands — keep it that way.
 
-## TODO
+## Map
 
-Long-term tasks and ideas live in `TODO.md` at the repo root. Check it for known sim-to-real gaps and other backlog items; add to it when surfacing follow-ups that shouldn't be inlined into the current change.
+- `src/` — envs (`base_env.py` two-layer base; reach/lift/pickplace on top),
+  training (`train.py`, `eval.py`, `distill.py`), obs pipeline (`obs_history.py`,
+  `obs_norm.py`, `camera_sim.py`, `marker_noise.py`), control chain (`units.py`,
+  `servo_profile.py`)
+- `conf/` — Hydra config. `config.yaml` owns all hyperparameters; groups: `env`
+  (reach/lift/pickplace/multitask), `dr` + `shaping` (curriculum stages)
+- `real/` — rollout scripts (`rollout_common.py` core), calibration stack, digital
+  twin (`python -m real.twin.digital_twin`)
+- `sysid/` — real-vs-sim dynamics fitting (record → replay → analyze → fit) and
+  probes; the fit is baked into `so101.xml`
+- `panel/` — web control panel (`python -m panel`, port 8800)
+- `tests/{env,training,control,sysid,panel}` — pytest
+- `scripts/` — diagnostics + curriculum wrapper
 
-## Model
+## Contracts and gotchas
 
-- Scene: `so101/scene.xml` (includes `so101.xml` + floor/lighting)
-- Assets: `so101/assets/` (STL meshes)
-- Source: [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101)
-- Requires MuJoCo >= 3.1.3 (installed: 3.5.0)
+- **Observation**: `[actor block per history tap | privileged tail]`; the tail is
+  critic-only and zero-padded on the real arm (layout doc:
+  `src/base_env.obs_dim_for` / `priv_dim_for`). The policy sees AprilTag poses (arm
+  markers + the sponge's tag), never GT state; a hidden tag holds its last pose
+  while its age channel grows.
+- **Checkpoint compatibility**: anything that changes obs dim (`history_taps`,
+  `prev_actions_n`, `marker_include_rot`) or the `src/obs_norm.py` constants
+  invalidates checkpoints. Migrate with `src/distill.py`, not checkpoint surgery,
+  and always follow distillation with a short PPO fine-tune (`resume=`).
+- **Sim/real twins**: some behavior is implemented twice and must stay identical —
+  hold-last-pose/age (`src/base_env.py` ↔ `real/marker_obs.py`), `ObsHistory`
+  feeding, `action_to_target`. Change one side, change the other; contract tests in
+  `tests/` pin them.
+- `src/units.py` is the single source of the action → rad → servo-raw chain; never
+  hand-derive the raw clamp.
+- `use_servo_profile` stays **on**: the `so101.xml` sysid fit was refit with the
+  profile, so the sim is under-damped without it. Keep any new sim driver on this
+  flag.
+- New real rollout scripts must build on `ArmLoop` (`real/rollout_common.py`) —
+  never reimplement the per-tick command shaping.
+- **Curriculum** = the `dr`/`shaping` config groups + the crutch flags
+  (`marker_always_visible`, `cube_smallest_face_only`). None change obs dim, so
+  they can flip across `resume` (which re-applies the composed config's
+  hyperparameters — see `conf/config.yaml`). Shaping goes `none → light → full`;
+  skipping `light` makes the policy stop touching the cube.
+- The manipulated object is a 6×4×2.5 cm sponge, still named `cube_*` everywhere.
+- The panel has **no auth** — `--host 0.0.0.0` only on trusted networks. Keep
+  `panel/registry.py` updated when adding scripts or args. `--reload` SIGINTs every
+  live run on each edit — don't use it mid-rollout.
 
-## Tasks
+## Usage
 
-### Shared
-
-- `src/base_env.py` — two layers. `SO101ArmEnv`: shared arm machinery (model/joint setup, the clip → `action_to_target` → servo-profile → substep drive, prev-actions, collision/floor checks, rendering) that `SO101ReachEnv` also builds on. `SO101BaseEnv` adds the cube + camera obs pipeline used by lift/pickplace. Its observation is `[actor block per history tap | privileged tail]` (asymmetric critic + lag-tap history): the actor block (`obs_dim_for`, 31 + 6·prev_actions_n dims) is everything the deployed policy sees, served at each configured tick lag (`conf/config.yaml:history_taps`, e.g. `[0,4,16,48]` ≈ 0/0.27/1.07/3.2 s at 15 Hz; `[0]` = no history) through the shared ring buffer `src/obs_history.ObsHistory` — the identical class the real rollout scripts feed per tick, boot-seeded with the first frame on both sides (contract-tested in `tests/env/test_obs_history.py`); the privileged tail (`priv_dim_for`, 39 dims — true cube pose/velocity, per-jaw contact flags, and the episode's sampled DR latents: obs biases, camera pipeline delay, sponge half-extents) stays a **single untapped copy** (its latents are per-episode constants) and is read **only by the value function**, which is discarded at deployment — the actor structurally slices off the tail (but sees every tap) before its first layer (`src/networks.TakeFirst`, riding in `policy_kwargs.actor_obs_dim`), and real rollout scripts zero-pad it (never read). `history_taps` changes obs dim: it must match the checkpoint everywhere, and a taps migration goes through `src/distill.py` (`distill.teacher_obs=current`), not checkpoint surgery. The policy sees no GT end-effector or object position; it gets the world poses (xyz; + axis-angle rotation vector only when `marker_include_rot`) of the two arm AprilTag marker sites (`marker_finger`, `marker_wrist` in `so101.xml`) plus the **raw pose (xyz + rotation vector, always both) of the sponge's tag** (id 1, `cube_tag` site on the largest face — never inferred back to a sponge center), matching what the camera measures on the real rig. An undetected tag (grazing angle, outside the camera's field of view — a pinhole projection through the calibrated intrinsics onto the real 1280×720 frame, `src/base_env.CameraModel.in_view`, replacing the old world-height proxy — DR dropout, or — cube tag only — an `mj_ray` occlusion test against the arm/ring) **holds its last detected pose** while a per-tag age channel (seconds since that pose's capture, capped at `MARKER_AGE_CAP_S`) grows; a tag never seen since reset reads all-zero with age at the cap — `real/marker_obs.py` implements the identical convention. Observation latency is per-modality: marker/cube-tag obs come from simulated camera frames (`src/camera_sim.py` — 30 fps schedule, per-episode pipeline delay from `conf/dr/*.yaml:cam_latency`, measured by `sysid/probe_cam_latency.py`), so even a freshly-detected tag's age reads the pipeline-delay sawtooth, while qpos stays fresh (the real bus read is ~2 ms) and qvel is the backward difference of consecutive qpos obs over the tick, exactly like `ArmLoop`. The manipulated object is a 6×4×2.5 cm sponge stand-in (still named `cube_*` everywhere) that spawns standing on a random non-largest face, rejection-sampled (after the arm is placed) so its tag is genuinely visible to the camera at reset — strictly facing, unoccluded, no arm contact — matching the real protocol of placing the sponge where the camera sees it. `SO101BaseEnv.privileged_obs()` returns a second view of the same tick — the always-fresh-tag observation a `marker_always_visible=true` policy would see (an unconditionally-ingested mirror of the held-tag state, no dropout, no hold-last-pose), sharing the paired `_compute_obs`'s cached encoder read so the two views differ only in the tag channels. It is the dual-obs core the distillation rig (`src/distill.py`) queries the teacher on; the env's own policy never sees it.
-- `src/obs_norm.py` — fixed affine input normalization: per-dimension (center, scale) constants derived from the XML joint limits, `src/units.py` speed bounds, and hand-set workspace boxes. Applied as the policy network's first layer (`src/networks.ObsNorm`, non-trainable buffers), so training, eval, and real rollouts share the identical transform through the checkpoint — nothing is estimated from data (this replaced the old input BatchNorm). Changing its constants invalidates checkpoints exactly like an obs-dim change; `tests/training/test_obs_norm.py` bounds-checks the boxes against full-DR rollouts.
-- `src/units.py` — single source of truth for the action → rad → servo-raw-unit chain: `action_to_target` (quantization + stiction deadzone, used by sim envs and real rollouts alike), `max_raw_delta_per_step(action_scale)` (per-tick real-bus safety clamp, always derived, never hard-coded), and the Feetech speed/accel register unit conversions
-- `src/servo_profile.py` — sim-side model of the Feetech firmware's trapezoidal motion profile (`SERVO_SPEED`/`SERVO_ACCEL` registers) plus per-tick sub-target interpolation. Gated by `use_servo_profile` (`conf/config.yaml`), **on by default**: the baked `so101.xml` sysid fit was refit with the profile, so its reduced damping/armature only match the real arm when the profile carries the lag. (Historically it was off — with it on, lift became unlearnable on the old pre-refit numbers; see `tests/test_profile_stall.py`.) With it on, the training envs feed `data.ctrl` from `ServoProfile.tick`; with it off they write the raw tick target. `sysid.replay_sim` always uses the profile. Keep any new sim driver on this flag.
-
-### Lift
-
-Grasp a cube and lift it to 10cm. Simpler grasping prerequisite for pick-and-place.
-
-- `so101/scene_lift.xml` — scene with cube only
-- `src/lift_env.py` — Gymnasium env (height-progress reward)
-- `conf/env/lift.yaml` — env config
-
-### Pick and Place
-
-Pick up a cube and place it at a target location. 3-phase task: REACH → PLACE → RETURN.
-
-- `so101/scene_pickplace.xml` — scene with free-body cube, place target, and ring
-- `src/pickplace_env.py` — Gymnasium env (phase-based reward)
-- `conf/env/pickplace.yaml` — env config
-
-## Real arm
-
-- `real/rollout_common.py` — shared core for every real-arm policy rollout: Hydra config compose, policy loading with obs-dim check, common CLI args (`--execute`, `--slow`, `--ema-alpha`, `--interp-hz`, ...), and `ArmLoop`, which owns the safety-critical per-tick command shaping (training-matched `action_to_target` quantization, derived raw clamp, sub-target streaming, `--slow` time dilation, sim-time qvel). `real/rollout_lift.py` and `real/rollout_real.py` build on it and own only observation construction, termination, and plots. New rollout scripts must go through `ArmLoop` — never reimplement the tick. Contract-tested against a fake bus in `tests/test_arm_loop.py`.
-- `real/twin/digital_twin.py` — MuJoCo passive viewer + tkinter side panel that mirrors the real SO-101 arm's encoders into MuJoCo and lets the user verify the rad↔raw mapping (live direction toggles per joint, raw/norm/rad readouts, optional slider control with torque-on). Built from scratch on raw `scservo_sdk`; does not import from other `real/*.py` files. Run with `python -m real.twin.digital_twin` (default port `/dev/ttyACM0`). Optional DualSense control (`real/twin/gamepad.py`): if a controller is connected, sticks/triggers drive `targets_rad` in CONTROL mode (LX=pan, LY=lift, RY=elbow, R1/R2=wrist_flex, RX=wrist_roll, L1/L2=gripper); D-pad up/down cycles SLOW/MED/FAST speed presets (Tk Up/Down keys do the same); Create toggles MIRROR↔CONTROL, PS is e-stop. Requires `evdev` (in `requirements.txt`); the user must be in the `input` group.
-
-## Control panel
-
-`python -m panel` (in `mujoco_env`) serves a web control panel on `127.0.0.1:8800`. There is **no auth** — `--host 0.0.0.0` exposes it to the LAN, where anyone on the network can launch scripts, so only do that on trusted networks. It launches/stops every runnable script from a curated registry (`panel/registry.py` — keep it updated when adding scripts or args), shows live logs (SSE + `logs/panel/<run_id>.log`), and embeds sim views and the camera.
-
-- Sim streaming: scripts with a sim accept `--stream-port N` (argparse) / `stream_port=N` (Hydra) and serve their offscreen-rendered frames as MJPEG at `http://host:N/stream` via `panel/sim_stream.py`. The panel allocates ports 8801–8819 and sets `MUJOCO_GL=egl` for those launches.
-- Camera page: in-server capture (`panel/camera_service.py`) with the `real.marker_view` overlays via the shared `real/overlay.py`.
-- Hardware exclusivity: one accounting in `panel/runner.py` — serial/camera scripts and the camera stream 409 instead of double-claiming a device. `--execute` is a plain checkbox (default off = dry-run); there is no extra confirmation step.
-- Stop = SIGINT (scripts' handlers do torque-off / save plots), SIGKILL after 15 s. A finished run can be relaunched with its original args via the run page's **Restart** button (disabled while running).
-- Form persistence: every `[data-persist="<scope>"]` container's fields (camera capture controls, each script card's args) save to `panel/settings.py`'s JSON override file (`logs/panel/ui_settings.json`) on change and restore on load. Only overrides are stored — original defaults stay in code (registry arg defaults, `camera_service.default_settings`), so the nav's **Reset defaults** button (`/api/settings/reset`) wipes overrides and a reload shows the code defaults again.
-- Route code (`panel/*.py`) loads into memory at startup; templates and `static/*` are re-read per request. For Python edits, restart the server or run `python -m panel --reload` (dev only: uvicorn watches `panel/*.py` and restarts on edits, SIGINTing every live run each time — don't use it mid-rollout).
-
-## Training
-
-- `src/train.py` — Training with Hydra config + W&B logging
-- `conf/config.yaml` — shared hyperparameters (train, algorithm, wandb), default env: pickplace
-- `conf/env/` — per-env config group (selected via `env=lift`, `env=pickplace`, or `env=multitask`)
-
-### Usage
-
-All commands must run in the `mujoco_env` conda environment:
+All commands run in the `mujoco_env` conda env:
 
 ```bash
-conda activate mujoco_env
-
-python -m src.train env=lift                     # train lift
-python -m src.train env=pickplace                # train pick-and-place (default)
-python -m src.train env=multitask                # train on both lift + pickplace (mix set by lift_ratio in multitask.yaml)
-python -m src.train env=lift wandb.enabled=false # without W&B
-python -m src.train train.total_timesteps=200000 # override params
-python -m src.eval env=lift                      # eval lift checkpoint
-python -m src.eval env=pickplace                 # eval pickplace checkpoint
-python -m src.eval model=best                    # eval best model
-python -m src.eval model=path/to/model.zip       # eval specific model
+python -m src.train env=lift                     # or pickplace (default), reach, multitask
+python -m src.train env=lift wandb.enabled=false train.total_timesteps=200000
+python -m src.train resume=path/to/ckpt.zip
+python -m src.eval model=best                    # or latest / path/to/model.zip
 python -m src.show_starts                        # visualize spawn positions
+python -m src.distill env=lift distill.teacher=old.zip   # regimes: distill block in config.yaml
+python -m panel
 ```
 
-When launching training from an agent (no interactive shell), wrap with
-`conda run` and redirect to a log file, e.g.:
+When launching training from an agent (no interactive shell), use
+`conda run -n mujoco_env python -m src.train ... > run.log 2>&1` via the agent's
+background-execution mechanism, not shell `&` — `&` plus `conda run`'s stdout
+buffering has been flaky.
 
-```bash
-conda run -n mujoco_env python -m src.train env=pickplace > run.log 2>&1
-```
+## Stack
 
-`env=pickplace` and any other Hydra overrides are optional / swappable. Run it
-via the agent's background-execution mechanism, not a shell `&` — `&` plus
-`conda run`'s stdout buffering has been flaky in practice.
-
-### Distillation
-
-- `src/distill.py` — DAgger distillation to migrate a trained teacher onto a fresh student across an **architecture or observation-layout change** without a curriculum restart (the general case `src/asymmetrize_checkpoint.py` can't cover — that one only handles the function-preserving privileged-tail append with the actor unchanged). The student is regressed onto the teacher's deterministic mean action **and** value (the value must be distilled too — a warm actor with a fresh critic is the classic PPO-resume trap) on states an annealed teacher→student rollout visits under the student's own deployment DR. Three teacher-obs regimes via `distill.teacher_obs`: `identical` (teacher sees the student's obs — architecture-only changes), `current` (teacher sees the single-frame `[actor block | priv tail]` sliced out of the student's lag-tapped obs — the `history_taps` migration warm start), and `privileged` (teacher sees `SO101BaseEnv.privileged_obs()`, the always-fresh-tag view, while the student trains on camera obs with dropout — imitation actively teaches the student to infer hidden tag pose). `current`/`privileged` require a single-frame teacher checkpoint. `log_std` is copied, not regressed. Reuses `src/train.py`'s `env_specs` / `obs_norm_for` / `build_fresh_model` so the student's env farm, input normalization, and architecture match training exactly. Output is a `resume`-compatible checkpoint; **always follow distillation with a short PPO fine-tune** (`python -m src.train resume=…`). Config in the `distill:` block of `conf/config.yaml`; contract-tested in `tests/training/test_distill.py` and `tests/env/test_privileged_obs.py`.
-
-```bash
-python -m src.distill env=lift distill.teacher=logs/ppo_lift/best_model.zip   # architecture warm start
-python -m src.distill env=lift distill.teacher=old.zip distill.net_arch=[512,512,512,512]
-python -m src.distill env=lift 'history_taps=[0,4,16,48]' distill.teacher=old.zip distill.teacher_obs=current
-python -m src.distill env=lift distill.teacher=priv.zip distill.teacher_obs=privileged
-python -m src.train env=lift resume=distilled.zip 'history_taps=[0,4,16,48]'  # mandatory fine-tune (same taps)
-```
-
-### Stack
-
-- **Conda env:** `mujoco_env`
-- **Config:** Hydra (`conf/config.yaml` + per-env overrides)
-- **Logging:** W&B (entity: `mvlasenko`, project: `robot-arm`)
-- **Algorithm:** SAC or PPO (Stable-Baselines3)
-- **Deps:** gymnasium, stable-baselines3, wandb, hydra-core
-- **Real-arm extras (pip-installed into the conda env):** `pip install -r requirements.txt` → `pyserial`. The twin GUI uses stdlib `tkinter`, but requires the Xft-enabled tk build from conda-forge (default conda tk is `noxft` and only sees the bitmap `fixed` font, making the UI unreadably small). Fix once per env: `conda install -n mujoco_env -c conda-forge 'tk=8.6.13=xft_*'`.
+Hydra + Stable-Baselines3 (PPO/SAC) + W&B (`mvlasenko/robot-arm`), conda env
+`mujoco_env`. Real-arm extras: `pip install -r requirements.txt`. The twin's
+tkinter needs the conda-forge Xft tk build (default `noxft` tk renders unreadably
+small): `conda install -n mujoco_env -c conda-forge 'tk=8.6.13=xft_*'`.
 
 ## Coding Principles
 
-- **Fail fast, fail loud.** No blanket `try/except`, no `except Exception`, no swallowing errors. If something breaks, let it crash with a clear traceback. Only catch specific exceptions when there's a real recovery path.
-- **No magic.** No `getattr`/`setattr` with string keys, no `**kwargs` passthrough when explicit args work, no dynamic dispatch when a simple `if`/`dict` suffices. Code should be readable without running it.
-- **Single source of truth.** Don't duplicate constants, config values, or defaults across files. One place defines it, everywhere else reads from there. `conf/config.yaml` owns all hyperparameters.
-- **No broken intermediate states.** Don't leave code half-working. If a change touches multiple files, all files must be consistent before moving on. Tests/imports should pass at every step.
-- **Explicit over defensive.** Require values instead of falling back to defaults silently (`cfg["key"]` not `cfg.get("key", default)`). If a required value is missing, that's a bug — surface it immediately.
-- **No dead code.** Delete unused variables, imports, and functions. Don't comment things out "for later." Version control exists.
-- **No redundant comments.** Don't restate what the code already says. Comments explain *why*, not *what*.
-- **Verify env behavior with tests, not inline scripts.** When checking that an environment, reward, or observation pipeline behaves as intended, write a pytest under `tests/` (e.g. `tests/test_obs_noise.py`) and run it with `pytest tests/<file>.py -v`. Tests are cheap, reusable, and document the contract; ad-hoc `python -c` snippets disappear after one use.
+- **Fail fast, fail loud.** No blanket `try/except`, no `except Exception`, no
+  swallowing errors. If something breaks, let it crash with a clear traceback. Only
+  catch specific exceptions when there's a real recovery path.
+- **No magic.** No `getattr`/`setattr` with string keys, no `**kwargs` passthrough
+  when explicit args work, no dynamic dispatch when a simple `if`/`dict` suffices.
+  Code should be readable without running it.
+- **Single source of truth.** Don't duplicate constants, config values, or defaults
+  across files. One place defines it, everywhere else reads from there.
+  `conf/config.yaml` owns all hyperparameters.
+- **No broken intermediate states.** Don't leave code half-working. If a change
+  touches multiple files, all files must be consistent before moving on.
+  Tests/imports should pass at every step.
+- **Explicit over defensive.** Require values instead of falling back to defaults
+  silently (`cfg["key"]` not `cfg.get("key", default)`). If a required value is
+  missing, that's a bug — surface it immediately.
+- **No dead code.** Delete unused variables, imports, and functions. Don't comment
+  things out "for later." Version control exists.
+- **No redundant comments.** Don't restate what the code already says. Comments
+  explain *why*, not *what*.
+- **Verify env behavior with tests, not inline scripts.** When checking that an
+  environment, reward, or observation pipeline behaves as intended, write a pytest
+  under `tests/` (e.g. `tests/env/test_obs_noise.py`) and run it with
+  `pytest tests/<file>.py -v`. Tests are cheap, reusable, and document the contract;
+  ad-hoc `python -c` snippets disappear after one use.
