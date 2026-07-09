@@ -141,7 +141,9 @@ def build_obs(model: mujoco.MjModel, data: mujoco.MjData, qposadr: np.ndarray,
 
 
 def main() -> int:
-    reach_cfg, prev_actions_n, _ = load_env_cfg("reach")
+    # Reach has no history-tap wiring (src/train.actor_obs_dim_for); the taps
+    # entry only exists for the cube tasks.
+    reach_cfg, prev_actions_n, _, _ = load_env_cfg("reach")
     waypoints = np.array(reach_cfg["waypoints"], dtype=np.float64)
     n_waypoints, n_joints_cfg = waypoints.shape
     assert n_joints_cfg == 6, f"waypoints must have 6 joints, got {n_joints_cfg}"

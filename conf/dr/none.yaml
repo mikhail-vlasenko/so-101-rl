@@ -1,7 +1,7 @@
 # @package _global_
 # No domain randomization — curriculum stage 1. Train the lift skill clean from
 # scratch (fast, reliable convergence), then fine-tune under `dr=full` (stage 2).
-# Only the DR knobs are zeroed here; prev_actions_n / frame_stack live in
+# Only the DR knobs are zeroed here; prev_actions_n / history_taps live in
 # config.yaml and MUST stay identical across stages or the checkpoint won't load
 # (they change the observation dimension; noise/bias/latency do not).
 

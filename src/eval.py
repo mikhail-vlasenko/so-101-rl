@@ -15,7 +15,7 @@ import hydra
 import numpy as np
 from omegaconf import DictConfig
 from stable_baselines3 import PPO, SAC
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.checkpoints import resolve_model_path
 from src.train import ENV_REGISTRY, _resolve_env, make_env, runtime_cfg_from_hydra
@@ -53,10 +53,7 @@ def main(cfg: DictConfig):
     inner_env = make_env(env_cls, env_cfg, xml_path, render_mode=render_mode,
                          slow_factor=cfg.slow_factor,
                          cfg=runtime_cfg)
-    frame_stack = int(cfg.frame_stack)
     vec_env = DummyVecEnv([lambda: inner_env])
-    if frame_stack > 1:
-        vec_env = VecFrameStack(vec_env, n_stack=frame_stack)
 
     publisher = None
     if cfg.stream_port is not None:

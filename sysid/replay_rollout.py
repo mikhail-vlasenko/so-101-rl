@@ -53,6 +53,7 @@ from src.base_env import (
     tag_cam_model,
 )
 from src.lift_env import SO101LiftEnv
+from src.obs_history import ObsHistory
 from src.train import make_env, runtime_cfg_from_hydra
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -79,6 +80,10 @@ def load_rollout(csv_path: Path) -> dict:
         "qpos": df[[f"qpos_{n}" for n in JOINT_NAMES]].to_numpy(),
         "ee": df[["ee_x", "ee_y", "ee_z"]].to_numpy(),
         "cube": df[["cube_x", "cube_y", "cube_z"]].to_numpy(),
+        # Cube-tag obs exactly as the policy saw it (raw tag pose + age) —
+        # the [cube_tag(6), cube_age(1)] slice of the actor block, in obs order.
+        "ctag": df[[f"ctag_{ax}" for ax in "xyz"]
+                   + [f"ctag_r{ax}" for ax in "xyz"] + ["cube_age_s"]].to_numpy(),
         "marker_age_s": df["marker_age_ms"].to_numpy() * 1e-3,
     }
 
@@ -145,11 +150,15 @@ def run_policy(env: SO101LiftEnv, policy, rec: dict, spawn: tuple,
     return {k: np.asarray(v) for k, v in out.items()}
 
 
-def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float) -> dict:
+def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float,
+                history_taps: tuple) -> dict:
     """Counterfactual: rebuild each step's obs from the recorded qpos with
     FK-consistent markers (hold-last visibility like rollout_lift's fk branch)
     and re-predict. Starts at step 2 — the first two steps' qvel needs the
-    pre-rollout boot qpos the CSV doesn't record."""
+    pre-rollout boot qpos the CSV doesn't record. The lag-tap history is
+    seeded at that first predicted step (the shared boot convention,
+    src/obs_history.py); the recorded rollout's own history began two ticks
+    earlier, so the deepest taps disagree for the first max-lag ticks."""
     data = mujoco.MjData(model)
     site_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, n)
                 for n in MARKER_SITE_NAMES]
@@ -159,6 +168,7 @@ def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float) -> 
     cam = tag_cam_model(model, data)
 
     n = len(rec["actions"])
+    history = ObsHistory(history_taps, obs_dim_for(1, False))
     held_pos = np.zeros((N_MARKERS, 3))
     held_age = np.full(N_MARKERS, MARKER_AGE_CAP_S)
     seen = np.zeros(N_MARKERS, dtype=bool)
@@ -181,16 +191,19 @@ def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float) -> 
         if k < 2:
             continue
         qvel = (rec["qpos"][k - 1] - rec["qpos"][k - 2]) / control_dt
-        obs = np.concatenate([
+        # Single-frame actor block, positions-only markers
+        # (marker_include_rot=False) — same layout as
+        # real/rollout_lift.build_actor_frame.
+        frame = np.concatenate([
             q, qvel, held_pos.flatten(), held_age,
-            rec["cube"][k - 1],
+            rec["ctag"][k - 1],
             np.array([0.0, 0.0, 0.0, LIFT_TASK_ID]),
             rec["actions"][k - 1],
-            # Privileged pad: critic-only dims, never read by the actor
-            # (real/rollout_lift.build_obs does the same). This function's
-            # layout is positions-only markers, i.e. marker_include_rot=False.
-            np.zeros(priv_dim_for(False)),
         ]).astype(np.float32)
+        tapped = history.reset(frame) if k == 2 else history.push(frame)
+        # Privileged pad: critic-only dims, never read by the actor
+        # (real/rollout_lift.py does the same).
+        obs = np.concatenate([tapped, np.zeros(priv_dim_for(False), dtype=np.float32)])
         action, _ = policy.predict(obs, deterministic=True)
         pred[k] = np.clip(action, -1.0, 1.0)
     return {"pred": pred, "fk_markers": fk_markers}
@@ -304,8 +317,9 @@ def main() -> int:
                      if cfg.cam_latency is not None else None),
     )
 
+    history_taps = tuple(int(t) for t in cfg.history_taps)
     policy = load_policy(args.model, LOG_DIR,
-                         obs_dim_for(prev_actions_n, marker_include_rot)
+                         len(history_taps) * obs_dim_for(prev_actions_n, marker_include_rot)
                          + priv_dim_for(marker_include_rot))
 
     xml_path = str(REPO_ROOT / SO101LiftEnv.XML_PATH)
@@ -322,7 +336,7 @@ def main() -> int:
 
     rep = run_replay(env_replay, rec, spawn)
     pol = run_policy(env_policy, policy, rec, spawn, int(env_cfg["max_steps"]))
-    od = run_obsdiff(env_replay.model, policy, rec, control_dt)
+    od = run_obsdiff(env_replay.model, policy, rec, control_dt, history_taps)
 
     qpos_err = np.abs(rep["qpos"] - rec["qpos"])
     act_diff = np.abs(od["pred"] - rec["actions"])

@@ -29,7 +29,7 @@ logs/ppo_lift/stage2_no_tag_rotation.zip
 Every experiment resumes from **this exact file** so reward/config changes are
 comparable against the same starting policy. Training writes `final_model.zip` /
 `best_model.zip`, never this file, so it stays intact — do not overwrite it. It was
-trained with `marker_include_rot=false`, `prev_actions_n=1`, `frame_stack=1`; those
+trained with `marker_include_rot=false`, `prev_actions_n=1`, `history_taps=[0]`; those
 change obs dim and **must not change** (a resume would crash on dim mismatch).
 
 ## Setup
@@ -93,7 +93,7 @@ shaving length while lifting *less often* is not progress.
 - `src/fetch_wandb.py` — metric fetching (read-only; do not retarget the metric to flatter a run)
 - `so101/` — robot model and scene XMLs (read-only)
 - The base checkpoint file and the obs-dim-defining knobs (`marker_include_rot`,
-  `prev_actions_n`, `frame_stack`) — changing them breaks the resume.
+  `prev_actions_n`, `history_taps`) — changing them breaks the resume.
 
 **Non-negotiable sim-to-real constraints.** This policy deploys on the real arm.
 Do NOT chase the metric by making the sim easier to transfer *from*:
@@ -174,7 +174,7 @@ LOOP FOREVER:
 
 **Crashes**: if it's a typo/easy fix, fix and re-run. If fundamentally broken, log
 as crash, revert, move on. The most common crash here is an obs-dim mismatch on
-resume — never change `marker_include_rot`, `prev_actions_n`, or `frame_stack`.
+resume — never change `marker_include_rot`, `prev_actions_n`, or `history_taps`.
 
 **Baseline first**: the first run should be a no-change resume to establish the
 base `mean_ep_length` / `success_rate` that every later run is judged against.

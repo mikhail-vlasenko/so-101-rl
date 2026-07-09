@@ -62,6 +62,8 @@ from .rollout_common import (
     load_env_cfg,
     load_policy,
 )
+from src.obs_history import ObsHistory
+
 from .calibration import load_calibration, load_compliance
 from .marker_obs import CameraMarkerSource
 from .twin.mapping import load_joint_maps
@@ -119,22 +121,25 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
-              marker_rot: np.ndarray, marker_age: np.ndarray,
-              cube_tag_pos: np.ndarray, cube_tag_rot: np.ndarray, cube_age: float,
-              prev_actions: np.ndarray, marker_include_rot: bool) -> np.ndarray:
-    """Match SO101LiftEnv._compute_obs: qpos+qvel+markers+marker_age+
-    cube_tag(pos+rot)+cube_age+[0,0,0,task_id]+prev_actions+privileged pad.
+def build_actor_frame(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
+                      marker_rot: np.ndarray, marker_age: np.ndarray,
+                      cube_tag_pos: np.ndarray, cube_tag_rot: np.ndarray,
+                      cube_age: float, prev_actions: np.ndarray,
+                      marker_include_rot: bool) -> np.ndarray:
+    """Match SO101LiftEnv's single-frame actor block (base_env.obs_dim_for):
+    qpos+qvel+markers+marker_age+cube_tag(pos+rot)+cube_age+[0,0,0,task_id]+
+    prev_actions.
 
     Marker and cube-tag poses/ages come from the camera pipeline
     (--marker-source camera) or the FK stand-in on the lockstep sim — held
     last-detected poses either way. marker_include_rot mirrors the env:
     marker positions only when false (the cube tag always carries its rot).
 
-    The trailing priv_dim_for dims are the asymmetric critic's privileged
-    tail: only the value function reads them in training and the actor
-    structurally slices them off (src/networks.TakeFirst), so at deployment
-    they are zero-padded and never read.
+    The caller feeds this frame through the shared ObsHistory (the identical
+    tap convention training used, src/obs_history.py) and appends the zeroed
+    privileged tail: only the value function read those dims in training and
+    the actor structurally slices them off (src/networks.TakeFirst), so at
+    deployment they are never read.
     """
     extra = np.array([0.0, 0.0, 0.0, LIFT_TASK_ID], dtype=np.float32)
     markers = (np.hstack([marker_pos, marker_rot]).flatten()
@@ -147,9 +152,7 @@ def build_obs(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
                            cube_tag_rot.astype(np.float32),
                            np.array([cube_age], dtype=np.float32),
                            extra,
-                           prev_actions.flatten().astype(np.float32),
-                           np.zeros(priv_dim_for(marker_include_rot),
-                                    dtype=np.float32)]).astype(np.float32)
+                           prev_actions.flatten().astype(np.float32)]).astype(np.float32)
 
 
 def plot_rollout(out_path: Path, rows: list[dict], target_height: float,
@@ -277,7 +280,7 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
 
 
 def main() -> int:
-    lift_cfg, prev_actions_n, marker_include_rot = load_env_cfg("lift")
+    lift_cfg, prev_actions_n, marker_include_rot, history_taps = load_env_cfg("lift")
     action_scale = float(lift_cfg["action_scale"])
     n_substeps = int(lift_cfg["n_substeps"])
     cube_low = np.array(lift_cfg["cube_low"], dtype=np.float64)
@@ -320,8 +323,13 @@ def main() -> int:
     cube_tag_site_pos = model.site_pos[cube_tag_site_id].copy()
 
     policy = load_policy(args.model, LOG_DIR,
-                         obs_dim_for(prev_actions_n, marker_include_rot)
+                         len(history_taps) * obs_dim_for(prev_actions_n, marker_include_rot)
                          + priv_dim_for(marker_include_rot))
+    # Lag-tap history over the actor block, the same convention as training
+    # (src/obs_history.py): seeded with the first tick's frame at boot — the
+    # env's reset does the identical thing — then advanced once per tick.
+    history = ObsHistory(history_taps, obs_dim_for(prev_actions_n, marker_include_rot))
+    priv_pad = np.zeros(priv_dim_for(marker_include_rot), dtype=np.float32)
 
     rng = np.random.default_rng(args.seed)
     cube_xy_init = rng.uniform(cube_low, cube_high)
@@ -441,9 +449,11 @@ def main() -> int:
                 cube_age = min(MARKER_AGE_CAP_S, now - fk_cube_seen_t)
                 marker_age_ms = cam_read_ms = detect_ms = float("nan")
 
-            obs = build_obs(loop.qpos, loop.qvel, marker_pos, marker_rot,
-                            marker_age, cube_tag_pos, cube_tag_rot, cube_age,
-                            loop.prev_actions, marker_include_rot)
+            frame = build_actor_frame(loop.qpos, loop.qvel, marker_pos, marker_rot,
+                                      marker_age, cube_tag_pos, cube_tag_rot, cube_age,
+                                      loop.prev_actions, marker_include_rot)
+            tapped = history.reset(frame) if step == 0 else history.push(frame)
+            obs = np.concatenate([tapped, priv_pad])
             t_pred = time.perf_counter()
             raw_action, _ = policy.predict(obs, deterministic=True)
             predict_ms = (time.perf_counter() - t_pred) * 1e3

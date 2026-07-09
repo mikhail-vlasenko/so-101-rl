@@ -3,6 +3,13 @@
 Decision-level plan. Fixed history features instead of a recurrent policy; the reasoning
 for that choice is recorded here because it will be questioned later.
 
+**Status (2026-07-09): lag taps implemented** — `history_taps` in `conf/config.yaml`
+(default `[0]`), shared ring buffer `src/obs_history.py`, layout
+`[actor block per tap | single priv tail]`, `frame_stack` deleted (subsumed; the A/B
+showed plain stacking doesn't help). Warm start via `src/distill.py
+distill.teacher_obs=current`. EMAs deliberately not built yet; see TODO.md
+"Obs history: follow-ups".
+
 ## Motivation
 
 The env is a POMDP by design: held-last-pose tags with age channels, and DR that

@@ -20,7 +20,7 @@ from src.lift_env import SO101LiftEnv
 from src.networks import LayerNormActorCriticPolicy, LayerNormSACPolicy, ObsNorm
 from src.obs_norm import build_obs_norm, build_reach_obs_norm
 from src.pickplace_env import SO101PickPlaceEnv
-from src.train import runtime_cfg_from_hydra
+from src.train import obs_norm_for, runtime_cfg_from_hydra
 
 ACTION_SCALE = 0.07
 N_SUBSTEPS = 10
@@ -42,6 +42,23 @@ def test_shapes_match_obs_layout():
             assert center.shape == scale.shape == (expected,)
             assert np.all(scale > 0)
             assert np.all(np.isfinite(center)) and np.all(np.isfinite(scale))
+
+
+def test_obs_norm_for_tiles_actor_block_per_tap():
+    """train.obs_norm_for must mirror the env's [actor block per tap | priv
+    tail] layout: the actor-block constants repeat per tap, the tail's appear
+    once at the end."""
+    with initialize(config_path="../../conf", version_base=None):
+        cfg = compose(config_name="config",
+                      overrides=["env=lift", "history_taps=[0,4,16,48]"])
+    n_substeps = int(cfg.lift_env.n_substeps)
+    center, scale = obs_norm_for(cfg, n_substeps)
+    a = obs_dim_for(int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+    single_c, single_s = build_obs_norm(int(cfg.prev_actions_n),
+                                        bool(cfg.marker_include_rot),
+                                        float(cfg.action_scale), n_substeps)
+    assert center == single_c[:a].tolist() * 4 + single_c[a:].tolist()
+    assert scale == single_s[:a].tolist() * 4 + single_s[a:].tolist()
 
 
 def test_reach_shapes():

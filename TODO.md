@@ -30,12 +30,7 @@ Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/li
 
 The `[actor block | privileged tail]` layout is live (see CLAUDE.md, `base_env.priv_dim_for`), with `logs/ppo_lift/asym_critic_run264.zip` the first fine-tuned artifact (0.96 lift success, dr=light). Open:
 
-- **frame_stack > 1 is now asserted off for cube envs** (`train.actor_obs_dim_for`): VecFrameStack would fold the privileged tail into every stacked frame and the flat `[:actor_dim]` slice would break. Decide the stacked layout when the obs-history feature lands (`.claude/plans/obs_history_features.md`) — the plan's original intent was to land both together.
 - **Tail utilization is shallow after a short warm fine-tune.** After 10M steps from the migrated run262, the critic's privileged input columns carry ~14x less weight than the actor columns (top consumers: true cube velocity, jaw contact flags, cube-tag bias). The feature should pay most where value noise actually dominates — from-scratch curriculum stages and dr=full refines — not a near-converged dr=light polish; measure there before judging its value.
-
-## Distillation: frame-stacked / history students
-
-The DAgger distillation rig is built (`src/distill.py`, see CLAUDE.md "Distillation"), but `privileged` mode asserts `frame_stack=1`: feeding a history-augmented teacher needs a stacked privileged-obs history. Build alongside the obs-history wrapper (`.claude/plans/obs_history_features.md`). The long-pole consumer — the tag→box obs migration (`.claude/plans/vision_multicam_longterm.md`) — is already designed around this rig existing.
 
 ## Train a policy in PWM / torque-ish mode
 

@@ -121,6 +121,9 @@ def asymmetrize_model(old_model, cfg, tol: float = 1e-5, n_check: int = 256):
     algo_cls, _, _ = ALGORITHM_REGISTRY[cfg.algorithm]
     assert isinstance(old_model, algo_cls), (type(old_model), cfg.algorithm)
 
+    assert list(cfg.history_taps) == [0], \
+        "asymmetrize only appends the tail to an unchanged actor input; a " \
+        "history_taps migration needs src.distill (distill.teacher_obs=current)"
     actor_dim = actor_obs_dim_for(cfg)
     assert actor_dim is not None, f"env {cfg.env_name} has no privileged tail"
     old_obs_dim = old_model.observation_space.shape[0]

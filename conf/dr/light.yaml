@@ -4,7 +4,7 @@
 # noisiest part of the real pipeline, so this profile keeps the joint-encoder
 # noise at the full level but lowers the cube and marker (AprilTag) noise and
 # biases, easing the policy into perception error before the full DR refine.
-# Only the DR knobs differ from full; prev_actions_n / frame_stack live in
+# Only the DR knobs differ from full; prev_actions_n / history_taps live in
 # config.yaml and MUST stay identical across stages (they change obs dim).
 
 # Anisotropic marker/cube position noise (src/marker_noise.py): same shape as dr=full,

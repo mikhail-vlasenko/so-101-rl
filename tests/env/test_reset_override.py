@@ -14,14 +14,15 @@ QPOS = np.array([0.3, -1.5, 1.57, -0.4, 1.45, -0.01])
 
 @pytest.fixture(scope="module")
 def env():
-    env_cfg, prev_actions_n, marker_include_rot = load_env_cfg("lift")
+    env_cfg, prev_actions_n, marker_include_rot, history_taps = load_env_cfg("lift")
     return make_env(SO101LiftEnv, env_cfg, SO101LiftEnv.XML_PATH,
                     cfg=RuntimeEnvConfig(marker_include_rot=marker_include_rot,
-                                         prev_actions_n=prev_actions_n))
+                                         prev_actions_n=prev_actions_n,
+                                         history_taps=history_taps))
 
 
 def test_make_env_can_map_runtime_cfg():
-    env_cfg, _, _ = load_env_cfg("lift")
+    env_cfg, _, _, _ = load_env_cfg("lift")
     runtime_cfg = {
         "obs_noise": {"qpos_sigma": 0.0, "marker_rot_sigma": 0.0,
                       "tag_px_noise": 0.0, "cube_px_noise": 0.0, "tag_depth_factor": 2.0},
@@ -33,6 +34,7 @@ def test_make_env_can_map_runtime_cfg():
         "marker_include_rot": False,
         "prev_actions_n": 1,
         "cube_size_jitter": 0.0,
+        "history_taps": (0,),
     }
     env = make_env(SO101LiftEnv, env_cfg, SO101LiftEnv.XML_PATH,
                    cfg=RuntimeEnvConfig(**runtime_cfg))

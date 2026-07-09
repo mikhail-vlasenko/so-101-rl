@@ -9,7 +9,7 @@ from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from src.base_env import RuntimeEnvConfig, obs_dim_for
 from src.callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EpisodeLengthCallback,
@@ -117,6 +117,7 @@ def runtime_cfg_from_hydra(cfg: DictConfig) -> RuntimeEnvConfig:
         marker_include_rot=bool(cfg.marker_include_rot),
         prev_actions_n=int(cfg.prev_actions_n),
         cube_size_jitter=float(cfg.cube_size_jitter),
+        history_taps=tuple(int(t) for t in cfg.history_taps),
     )
 
 
@@ -158,37 +159,44 @@ def env_specs(cfg, orig_dir, runtime_cfg: RuntimeEnvConfig, n_envs: int):
 
 def obs_norm_for(cfg, n_substeps: int) -> tuple:
     """Tiled (center, scale) lists for the policy's fixed ObsNorm, matching the
-    configured env layout and frame_stack. Single source shared by training and
-    distillation so a distilled student's input normalization is identical to a
-    trained one (the constants ship inside the checkpoint)."""
-    frame_stack = int(cfg.frame_stack)
+    configured env layout and history taps: the actor block's constants repeat
+    once per tap, the privileged tail's appear once at the end — mirroring the
+    env's [actor block per tap | priv tail] layout (each tap is a past copy of
+    the same physical quantities, so it keeps the same constants). Single
+    source shared by training and distillation so a distilled student's input
+    normalization is identical to a trained one (the constants ship inside the
+    checkpoint)."""
     if cfg.env_name == "reach":
         obs_center, obs_scale = build_reach_obs_norm(
             int(cfg.prev_actions_n), len(cfg.reach_env.waypoints),
             float(cfg.action_scale), n_substeps)
-    else:
-        obs_center, obs_scale = build_obs_norm(
-            int(cfg.prev_actions_n), bool(cfg.marker_include_rot),
-            float(cfg.action_scale), n_substeps)
-    return obs_center.tolist() * frame_stack, obs_scale.tolist() * frame_stack
+        return obs_center.tolist(), obs_scale.tolist()
+    obs_center, obs_scale = build_obs_norm(
+        int(cfg.prev_actions_n), bool(cfg.marker_include_rot),
+        float(cfg.action_scale), n_substeps)
+    n_taps = len(cfg.history_taps)
+    actor_dim = obs_dim_for(int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+    return (obs_center[:actor_dim].tolist() * n_taps + obs_center[actor_dim:].tolist(),
+            obs_scale[:actor_dim].tolist() * n_taps + obs_scale[actor_dim:].tolist())
 
 
 def actor_obs_dim_for(cfg) -> int | None:
     """Actor input width for the asymmetric critic (src/networks.TakeFirst).
 
-    The cube envs' observation is [actor block | privileged tail]
-    (base_env.obs_dim_for / priv_dim_for) and only the critic may read the
-    tail; the actor's slice width is the per-frame actor block. None for
-    reach, which has no privileged tail (symmetric nets)."""
+    The cube envs' observation is [actor block per history tap | privileged
+    tail] (base_env.obs_dim_for / priv_dim_for, src/obs_history.py) and only
+    the critic may read the tail; the actor's slice covers every tapped actor
+    block — the history is actor input, the tail never is. None for reach,
+    which has no privileged tail (symmetric nets) and no history-tap wiring."""
     if cfg.env_name == "reach":
+        assert list(cfg.history_taps) == [0], \
+            "reach has no history-tap wiring; run it with history_taps=[0]"
         return None
     assert cfg.algorithm == "ppo", \
         "the asymmetric-critic obs layout is wired for PPO only (the SAC actor " \
         "would consume the privileged tail)"
-    assert int(cfg.frame_stack) == 1, \
-        "frame_stack > 1 would fold the privileged tail into the actor slice; " \
-        "decide the stacked layout when the obs-history feature lands"
-    return obs_dim_for(int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+    return len(cfg.history_taps) * obs_dim_for(int(cfg.prev_actions_n),
+                                               bool(cfg.marker_include_rot))
 
 
 def build_fresh_model(cfg, env, obs_norm, net_arch, seed, *, actor_obs_dim,
@@ -242,25 +250,19 @@ def train(cfg: DictConfig):
 
     env_fns, eval_inner, n_substeps = env_specs(cfg, orig_dir, runtime_cfg, n_envs)
 
-    frame_stack = int(cfg.frame_stack)
-
     # Fixed input normalization constants (src/obs_norm.py), tiled across
-    # stacked frames. Passed as plain lists inside policy_kwargs so they
+    # history taps. Passed as plain lists inside policy_kwargs so they
     # save/load cleanly with the checkpoint and real rollouts inherit the
     # identical transform through the loaded policy.
     obs_norm = obs_norm_for(cfg, n_substeps)
 
     vec_env = SubprocVecEnv(env_fns)
-    if frame_stack > 1:
-        vec_env = VecFrameStack(vec_env, n_stack=frame_stack)
     if seed is not None:
         vec_env.seed(int(seed))
     env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, gamma=gamma)
 
     stats_tracker = EvalStatsTracker(eval_inner)
     eval_vec_env = DummyVecEnv([lambda: Monitor(stats_tracker)])
-    if frame_stack > 1:
-        eval_vec_env = VecFrameStack(eval_vec_env, n_stack=frame_stack)
     if seed is not None:
         eval_vec_env.seed(int(seed) + 10_000)
     eval_env = VecNormalize(eval_vec_env, norm_obs=False, training=False, norm_reward=False)

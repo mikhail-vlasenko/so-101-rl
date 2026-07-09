@@ -14,6 +14,7 @@ from hydra import compose, initialize
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
+from src.base_env import obs_dim_for, priv_dim_for
 from src.distill import DistillBuffer, _policy_outputs, distill, regress
 from src.lift_env import SO101LiftEnv
 from src.train import (
@@ -179,13 +180,49 @@ def test_distill_end_to_end_and_resumes(lift_cfg, tmp_path):
     resume_venv.close()
 
 
-def test_distill_rejects_privileged_with_frame_stack(tmp_path):
-    """Privileged distillation over frame-stacked obs is unsupported and must
-    fail loud rather than silently mis-stack the single-frame teacher view."""
+def test_distill_current_mode_migrates_onto_history_taps(tmp_path):
+    """teacher_obs=current — the history_taps migration path: a single-frame
+    teacher supervises a lag-tapped student, queried on the [tap-0 actor block
+    | priv tail] slice of the student's obs. The saved student must carry the
+    tapped obs space and the widened actor slice; and feeding a NON-single-
+    frame checkpoint as the teacher must fail loud."""
+    with initialize(config_path="../../conf", version_base=None):
+        teacher_cfg = compose(config_name="config", overrides=[
+            "env=lift", "wandb.enabled=false", "train.n_envs=2",
+            "ppo.n_steps=8", "train.net_arch=[32,32]",
+        ])
+    venv = _lift_venv(teacher_cfg)
+    teacher = build_fresh_model(teacher_cfg, venv, obs_norm_for(teacher_cfg, 10),
+                                [32, 32], seed=3,
+                                actor_obs_dim=actor_obs_dim_for(teacher_cfg),
+                                verbose=0)
+    teacher_path = tmp_path / "teacher.zip"
+    teacher.save(teacher_path)
+    venv.close()
+
+    out_path = tmp_path / "student.zip"
     with initialize(config_path="../../conf", version_base=None):
         cfg = compose(config_name="config", overrides=[
-            "env=lift", "wandb.enabled=false", "frame_stack=3",
-            "distill.teacher_obs=privileged", "distill.teacher=dummy.zip",
+            "env=lift", "wandb.enabled=false", "train.n_envs=2", "ppo.n_steps=8",
+            "history_taps=[0,2]",
+            "distill.teacher_obs=current", "distill.net_arch=[32,32]",
+            "distill.iterations=1", "distill.steps_per_iter=32",
+            "distill.epochs=1", "distill.batch_size=32", "distill.eval_episodes=1",
+            f"distill.teacher={teacher_path}", f"distill.out={out_path}",
         ])
-        with pytest.raises(AssertionError, match="frame_stack=1"):
-            distill(cfg, orig_dir=".")
+        distill(cfg, orig_dir=".")
+
+        student = PPO.load(out_path)
+        a = obs_dim_for(int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+        p = priv_dim_for(bool(cfg.marker_include_rot))
+        assert student.observation_space.shape == (2 * a + p,)
+        assert student.policy_kwargs["actor_obs_dim"] == 2 * a
+
+        # The tapped student itself is not a valid current-mode teacher.
+        cfg2 = compose(config_name="config", overrides=[
+            "env=lift", "wandb.enabled=false", "train.n_envs=2", "ppo.n_steps=8",
+            "history_taps=[0,2]", "distill.teacher_obs=current",
+            f"distill.teacher={out_path}", f"distill.out={tmp_path / 'x.zip'}",
+        ])
+        with pytest.raises(AssertionError, match="single-frame teacher"):
+            distill(cfg2, orig_dir=".")

@@ -9,7 +9,7 @@ algorithm: ppo
 # gamma, batch_size, ppo.*/sac.*) are re-applied onto the loaded model — SB3's
 # load() would otherwise silently restore the zip's values (see
 # src/train.py:resume_overrides). Obs-dim settings (prev_actions_n,
-# frame_stack, marker_include_rot) and net_arch must still match the checkpoint.
+# history_taps, marker_include_rot) and net_arch must still match the checkpoint.
 resume: null
 deterministic: true
 seed: null
@@ -37,7 +37,7 @@ use_servo_profile: true
 # obs_noise / obs_bias / cam_latency / marker_dropout are the domain-randomization
 # knobs and live in the `dr` config group (conf/dr/{full,light,none}.yaml), selected
 # via the defaults list above. They differ between curriculum stages; prev_actions_n /
-# frame_stack below do NOT (they change obs dim and must match across a resume).
+# history_taps below do NOT (they change obs dim and must match across a resume).
 
 # Easy-mode crutch for training from scratch: when true, every AprilTag pose is
 # always fed fresh to the policy — neither the >70° camera-physics occlusion nor the
@@ -66,9 +66,15 @@ prev_actions_n: 1
 # must match across a resume and between training and real rollout.
 marker_include_rot: false
 
-# Number of consecutive observations stacked into the policy input.
-# 1 = no stacking (raw OBS_DIM). N>1 multiplies obs_dim by N via SB3's VecFrameStack.
-frame_stack: 1
+# Lag taps served as observation history (src/obs_history.py): the policy
+# input carries the actor block at [t - tap] control ticks for each entry —
+# geometric spacing per .claude/plans/obs_history_features.md, e.g.
+# [0, 4, 16, 48] ≈ 0/0.27/1.07/3.2 s at 15 Hz — while the privileged tail
+# stays a single copy. Must start at 0, strictly ascending. [0] = no history.
+# Changes obs dim: it must match the checkpoint across resume/eval/real
+# rollout; migrate a checkpoint onto new taps with src/distill.py
+# (distill.teacher_obs=current) followed by the mandatory PPO fine-tune.
+history_taps: [0]
 
 train:
   time_limit_minutes: 20
@@ -120,10 +126,15 @@ distill:
   # Which observation the teacher is queried on at each visited state:
   #   identical  — teacher sees the student's own obs (architecture-only change,
   #                e.g. wider net). Teacher and student obs spaces must match.
+  #   current    — teacher sees the single-frame [actor block | priv tail]
+  #                sliced out of the student's lag-tapped obs (tap 0 + tail) —
+  #                its own trained layout. The warm start for a history_taps
+  #                migration; the teacher must be a single-frame checkpoint.
   #   privileged — teacher sees the always-fresh-tag privileged view
   #                (SO101BaseEnv.privileged_obs), i.e. what a
   #                marker_always_visible=true policy sees, while the student
-  #                trains on the camera obs with dropout/hold-last-pose.
+  #                trains on the camera obs with dropout/hold-last-pose. The
+  #                teacher must be a single-frame checkpoint.
   teacher_obs: identical
   net_arch: null         # student hidden widths; null = reuse cfg.train.net_arch
   iterations: 10         # DAgger rounds (collect -> aggregate -> regress)

@@ -14,6 +14,7 @@ from gymnasium import spaces
 
 from src.camera_sim import CameraSim
 from src.marker_noise import CameraIntrinsics, anisotropic_pos_noise, load_camera_intrinsics
+from src.obs_history import ObsHistory
 from src.servo_profile import ServoProfile
 from src.units import action_to_target
 from real.marker_spec import ARM_TAG_TO_SITE, CUBE_TAG_ID, TAG_SIZE_MM
@@ -22,9 +23,10 @@ from real.marker_spec import ARM_TAG_TO_SITE, CUBE_TAG_ID, TAG_SIZE_MM
 def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
     """Actor block: qpos(6) + qvel(6) + markers(2*M) + marker_age(2) + cube_tag(6)
     + cube_age(1) + extra(4) + prev_actions(N*6). The full env observation is
-    [this actor block | priv_dim_for privileged tail]; only the critic may read
-    the tail (asymmetric critic — the actor structurally slices it off, see
-    src/networks.TakeFirst).
+    [this actor block per history tap | priv_dim_for privileged tail]
+    (src/obs_history.py; one block per entry of conf/config.yaml:history_taps);
+    only the critic may read the tail (asymmetric critic — the actor
+    structurally slices it off, see src/networks.TakeFirst).
 
     Each marker contributes its world xyz (M=3); when marker_include_rot is true it
     also contributes a world rotation vector (axis-angle, +3 dims, M=6) — the same
@@ -109,6 +111,7 @@ class RuntimeEnvConfig:
     marker_include_rot: bool = False
     prev_actions_n: int = 2
     cube_size_jitter: float = 0.0
+    history_taps: tuple = (0,)
 
 
 def marker_world_poses(data, site_ids):
@@ -578,6 +581,11 @@ class SO101BaseEnv(SO101ArmEnv):
         # (asymmetric critic — see _priv_tail).
         self.obs_dim = obs_dim_for(self.prev_actions_n, self.marker_include_rot)
         self.priv_dim = priv_dim_for(self.marker_include_rot)
+        # Lag-tap history (src/obs_history.py): the served observation is the
+        # actor block at each configured tick lag, then a single copy of the
+        # privileged tail — the tail's latents are per-episode constants, so
+        # tapping them would add nothing. (0,) = plain single-frame obs.
+        self._history = ObsHistory(cfg.history_taps, self.obs_dim)
 
         self.marker_site_ids = []
         for name in MARKER_SITE_NAMES:
@@ -688,7 +696,8 @@ class SO101BaseEnv(SO101ArmEnv):
 
         self._parse_config(task_cfg)
 
-        obs_high = np.full(self.obs_dim + self.priv_dim, np.inf, dtype=np.float32)
+        obs_high = np.full(self.obs_dim * self._history.n_taps + self.priv_dim,
+                           np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
     def _parse_config(self, cfg):
@@ -903,6 +912,17 @@ class SO101BaseEnv(SO101ArmEnv):
                                self._obs_extra(self._held_cube_tag_pos),
                                self._prev_actions.flatten(),
                                self._priv_tail()]).astype(np.float32)
+
+    def _serve_obs(self, reset: bool):
+        """The observation the env actually returns: this tick's single-frame
+        [actor block | priv tail] from _compute_obs, with the actor block fed
+        through the lag-tap history — [actor(t) | actor(t-tap) ... | priv
+        tail]. On reset the boot frame seeds the whole buffer (no history
+        exists yet; the real rollout scripts boot the same way)."""
+        full = self._compute_obs()
+        actor, priv = full[:self.obs_dim], full[self.obs_dim:]
+        tapped = self._history.reset(actor) if reset else self._history.push(actor)
+        return np.concatenate([tapped, priv])
 
     def privileged_obs(self):
         """The observation a marker_always_visible=true policy would see on the
@@ -1196,7 +1216,7 @@ class SO101BaseEnv(SO101ArmEnv):
                                               self._process_frame)
         self._ingest_frame(capture_t, frame)
 
-        return self._compute_obs(), {}
+        return self._serve_obs(reset=True), {}
 
     def _compute_step(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):
         """Return (reward, terminated, info) for the current step."""
@@ -1257,4 +1277,4 @@ class SO101BaseEnv(SO101ArmEnv):
         if self.render_mode == "human":
             self._render_human()
 
-        return self._compute_obs(), float(reward), terminated, truncated, info
+        return self._serve_obs(reset=False), float(reward), terminated, truncated, info

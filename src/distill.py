@@ -11,17 +11,23 @@ student's own deployment DR. DAgger — not plain behavior cloning — because t
 covariate shift that BC suffers is worst exactly in the states the still-bad
 student visits, which is where it needs the teacher's supervision.
 
-Two regimes, selected by `distill.teacher_obs` (conf/config.yaml):
+Three regimes, selected by `distill.teacher_obs` (conf/config.yaml):
 
   identical  — the teacher sees the student's own observation (architecture-only
-               change, e.g. a wider net or, later, a history-augmented net whose
-               extra inputs are useless for predicting a memoryless teacher and
-               get trained toward zero weight). Requires matching obs spaces.
+               change, e.g. a wider net). Requires matching obs spaces.
+  current    — the teacher sees the single-frame [actor block | priv tail]
+               sliced out of the student's lag-tapped observation (tap 0 plus
+               the tail — exactly its own trained layout). The warm start for
+               a history_taps migration: the student clones the memoryless
+               teacher, its history inputs start useless and get trained
+               toward zero weight, and the mandatory PPO fine-tune learns to
+               use them. Requires a single-frame teacher.
   privileged — the teacher sees the always-fresh-tag privileged view
                (SO101BaseEnv.privileged_obs: what a marker_always_visible=true
                policy sees) while the student trains on the camera obs with
                dropout and hold-last-pose. Here imitation *actively teaches* the
-               student to infer the hidden tag pose from its own obs.
+               student to infer the hidden tag pose from its own obs. Requires
+               a single-frame teacher (the privileged view is single-frame).
 
 The value function is distilled alongside the actor: a warm actor paired with a
 fresh critic is the classic PPO-resume trap — the noisy critic yields garbage
@@ -36,8 +42,10 @@ the teacher's action only partially inferable.
 Usage:
     python -m src.distill env=lift distill.teacher=logs/ppo_lift/best_model.zip
     python -m src.distill env=lift distill.teacher=old.zip distill.net_arch=[512,512,512,512]
+    python -m src.distill env=lift 'history_taps=[0,4,16,48]' \
+        distill.teacher=old.zip distill.teacher_obs=current
     python -m src.distill env=lift distill.teacher=priv.zip distill.teacher_obs=privileged
-then fine-tune:
+then fine-tune (same history_taps override):
     python -m src.train env=lift resume=distilled.zip
 """
 
@@ -49,8 +57,9 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
+from src.base_env import obs_dim_for, priv_dim_for
 from src.train import (
     ALGORITHM_REGISTRY, actor_obs_dim_for, build_fresh_model, env_specs,
     obs_norm_for, runtime_cfg_from_hydra,
@@ -102,18 +111,24 @@ def _policy_outputs(policy, obs_np, device):
     return mean.cpu().numpy(), value.cpu().numpy()
 
 
-def _teacher_obs(venv, student_obs, teacher_obs_mode):
+def _teacher_obs(venv, student_obs, teacher_obs_mode, single_actor_dim, priv_dim):
     """The observation to query the teacher on at the current (pre-step) state:
-    the student's own obs (identical) or the always-fresh privileged view pulled
-    from each subprocess env (privileged). Aligned with student_obs because both
+    the student's own obs (identical), the single-frame [actor block | priv
+    tail] sliced out of the student's lag-tapped obs (current — tap 0 leads the
+    obs, the tail ends it), or the always-fresh privileged view pulled from
+    each subprocess env (privileged). Aligned with student_obs because both
     read the env before the upcoming step."""
     if teacher_obs_mode == "identical":
         return student_obs
+    if teacher_obs_mode == "current":
+        return np.concatenate(
+            [student_obs[:, :single_actor_dim],
+             student_obs[:, student_obs.shape[1] - priv_dim:]], axis=1)
     return np.stack(venv.env_method("privileged_obs")).astype(np.float32)
 
 
 def collect(venv, teacher, student, buf, n_steps, beta, teacher_obs_mode,
-            device, rng):
+            single_actor_dim, priv_dim, device, rng):
     """One DAgger round: roll the env for n_steps ticks under a per-env
     Bernoulli(beta) teacher/student action mix, labeling each visited state with
     the teacher's action+value on its teacher-obs. Stores the *student's* obs as
@@ -122,7 +137,7 @@ def collect(venv, teacher, student, buf, n_steps, beta, teacher_obs_mode,
     n_loops = int(np.ceil(n_steps / n_envs))
     obs = venv.reset()
     for _ in range(n_loops):
-        t_obs = _teacher_obs(venv, obs, teacher_obs_mode)
+        t_obs = _teacher_obs(venv, obs, teacher_obs_mode, single_actor_dim, priv_dim)
         t_mean, t_value = _policy_outputs(teacher.policy, t_obs, device)
         buf.add(obs.astype(np.float32), t_mean, t_value)
 
@@ -166,7 +181,7 @@ def regress(student, buf, epochs, batch_size, vf_coef, optimizer, device, rng):
 
 
 def eval_policy(eval_venv, policy, n_episodes, is_teacher, teacher_obs_mode,
-                seed):
+                single_actor_dim, priv_dim, seed):
     """Roll out n_episodes deterministically on a single-env vec env and return
     (mean_return, success_rate). The teacher is fed its teacher-obs so both
     policies are scored on the same task under the same DR — a distillation bug
@@ -176,8 +191,9 @@ def eval_policy(eval_venv, policy, n_episodes, is_teacher, teacher_obs_mode,
     returns, successes = [], []
     ep_return = 0.0
     while len(returns) < n_episodes:
-        if is_teacher and teacher_obs_mode == "privileged":
-            pol_obs = np.stack(eval_venv.env_method("privileged_obs")).astype(np.float32)
+        if is_teacher:
+            pol_obs = _teacher_obs(eval_venv, obs, teacher_obs_mode,
+                                   single_actor_dim, priv_dim)
         else:
             pol_obs = obs
         action, _ = policy.predict(pol_obs, deterministic=True)
@@ -201,16 +217,21 @@ def distill(cfg: DictConfig, orig_dir: str):
     dcfg = cfg.distill
     assert dcfg.teacher is not None, "distill.teacher (path to teacher .zip) is required"
     teacher_obs_mode = dcfg.teacher_obs
-    assert teacher_obs_mode in ("identical", "privileged"), \
-        f"distill.teacher_obs must be 'identical' or 'privileged', got {teacher_obs_mode!r}"
+    assert teacher_obs_mode in ("identical", "current", "privileged"), \
+        f"distill.teacher_obs must be 'identical', 'current' or 'privileged', " \
+        f"got {teacher_obs_mode!r}"
 
-    frame_stack = int(cfg.frame_stack)
-    # Privileged obs is a single-frame view pulled live from each subprocess env;
-    # feeding a frame-stacked teacher would need a stacked history of it, which
-    # only a history-augmented student needs — build that alongside the history
-    # wrapper, not here. Fail loud rather than silently mis-stack.
-    assert not (teacher_obs_mode == "privileged" and frame_stack > 1), \
-        "privileged distillation supports frame_stack=1 only (see distill.py)"
+    # Single-frame layout dims for the teacher views that slice or bypass the
+    # student's lag-tapped obs (current / privileged): tap 0 leads the obs, the
+    # privileged tail ends it. Reach has neither tags nor tail.
+    if cfg.env_name == "reach":
+        assert teacher_obs_mode == "identical", \
+            "reach has no tag/privileged pipeline; only identical distillation applies"
+        single_actor_dim = priv_dim = None
+    else:
+        single_actor_dim = obs_dim_for(int(cfg.prev_actions_n),
+                                       bool(cfg.marker_include_rot))
+        priv_dim = priv_dim_for(bool(cfg.marker_include_rot))
 
     algo_cls, _, _ = ALGORITHM_REGISTRY[cfg.algorithm]
     seed = int(cfg.seed) if cfg.seed is not None else None
@@ -223,8 +244,6 @@ def distill(cfg: DictConfig, orig_dir: str):
     env_fns, eval_inner, n_substeps = env_specs(cfg, orig_dir, runtime_cfg, n_envs)
 
     vec_env = SubprocVecEnv(env_fns)
-    if frame_stack > 1:
-        vec_env = VecFrameStack(vec_env, n_stack=frame_stack)
     if seed is not None:
         vec_env.seed(seed)
 
@@ -248,11 +267,12 @@ def distill(cfg: DictConfig, orig_dir: str):
             f"identical distillation needs matching obs dims, "
             f"teacher {teacher_obs_dim} != student {student_obs_dim}")
     else:
-        # Privileged teacher shares the single-frame marker layout with the
-        # (frame_stack=1) student — same dims, only always-fresh vs held tags.
-        assert teacher_obs_dim == student_obs_dim, (
-            f"privileged distillation needs the same obs layout, "
-            f"teacher {teacher_obs_dim} != student {student_obs_dim}")
+        # current slices the tap-0 actor block + priv tail out of the student
+        # obs; privileged pulls the always-fresh single-frame view from the
+        # env. Either way the teacher must be a single-frame checkpoint.
+        assert teacher_obs_dim == single_actor_dim + priv_dim, (
+            f"{teacher_obs_mode} distillation needs a single-frame teacher: "
+            f"teacher {teacher_obs_dim} != {single_actor_dim} + {priv_dim}")
     assert teacher.action_space.shape == student.action_space.shape, (
         teacher.action_space, student.action_space)
 
@@ -269,8 +289,6 @@ def distill(cfg: DictConfig, orig_dir: str):
                         student.action_space.shape[0])
 
     eval_venv = DummyVecEnv([lambda: eval_inner])
-    if frame_stack > 1:
-        eval_venv = VecFrameStack(eval_venv, n_stack=frame_stack)
     eval_seed = (seed + 10_000) if seed is not None else 12_345
     n_eval = int(dcfg.eval_episodes)
 
@@ -282,7 +300,8 @@ def distill(cfg: DictConfig, orig_dir: str):
                          job_type="distill")
 
     t_return, t_success = eval_policy(eval_venv, teacher, n_eval, True,
-                                      teacher_obs_mode, eval_seed)
+                                      teacher_obs_mode, single_actor_dim,
+                                      priv_dim, eval_seed)
     print(f"teacher eval: return={t_return:.2f} success={t_success:.3f}")
 
     iterations = int(dcfg.iterations)
@@ -291,12 +310,13 @@ def distill(cfg: DictConfig, orig_dir: str):
                 float(dcfg.beta_start) + (float(dcfg.beta_end) - float(dcfg.beta_start))
                 * it / (iterations - 1))
         collect(vec_env, teacher, student, buf, int(dcfg.steps_per_iter), beta,
-                teacher_obs_mode, device, rng)
+                teacher_obs_mode, single_actor_dim, priv_dim, device, rng)
         action_mse, value_mse = regress(student, buf, int(dcfg.epochs),
                                         int(dcfg.batch_size), float(dcfg.vf_coef),
                                         optimizer, device, rng)
         s_return, s_success = eval_policy(eval_venv, student, n_eval, False,
-                                          teacher_obs_mode, eval_seed)
+                                          teacher_obs_mode, single_actor_dim,
+                                          priv_dim, eval_seed)
         print(f"iter {it + 1}/{iterations}  beta={beta:.2f}  "
               f"buffer={len(buf)}  action_mse={action_mse:.4f}  "
               f"value_mse={value_mse:.4f}  student: return={s_return:.2f} "
