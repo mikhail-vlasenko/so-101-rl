@@ -1,7 +1,14 @@
-"""Shared webcam access for the real rig (Logitech C922).
+"""Shared webcam access for the real rig (two Logitech C922 units).
 
-Single source of truth for the capture device and the MJPG/resolution settings,
-so the calibration and frame-grab scripts don't each hard-code them.
+Single source of truth for capture-device identity and the MJPG/resolution
+settings, so the calibration and frame-grab scripts don't each hard-code them.
+
+With two identical C922s plugged in, /dev/videoN indices are assigned in USB
+enumeration order and can swap across reboots — a raw index silently opens the
+wrong camera. Cameras are therefore identified by their USB serial (`SERIALS`)
+and resolved to the current index through the udev by-id symlink at open time.
+Every device argument defaults to the "main" camera, so single-camera callers
+need no changes.
 """
 import os
 import subprocess
@@ -18,19 +25,42 @@ os.environ["QT_QPA_PLATFORM"] = "xcb"               # force XWayland; no Wayland
 os.environ["QT_QPA_FONTDIR"] = "/usr/share/fonts"   # cv2's bundled fonts dir is missing
 os.environ.pop("QT_STYLE_OVERRIDE", None)           # cv2's Qt can't load the system Kvantum style
 
-DEVICE = 0
 WIDTH = 1280
 HEIGHT = 720
 WARMUP_FRAMES = 10
 
+# USB serials of the two rig cameras. "main" is the original mounted camera all
+# existing single-camera scripts mean by default; "aux" is the second unit for
+# binocular triangulation.
+SERIALS = {"main": "D12FB3AF", "aux": "0AB5B87F"}
 
-def v4l2_set(ctrl, value, device=DEVICE):
+
+def device_index_for_serial(serial):
+    """Resolve a C922 USB serial to its current /dev/videoN index.
+
+    Uses the udev by-id symlink, which is keyed by serial and always points at
+    the device's current node — stable across reboots and replugs, unlike the
+    raw index. Raises if that camera isn't connected.
+    """
+    link = f"/dev/v4l/by-id/usb-046d_C922_Pro_Stream_Webcam_{serial}-video-index0"
+    if not os.path.exists(link):
+        raise RuntimeError(f"camera with serial {serial} not connected ({link} missing)")
+    return int(os.path.realpath(link).removeprefix("/dev/video"))
+
+
+def resolve_device(device):
+    """None -> current index of the main camera; an explicit index passes through."""
+    return device_index_for_serial(SERIALS["main"]) if device is None else device
+
+
+def v4l2_set(ctrl, value, device=None):
     """Set a V4L2/UVC control by name. Raises on failure — fail loud."""
+    device = resolve_device(device)
     subprocess.run(["v4l2-ctl", "-d", f"/dev/video{device}", "-c", f"{ctrl}={value}"],
                    check=True)
 
 
-def set_exposure(value, device=DEVICE):
+def set_exposure(value, device=None):
     """Switch to manual exposure and set exposure_time_absolute (100 us units).
 
     Also pins the framerate so the camera can't lengthen exposure by dropping FPS.
@@ -41,13 +71,16 @@ def set_exposure(value, device=DEVICE):
     v4l2_set("exposure_time_absolute", int(value), device)
 
 
-def set_auto_exposure(device=DEVICE):
+def set_auto_exposure(device=None):
     v4l2_set("auto_exposure", 3, device)               # 3 = aperture priority (auto)
 
 
-def open_camera(device=DEVICE, width=WIDTH, height=HEIGHT, warmup=WARMUP_FRAMES,
+def open_camera(device=None, width=WIDTH, height=HEIGHT, warmup=WARMUP_FRAMES,
                 focus=None, exposure=None, gain=None):
-    """Open the C922 in MJPG at the configured resolution and warm it up.
+    """Open a C922 in MJPG at the configured resolution and warm it up.
+
+    `device` is a /dev/videoN index, normally obtained from
+    `device_index_for_serial`; None opens the main camera.
 
     Warmup discards the first few frames so auto-exposure/white-balance settle.
     `focus` controls the lens:
@@ -64,6 +97,7 @@ def open_camera(device=DEVICE, width=WIDTH, height=HEIGHT, warmup=WARMUP_FRAMES,
     `gain` (0-255) brightens the manual-exposure image without lengthening it.
     Raises RuntimeError if the device can't be opened — fail loud, no silent None.
     """
+    device = resolve_device(device)
     cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open /dev/video{device}")

@@ -19,17 +19,18 @@ Controls (focus the preview window):
   ENTER / q  finish and solve (needs >= MIN_VIEWS)
   ESC        abort without solving
 
-Run:
-    conda run -n mujoco_env python -m real.calibrate_camera
+Run (`--camera` picks the unit; "main" writes the legacy camera_intrinsics.yaml):
+    conda run -n mujoco_env python -m real.calibrate_camera --camera aux
 """
-import os
+import argparse
 import time
 
 import cv2
 import numpy as np
 import yaml
 
-from real.camera import open_camera, WIDTH, HEIGHT
+from real.camera import open_camera, device_index_for_serial, SERIALS, WIDTH, HEIGHT
+from real.pose import intrinsics_path
 
 SQUARE_SIZE_M = 0.02                      # printed checkerboard square edge, metres
 FOCUS_ABSOLUTE = 30                       # pinned lens focus (0-250, step 5); rig MUST reuse this
@@ -42,7 +43,6 @@ AUTO_MIN_GAP_S = 0.8                      # min time between auto-captures
 STILL_PX = 1.5                            # max frame-to-frame corner motion to count as "still"
 PRUNE_FACTOR = 2.0                        # drop views with per-view RMS > factor * median, then refit
 SUBPIX_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-OUT_PATH = os.path.join(os.path.dirname(__file__), "camera_intrinsics.yaml")
 
 
 def detect(gray, pattern):
@@ -75,8 +75,9 @@ def solve(objpoints, imgpoints, image_size, pattern):
     return rms, K, dist, per_view
 
 
-def save(K, dist, rms, pattern, n_views, image_size):
+def save(path, serial, K, dist, rms, pattern, n_views, image_size):
     data = {
+        "serial": serial,
         "image_width": image_size[0],
         "image_height": image_size[1],
         "camera_matrix": K.tolist(),
@@ -87,13 +88,21 @@ def save(K, dist, rms, pattern, n_views, image_size):
         "focus_absolute": FOCUS_ABSOLUTE,
         "num_views": n_views,
     }
-    with open(OUT_PATH, "w") as f:
+    with open(path, "w") as f:
         yaml.safe_dump(data, f, default_flow_style=None, sort_keys=False)
-    print(f"\nwrote {OUT_PATH}")
+    print(f"\nwrote {path}")
 
 
 def main():
-    cap = open_camera(focus=FOCUS_ABSOLUTE)   # pin focus: drifting focal length ruins intrinsics
+    parser = argparse.ArgumentParser(description="Camera intrinsic calibration")
+    parser.add_argument("--camera", choices=sorted(SERIALS), default="main",
+                        help="which C922 unit to calibrate (intrinsics are per-lens)")
+    args = parser.parse_args()
+    serial = SERIALS[args.camera]
+    device = device_index_for_serial(serial)
+    print(f"calibrating '{args.camera}' (serial {serial}, /dev/video{device})")
+
+    cap = open_camera(device=device, focus=FOCUS_ABSOLUTE)  # pin focus: drifting focal length ruins intrinsics
     image_size = (WIDTH, HEIGHT)
 
     locked = None                  # inner-corner pattern, fixed after first detection
@@ -153,7 +162,7 @@ def main():
                     (0, 255, 0) if corners is not None else (0, 0, 255), 2)
         cv2.putText(view, "SPACE grab  BACKSPACE undo  ENTER/q solve  ESC abort",
                     (12, HEIGHT - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.imshow("calibrate", view)
+        cv2.imshow(f"calibrate {args.camera}", view)
 
         key = cv2.waitKey(1) & 0xFF
         if key == 32 and corners is not None:          # SPACE
@@ -192,7 +201,7 @@ def main():
         objpoints = [objpoints[i] for i in keep]
 
     print(f"fx={K[0, 0]:.1f} fy={K[1, 1]:.1f} cx={K[0, 2]:.1f} cy={K[1, 2]:.1f}")
-    save(K, dist, rms, locked, len(objpoints), image_size)
+    save(intrinsics_path(args.camera), serial, K, dist, rms, locked, len(objpoints), image_size)
 
 
 if __name__ == "__main__":

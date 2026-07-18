@@ -19,7 +19,18 @@ import yaml
 
 from real.marker_spec import TAG_SIZE_MM
 
-INTRINSICS_PATH = os.path.join(os.path.dirname(__file__), "camera_intrinsics.yaml")
+def intrinsics_path(camera):
+    """Per-unit intrinsics file for a camera name from `real.camera.SERIALS`.
+
+    Intrinsics are per-lens — the two C922 units differ by ~1.4% in focal
+    length — so each unit gets its own file. "main" keeps the legacy unsuffixed
+    name that predates the second camera.
+    """
+    suffix = "" if camera == "main" else f"_{camera}"
+    return os.path.join(os.path.dirname(__file__), f"camera_intrinsics{suffix}.yaml")
+
+
+INTRINSICS_PATH = intrinsics_path("main")
 
 
 def load_intrinsics(path=INTRINSICS_PATH):

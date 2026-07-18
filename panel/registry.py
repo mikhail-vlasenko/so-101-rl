@@ -246,8 +246,26 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         id="calibrate_camera", title="Calibrate intrinsics", page="camera",
         module="real.calibrate_camera", arg_style="argparse",
         description="Checkerboard intrinsic calibration (native cv2 window).",
+        args=(
+            ArgSpec("--camera", "choice", "C922 unit (per-lens intrinsics)",
+                    default="main", choices=("main", "aux")),
+        ),
         resources=(Resource.CAMERA,),
         native_gui=True,
+    ),
+    ScriptSpec(
+        id="stereo_check", title="Stereo triangulation check", page="camera",
+        module="real.stereo_check", arg_style="argparse",
+        description="Triangulate the sponge tag from both table-anchored cameras "
+                    "and report metric accuracy (recovered tag edge vs printed size) "
+                    "and cross-view ray consistency.",
+        args=(
+            ArgSpec("--frames", "int", "Frames to accumulate", default="100"),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+            ArgSpec("--save-frames", "str", "Directory for annotated frame pair"),
+        ),
+        resources=(Resource.CAMERA,),
     ),
     ScriptSpec(
         id="focus_picker", title="Focus picker", page="camera",
