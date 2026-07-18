@@ -6,11 +6,11 @@ joint angle is
 
     theta_true = theta_encoder - qpos_bias - compliance * tau_grav(theta_encoder - qpos_bias)
 
-(see `real/compliance.py`). The deploy-time wrapper applies both before the policy sees
+(see `real/calib/compliance.py`). The deploy-time wrapper applies both before the policy sees
 the observation, so the arm's forward kinematics (and therefore the FK end-effector and
 marker channels) line up with what the camera measures. See `calibration_plan.md` Step 1.
 
-Solved together by `real/calibrate_qpos.py`. The cube vision offset (`cube_pos_bias`,
+Solved together by `real/calib/calibrate_qpos.py`. The cube vision offset (`cube_pos_bias`,
 Step 2) is a separate pass and is not written here yet.
 """
 import os

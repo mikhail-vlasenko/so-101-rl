@@ -1,16 +1,16 @@
 """Roll out the trained reach policy on the real SO-101 arm.
 
 Usage:
-    python -m real.rollout_real                       # default: waypoint 0, dry-run, latest checkpoint
-    python -m real.rollout_real --execute             # actually send commands
-    python -m real.rollout_real --waypoint 2 --execute
-    python -m real.rollout_real --model best --execute        # best_model.zip
-    python -m real.rollout_real --model logs/ppo_reach/best_model.zip --execute
-    python -m real.rollout_real --slow 3 --execute    # 1/3 physical speed, no retraining
+    python -m real.rollout.rollout_real                       # default: waypoint 0, dry-run, latest checkpoint
+    python -m real.rollout.rollout_real --execute             # actually send commands
+    python -m real.rollout.rollout_real --waypoint 2 --execute
+    python -m real.rollout.rollout_real --model best --execute        # best_model.zip
+    python -m real.rollout.rollout_real --model logs/ppo_reach/best_model.zip --execute
+    python -m real.rollout.rollout_real --slow 3 --execute    # 1/3 physical speed, no retraining
 
 Setup, safety gating, and per-tick command shaping (training-matched
 quantization, raw clamp, sub-target streaming, --slow time dilation) all live
-in real.rollout_common — this script owns only the reach-specific observation,
+in real.rollout.rollout_common — this script owns only the reach-specific observation,
 termination, and plots. --execute is OFF by default; Ctrl-C disables torque.
 """
 
@@ -32,11 +32,11 @@ from .rollout_common import (
     load_env_cfg,
     load_policy,
 )
-from .calibration import load_calibration, load_compliance
-from .twin.mapping import JOINT_NAMES, compute_ee_pos, load_joint_maps
-from .twin.servo_io import ServoBus
+from ..calib.calibration import load_calibration, load_compliance
+from ..twin.mapping import JOINT_NAMES, compute_ee_pos, load_joint_maps
+from ..twin.servo_io import ServoBus
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 LOG_DIR = REPO_ROOT / "logs" / "ppo_reach"
 

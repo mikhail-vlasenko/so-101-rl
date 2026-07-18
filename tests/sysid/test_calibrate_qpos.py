@@ -1,4 +1,4 @@
-"""Contract tests for the encoder-bias calibration (real/calibrate_qpos.py).
+"""Contract tests for the encoder-bias calibration (real/calib/calibrate_qpos.py).
 
 The solver is exercised on synthetic data with a known bias and camera pose, so
 the optimisation math is checked independent of real-rig noise: clean data must
@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-import real.calibrate_qpos as cq
-from real.calibrate_qpos import (
+import real.calib.calibrate_qpos as cq
+from real.calib.calibrate_qpos import (
     MIN_EE_Z,
     OBSERVABLE_JOINTS,
     OUTLIER_FLOOR_MM,
@@ -29,8 +29,8 @@ from real.calibrate_qpos import (
     verify_drive_safe,
     write_marker_sites,
 )
-from real.calibration import load_calibration, load_compliance, save_calibration
-from real.compliance import COMP_JOINTS, gravity_deflection
+from real.calib.calibration import load_calibration, load_compliance, save_calibration
+from real.calib.compliance import COMP_JOINTS, gravity_deflection
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import load_joint_maps
 from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_model
@@ -204,7 +204,7 @@ def test_recovers_planted_compliance(setup):
             f"compliance joint {j}: {comp_est[j]} vs {comp_true[j]}"
 
     # Compliance genuinely mattered: a bias-only fit can't explain the deflection.
-    from real.calibrate_qpos import solve_camera
+    from real.calib.calibrate_qpos import solve_camera
     b_only = solve_bias(samples, model, data, qposadr, site_ids)
     corr_only = [(qpos - b_only, poses) for qpos, poses in samples]
     _, rms_only, _, _ = solve_camera(corr_only, model, data, qposadr, site_ids)

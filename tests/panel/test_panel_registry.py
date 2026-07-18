@@ -39,7 +39,7 @@ def test_argparse_command_golden_with_flag_and_stream():
         "slow": "3",
         "seed": "0",
     }, stream_port=8801)
-    assert argv == ["-m", "real.rollout_lift",
+    assert argv == ["-m", "real.rollout.rollout_lift",
                     "--model", "latest", "--execute", "--slow", "3",
                     "--seed", "0",
                     "--no-view", "--stream-port", "8801"]
@@ -54,7 +54,7 @@ def test_empty_values_are_omitted():
 def test_flag_false_is_omitted():
     spec = get_spec("rollout_lift")
     argv = build_command(spec, {"execute": "off", "no-view": ""})
-    assert argv == ["-m", "real.rollout_lift"]
+    assert argv == ["-m", "real.rollout.rollout_lift"]
 
 
 def test_unknown_field_rejected():

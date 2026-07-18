@@ -20,7 +20,7 @@ Controls (focus the preview window):
   ESC        abort without solving
 
 Run (`--camera` picks the unit; "main" writes the legacy camera_intrinsics.yaml):
-    conda run -n mujoco_env python -m real.calibrate_camera --camera aux
+    conda run -n mujoco_env python -m real.calib.calibrate_camera --camera aux
 """
 import argparse
 import time
@@ -29,8 +29,8 @@ import cv2
 import numpy as np
 import yaml
 
-from real.camera import open_camera, device_index_for_serial, SERIALS, WIDTH, HEIGHT
-from real.pose import intrinsics_path
+from real.vision.camera import open_camera, device_index_for_serial, SERIALS, WIDTH, HEIGHT
+from real.vision.pose import intrinsics_path
 
 SQUARE_SIZE_M = 0.02                      # printed checkerboard square edge, metres
 FOCUS_ABSOLUTE = 30                       # pinned lens focus (0-250, step 5); rig MUST reuse this

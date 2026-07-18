@@ -23,7 +23,7 @@ class Detection:
 
 # pupil-apriltags returns corners as TR, TL, BL, BR (verified by detecting a
 # rendered tag); reorder to the OpenCV-ArUco canonical TL, TR, BR, BL so both
-# families feed real.pose.PoseEstimator the same corner order.
+# families feed real.vision.pose.PoseEstimator the same corner order.
 _APRILTAG_TO_CANONICAL = [1, 0, 3, 2]
 
 

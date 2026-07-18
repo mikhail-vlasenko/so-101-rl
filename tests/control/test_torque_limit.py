@@ -5,7 +5,7 @@ SERVO_TORQUE_LIMIT_FRAC, or the sim plant and the servo cap drift apart."""
 import mujoco
 import numpy as np
 
-from real.rollout_common import REPO_ROOT
+from real.rollout.rollout_common import REPO_ROOT
 from real.twin.constants import (
     SERVO_TORQUE_LIMIT,
     SERVO_TORQUE_LIMIT_FRAC,

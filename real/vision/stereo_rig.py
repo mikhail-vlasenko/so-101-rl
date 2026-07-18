@@ -7,9 +7,9 @@ source) agrees on capture configuration.
 """
 import yaml
 
-from real.camera import SERIALS, device_index_for_serial, open_camera
+from real.vision.camera import SERIALS, device_index_for_serial, open_camera
 from real.marker_spec import MARKER_EXPOSURE, MARKER_GAIN
-from real.pose import intrinsics_path, load_intrinsics
+from real.vision.pose import intrinsics_path, load_intrinsics
 
 CAMERA_NAMES = tuple(SERIALS)
 

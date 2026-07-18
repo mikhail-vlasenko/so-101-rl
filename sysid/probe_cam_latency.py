@@ -57,9 +57,9 @@ import mujoco
 import numpy as np
 from omegaconf import OmegaConf
 
-from real.calibration import load_calibration, load_compliance
-from real.compliance import gravity_deflection
-from real.marker_obs import CameraMarkerSource
+from real.calib.calibration import load_calibration, load_compliance
+from real.calib.compliance import gravity_deflection
+from real.rollout.marker_obs import CameraMarkerSource
 from real.twin.constants import INTERP_HZ, SERVO_ACCEL, SERVO_POSITION_KP, SERVO_SPEED
 from real.twin.control import clamp_raw_delta, stream_sub_targets
 from real.twin.mapping import load_joint_maps, rad_to_raw, raw_to_rad

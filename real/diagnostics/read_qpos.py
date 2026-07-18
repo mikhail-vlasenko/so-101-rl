@@ -4,7 +4,7 @@ Torque stays off, so the arm can be posed by hand and queried. Useful for
 discovering contact-relevant poses (e.g. near the table) to seed calibration.
 
 Usage:
-    python -m real.read_qpos                 # default port /dev/ttyACM0
+    python -m real.diagnostics.read_qpos                 # default port /dev/ttyACM0
 """
 
 import argparse
@@ -21,7 +21,7 @@ from real.twin.mapping import (
 )
 from real.twin.servo_io import ServoBus
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 DEFAULT_CAL = REPO_ROOT / "real" / "follower_calibration.json"
 

@@ -2,7 +2,7 @@ import sys
 
 import cv2
 
-from real.camera import open_camera
+from real.vision.camera import open_camera
 
 OUTPUT = "c922_frame.jpg"
 

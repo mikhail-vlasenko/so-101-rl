@@ -31,8 +31,8 @@ from stable_baselines3 import PPO
 from src.checkpoints import resolve_model_path
 from src.units import action_to_target, max_joint_speed_rad_s, max_raw_delta_per_step
 
-from .compliance import encoder_from_true, gravity_deflection
-from .twin.constants import (
+from ..calib.compliance import encoder_from_true, gravity_deflection
+from ..twin.constants import (
     INTERP_HZ,
     SERVO_ACCEL,
     SERVO_POSITION_DEADZONE,
@@ -40,11 +40,11 @@ from .twin.constants import (
     SERVO_SPEED,
     SERVO_TORQUE_LIMIT,
 )
-from .twin.control import clamp_raw_delta, stream_sub_targets
-from .twin.mapping import JointMaps, rad_to_raw, raw_to_rad
-from .twin.servo_io import ServoBus
+from ..twin.control import clamp_raw_delta, stream_sub_targets
+from ..twin.mapping import JointMaps, rad_to_raw, raw_to_rad
+from ..twin.servo_io import ServoBus
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CAL = REPO_ROOT / "real" / "follower_calibration.json"
 
 # Tolerance (rad) on the boot-pose calibration check: encoder noise and
@@ -144,7 +144,7 @@ class ArmLoop:
         self.bus = bus
         self.n_joints = len(jm.items)
         self.direction = np.ones(self.n_joints, dtype=np.int8)  # verified via twin: no inversions
-        # Encoder -> true-angle model from real/calibrate_qpos.py (see real/compliance.py):
+        # Encoder -> true-angle model from real/calib/calibrate_qpos.py (see real/calib/compliance.py):
         #   theta_true = theta_enc - qpos_bias - compliance * tau_grav(theta_enc - qpos_bias)
         # The constant bias plus the load-dependent gravity deflection are applied on
         # every read so the policy sees the true joint angle it trained on (and the same

@@ -17,8 +17,11 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
   `servo_profile.py`)
 - `conf/` — Hydra config. `config.yaml` owns all hyperparameters; groups: `env`
   (reach/lift/pickplace/multitask), `dr` + `shaping` (curriculum stages)
-- `real/` — rollout scripts (`rollout_common.py` core), calibration stack, digital
-  twin (`python -m real.twin.digital_twin`)
+- `real/` — `vision/` (camera + marker detection/pose primitives), `calib/`
+  (calibration stack), `tracking/` (stereo/SAM object tracking), `rollout/`
+  (rollout scripts, `rollout_common.py` core), `diagnostics/` (one-off reads),
+  `twin/` (digital twin, `python -m real.twin.digital_twin`); `marker_spec.py`
+  stays at the top — the tag/marker source of truth every subpackage reads
 - `sysid/` — real-vs-sim dynamics fitting (record → replay → analyze → fit) and
   probes; the fit is baked into `so101.xml`
 - `panel/` — web control panel (`python -m panel`, port 8800)
@@ -37,7 +40,7 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
   invalidates checkpoints. Migrate with `src/distill.py`, not checkpoint surgery,
   and always follow distillation with a short PPO fine-tune (`resume=`).
 - **Sim/real twins**: some behavior is implemented twice and must stay identical —
-  hold-last-pose/age (`src/base_env.py` ↔ `real/marker_obs.py`), `ObsHistory`
+  hold-last-pose/age (`src/base_env.py` ↔ `real/rollout/marker_obs.py`), `ObsHistory`
   feeding, `action_to_target`. Change one side, change the other; contract tests in
   `tests/` pin them.
 - `src/units.py` is the single source of the action → rad → servo-raw chain; never
@@ -45,7 +48,7 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
 - `use_servo_profile` stays **on**: the `so101.xml` sysid fit was refit with the
   profile, so the sim is under-damped without it. Keep any new sim driver on this
   flag.
-- New real rollout scripts must build on `ArmLoop` (`real/rollout_common.py`) —
+- New real rollout scripts must build on `ArmLoop` (`real/rollout/rollout_common.py`) —
   never reimplement the per-tick command shaping.
 - **Curriculum** = the `dr`/`shaping` config groups + the crutch flags
   (`marker_always_visible`, `cube_smallest_face_only`). None change obs dim, so

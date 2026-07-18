@@ -30,7 +30,7 @@ def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
 
     Each marker contributes its world xyz (M=3); when marker_include_rot is true it
     also contributes a world rotation vector (axis-angle, +3 dims, M=6) — the same
-    quantities the camera pipeline recovers for the physical AprilTags (real/pose.py
+    quantities the camera pipeline recovers for the physical AprilTags (real/vision/pose.py
     rvec/tvec, camera->world mapped). marker_age is each tag's seconds since the
     capture of the pose it is serving (capped at MARKER_AGE_CAP_S): pipeline
     latency when freshly detected, growing while the tag is undetected and its
@@ -77,7 +77,7 @@ CUBE_TAG_SITE_NAME = "cube_tag"
 # Undetected tags keep their last measured pose in the obs while their age
 # channel grows, capped here; a tag never detected this episode reads an
 # all-zero pose with age pinned at the cap. Shared with the real pipeline
-# (real/marker_obs.py) — the identical convention on both sides.
+# (real/rollout/marker_obs.py) — the identical convention on both sides.
 MARKER_AGE_CAP_S = 1.0
 
 # Fixed camera in so101.xml standing in for the physical webcam that watches
@@ -118,7 +118,7 @@ def marker_world_poses(data, site_ids):
     """World poses of the marker sites: (pos (N,3), rot (N,3)).
 
     rot is an axis-angle rotation vector, matching the Rodrigues-vector
-    convention of cv2.solvePnP in real/pose.py.
+    convention of cv2.solvePnP in real/vision/pose.py.
     """
     pos = np.empty((len(site_ids), 3))
     rot = np.empty((len(site_ids), 3))
@@ -139,7 +139,7 @@ def marker_world_normals(data, site_ids):
 class CameraModel:
     """The fixed tag camera as a calibrated pinhole: its world pose (cam_xpos /
     cam_xmat, MuJoCo convention — the camera looks down its local -z with +y up)
-    plus the intrinsics from real/camera_intrinsics.yaml.
+    plus the intrinsics from real/vision/camera_intrinsics.yaml.
 
     in_view() is the field-of-view test the marker-visibility pipeline uses in
     place of the old world-height proxy: a world point is projected through the
@@ -539,7 +539,7 @@ class SO101BaseEnv(SO101ArmEnv):
         # with tag_depth_factor derive the depth-vs-lateral split. The
         # camera re-anchor's common-mode error is per-episode only
         # (obs_bias.marker_common_sigma): the real pipeline EMAs the static
-        # camera pose (real/marker_obs.py), leaving no meaningful per-frame
+        # camera pose (real/rollout/marker_obs.py), leaving no meaningful per-frame
         # common jitter. No qvel key: the qvel obs is the backward difference of
         # consecutive qpos obs (matching the real pipeline), so its noise is
         # inherited from qpos_sigma, not configured.
@@ -574,7 +574,7 @@ class SO101BaseEnv(SO101ArmEnv):
         self._cube_rot_bias = np.zeros(3)
         # Common-mode shift shared by every tag (arm markers + cube) for the whole
         # episode: the real pipeline re-anchors the camera from one table tag
-        # (real/marker_obs.py), so its calibration/detection error moves all tags
+        # (real/rollout/marker_obs.py), so its calibration/detection error moves all tags
         # together, not independently. Drawn in reset from obs_bias.
         self._common_pos_bias = np.zeros(3)
         # Actor block width; the full observation appends the privileged tail
@@ -793,7 +793,7 @@ class SO101BaseEnv(SO101ArmEnv):
         """Consume one camera frame: it becomes the current frame (render tint,
         hidden metrics), and each detected tag's measurement — arm markers and
         cube tag alike — overwrites the held pose the obs serves, the same
-        per-frame update the real capture thread applies (real/marker_obs.py)."""
+        per-frame update the real capture thread applies (real/rollout/marker_obs.py)."""
         self._cam_frame = frame
         det = frame.detected
         self._held_marker_pos[det] = frame.marker_pos[det]

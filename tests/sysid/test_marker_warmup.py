@@ -11,7 +11,7 @@ import time
 import numpy as np
 import pytest
 
-from real.marker_obs import CameraMarkerSource
+from real.rollout.marker_obs import CameraMarkerSource
 from real.marker_spec import TABLE_TAG_ID
 
 

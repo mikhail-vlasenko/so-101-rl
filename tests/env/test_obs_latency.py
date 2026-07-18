@@ -3,7 +3,7 @@
 Only camera-derived observations (markers, cube) lag. They come from discrete
 simulated camera frames (src/camera_sim.py): captured every frame_ms with a
 per-episode random phase, available to the policy delay_ms after capture,
-consumed at the next control tick — mirroring real/marker_obs.py, where the
+consumed at the next control tick — mirroring real/rollout/marker_obs.py, where the
 measured rollout staleness (marker_age_ms telemetry) is the AprilTag detection
 plus the wait for the next policy tick on top of the capture pipeline delay.
 

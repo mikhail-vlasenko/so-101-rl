@@ -8,8 +8,8 @@ angle lags the encoder by an amount proportional to the gravity torque on that j
     q_true = q_enc - qpos_bias - compliance * tau_grav(q_enc - qpos_bias)
 
 `compliance` (rad per N.m, 6-vector, zero on the rigid joints) is solved jointly with
-the encoder bias in real/calibrate_qpos.py and stored in calibration.yaml. The
-calibration solve and the real-arm deployment (real/rollout_common.py) both correct
+the encoder bias in real/calib/calibrate_qpos.py and stored in calibration.yaml. The
+calibration solve and the real-arm deployment (real/rollout/rollout_common.py) both correct
 poses through this one module, so the sim FK the bias was fit against and the obs the
 policy sees at deployment share the exact same forward model. Cross-validated on the
 qpos-calib sweep it roughly halves the held-out marker error (3.6 -> 2.0 mm mean,

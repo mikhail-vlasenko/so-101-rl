@@ -18,7 +18,7 @@ Three complementary probes, all offline (no hardware):
             delta means the camera marker obs — not qpos/qvel/cube — is what
             changed the policy's mind on the real arm.
 
-The cube spawn is reproduced from --seed exactly like real/rollout_lift.py
+The cube spawn is reproduced from --seed exactly like real/rollout/rollout_lift.py
 (same rng call sequence) and cross-checked against the CSV's first cube row.
 
 Usage:
@@ -39,7 +39,7 @@ import pandas as pd
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from real.rollout_common import load_policy
+from real.rollout.rollout_common import load_policy
 from src.base_env import (
     JOINT_NAMES,
     MARKER_AGE_CAP_S,
@@ -90,7 +90,7 @@ def load_rollout(csv_path: Path) -> dict:
 
 def reproduce_spawn(seed: int, env_cfg: dict, model: mujoco.MjModel,
                     csv_cube0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Replicate real/rollout_lift.py's cube spawn rng sequence for --seed and
+    """Replicate real/rollout/rollout_lift.py's cube spawn rng sequence for --seed and
     cross-check it against the CSV's first cube position."""
     cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
     rng = np.random.default_rng(seed)
@@ -202,7 +202,7 @@ def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float,
         ]).astype(np.float32)
         tapped = history.reset(frame) if k == 2 else history.push(frame)
         # Privileged pad: critic-only dims, never read by the actor
-        # (real/rollout_lift.py does the same).
+        # (real/rollout/rollout_lift.py does the same).
         obs = np.concatenate([tapped, np.zeros(priv_dim_for(False), dtype=np.float32)])
         action, _ = policy.predict(obs, deterministic=True)
         pred[k] = np.clip(action, -1.0, 1.0)

@@ -7,7 +7,7 @@ from src.marker_noise import anisotropic_pos_noise, load_focal_px, pos_noise_sig
 
 
 def test_load_focal_px_matches_intrinsics():
-    """Focal is the mean of fx/fy from real/camera_intrinsics.yaml (~968 px)."""
+    """Focal is the mean of fx/fy from real/vision/camera_intrinsics.yaml (~968 px)."""
     assert 960.0 < load_focal_px() < 975.0
 
 

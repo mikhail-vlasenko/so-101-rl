@@ -3,7 +3,7 @@
 The cube obs is the raw pose (+ age) of the AprilTag on the sponge's largest
 face (src/base_env.py convention). Its source follows --marker-source:
 
-- camera: the real sponge. real/marker_obs.py measures tag id 1 and maps it to
+- camera: the real sponge. real/rollout/marker_obs.py measures tag id 1 and maps it to
   the base frame; the policy chases the physical object, and success is dwell
   on the measured sponge-center height (back-derived from the tag pose for
   termination only). The lockstep sim cube is pinned to the measurement each
@@ -14,16 +14,16 @@ face (src/base_env.py convention). Its source follows --marker-source:
   contract with no physical sponge.
 
 Usage:
-    python -m real.rollout_lift                         # dry-run, latest checkpoint
-    python -m real.rollout_lift --execute               # actually drive the servos
-    python -m real.rollout_lift --marker-source camera --execute   # real sponge
-    python -m real.rollout_lift --model best --execute  # best_model.zip
-    python -m real.rollout_lift --seed 0                # reproducible fk cube spawn
-    python -m real.rollout_lift --slow 3 --execute      # 1/3 physical speed, no retraining
+    python -m real.rollout.rollout_lift                         # dry-run, latest checkpoint
+    python -m real.rollout.rollout_lift --execute               # actually drive the servos
+    python -m real.rollout.rollout_lift --marker-source camera --execute   # real sponge
+    python -m real.rollout.rollout_lift --model best --execute  # best_model.zip
+    python -m real.rollout.rollout_lift --seed 0                # reproducible fk cube spawn
+    python -m real.rollout.rollout_lift --slow 3 --execute      # 1/3 physical speed, no retraining
 
 Setup, safety gating, and per-tick command shaping (training-matched
 quantization, raw clamp, sub-target streaming, --slow time dilation) all live
-in real.rollout_common — this script owns only observation construction,
+in real.rollout.rollout_common — this script owns only observation construction,
 termination, and plots. --execute is OFF by default; Ctrl-C disables torque.
 """
 
@@ -64,12 +64,12 @@ from .rollout_common import (
 )
 from src.obs_history import ObsHistory
 
-from .calibration import load_calibration, load_compliance
+from ..calib.calibration import load_calibration, load_compliance
 from .marker_obs import CameraMarkerSource
-from .twin.mapping import load_joint_maps
-from .twin.servo_io import ServoBus
+from ..twin.mapping import load_joint_maps
+from ..twin.servo_io import ServoBus
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene_lift.xml"
 LOG_DIR = REPO_ROOT / "logs" / "ppo_lift"
 
@@ -115,7 +115,7 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
                         "(default) fills them from the lockstep sim; 'camera' feeds "
                         "measured AprilTag poses (arm tags + the sponge's tag id 1) "
                         "mapped to the base frame via the calibrated extrinsics "
-                        "(real/calibrate_qpos.py).")
+                        "(real/calib/calibrate_qpos.py).")
     p.add_argument("--family", default="apriltag", choices=["apriltag", "aruco"],
                    help="Marker family for --marker-source camera.")
     return p.parse_args()
@@ -416,7 +416,7 @@ def main() -> int:
             fk_pos_now, fk_rot_now = marker_world_poses(data, marker_site_ids)
             if marker_source is not None:
                 # Measured AprilTag poses in the base frame, held at the last
-                # detection per tag with their age (real/marker_obs.py).
+                # detection per tag with their age (real/rollout/marker_obs.py).
                 marker_pos, marker_rot, marker_age = marker_source.marker_poses()
                 cube_tag_pos, cube_tag_rot, cube_age = marker_source.cube_pose()
                 # Latency of the newest frame, sampled the instant the policy

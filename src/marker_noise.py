@@ -14,8 +14,8 @@ distance, and the printed tag size -- not hand-tuned magnitudes:
 with Z the tag->camera distance, f the focal length (px), W the tag edge (m).
 Only two DR knobs remain: `px_noise` (effective solvePnP corner error, px) and
 `depth_factor` (range-error amplification over the image-plane baseline). f comes
-from real/camera_intrinsics.yaml and W from real/marker_spec.py -- the same
-calibration the real pipeline (real/pose.py, real/marker_obs.py) uses, so the
+from real/vision/camera_intrinsics.yaml and W from real/marker_spec.py -- the same
+calibration the real pipeline (real/vision/pose.py, real/rollout/marker_obs.py) uses, so the
 noise is grounded in the physical setup rather than duplicated constants.
 """
 from pathlib import Path
@@ -24,13 +24,13 @@ from typing import NamedTuple
 import numpy as np
 import yaml
 
-_INTRINSICS_PATH = Path(__file__).resolve().parent.parent / "real" / "camera_intrinsics.yaml"
+_INTRINSICS_PATH = Path(__file__).resolve().parent.parent / "real" / "vision" / "camera_intrinsics.yaml"
 
 
 class CameraIntrinsics(NamedTuple):
     """Calibrated pinhole intrinsics (px) and image size from
-    real/camera_intrinsics.yaml -- the single source of truth shared with the
-    real solvePnP pipeline (real/pose.py). fx/fy/cx/cy define the camera matrix;
+    real/vision/camera_intrinsics.yaml -- the single source of truth shared with the
+    real solvePnP pipeline (real/vision/pose.py). fx/fy/cx/cy define the camera matrix;
     width/height are the frame bounds the field-of-view check tests against."""
     fx: float
     fy: float
@@ -57,7 +57,7 @@ def load_camera_intrinsics(path: Path = _INTRINSICS_PATH) -> CameraIntrinsics:
 
 def load_focal_px(path: Path = _INTRINSICS_PATH) -> float:
     """Mean focal length (px) from the calibrated camera matrix -- the single
-    source of truth shared with the real solvePnP pipeline (real/pose.py)."""
+    source of truth shared with the real solvePnP pipeline (real/vision/pose.py)."""
     return load_camera_intrinsics(path).focal_px
 
 

@@ -4,11 +4,11 @@ marker_spec — its 3-D pose in the camera frame: position (cm) and rotation (ro
 pitch/yaw, deg), with the tag's axes drawn (x red, y green, z out of the face blue).
 
 Works for either printed family, selected with --family (default aruco):
-    conda run -n mujoco_env python -m real.marker_view                  # ArUco (OpenCV)
-    conda run -n mujoco_env python -m real.marker_view --family apriltag # AprilTag (pupil-apriltags)
+    conda run -n mujoco_env python -m real.vision.marker_view                  # ArUco (OpenCV)
+    conda run -n mujoco_env python -m real.vision.marker_view --family apriltag # AprilTag (pupil-apriltags)
 
 ArUco uses OpenCV; AprilTag uses the native pupil-apriltags detector (better
-motion-blur robustness). Both go through real.detect so this file is backend-agnostic.
+motion-blur robustness). Both go through real.vision.detect so this file is backend-agnostic.
 
 Tune exposure/gain live to fight motion blur: shorten exposure until tags survive
 motion, then raise gain to recover brightness. Pass a known-good value with
@@ -23,12 +23,12 @@ import argparse
 import cv2
 import numpy as np
 
-from real.camera import open_camera, set_exposure, set_auto_exposure, v4l2_set, HEIGHT
+from real.vision.camera import open_camera, set_exposure, set_auto_exposure, v4l2_set, HEIGHT
 from real.marker_spec import FAMILIES, MARKER_EXPOSURE, MARKER_GAIN
-from real.calibrate_camera import FOCUS_ABSOLUTE
-from real.detect import make_detector
-from real.overlay import annotate_detections
-from real.pose import load_intrinsics, PoseEstimator
+from real.calib.calibrate_camera import FOCUS_ABSOLUTE
+from real.vision.detect import make_detector
+from real.vision.overlay import annotate_detections
+from real.vision.pose import load_intrinsics, PoseEstimator
 
 EXPOSURE_MIN, EXPOSURE_MAX, EXPOSURE_STEP = 3, 2047, 10
 MANUAL_START = 80              # exposure_time_absolute to drop to when leaving auto (~8 ms)

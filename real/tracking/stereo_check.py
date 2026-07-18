@@ -5,19 +5,19 @@ segmentation model sits on top: both cameras are independently anchored to the
 arm base frame per frame via the fixed table tag (`t_base_table` in
 extrinsics.yaml is camera-independent), the cube tag's four corners are
 matched across views by construction, and each corner is triangulated
-ray-by-ray (`real.stereo`). The printed tag edge is known exactly
+ray-by-ray (`real.vision.stereo`). The printed tag edge is known exactly
 (marker_spec.TAG_SIZE_MM), so the recovered corner-to-corner distances measure
 *metric* accuracy — intrinsics + anchoring + triangulation combined — while
 the ray-pair gaps measure cross-view consistency, and the triangulated centre
 is compared against each camera's solvePnP estimate of the same tag.
 
-Unlike the rollout pipeline (real.marker_obs) there is deliberately no camera
+Unlike the rollout pipeline (real.rollout.marker_obs) there is deliberately no camera
 EMA: per-frame raw anchoring exposes the true jitter this rig will feed the
 triangulator. A static scene is assumed (sponge at rest), so the free-running
 cameras' capture-time offset does not enter.
 
 Run:
-    conda run -n mujoco_env python -m real.stereo_check --frames 100
+    conda run -n mujoco_env python -m real.tracking.stereo_check --frames 100
 """
 import argparse
 import os
@@ -25,12 +25,12 @@ import os
 import cv2
 import numpy as np
 
-from real.detect import make_detector
-from real.extrinsics import base_cam_from_table, load_extrinsics, rt_to_mat
+from real.vision.detect import make_detector
+from real.calib.extrinsics import base_cam_from_table, load_extrinsics, rt_to_mat
 from real.marker_spec import CUBE_TAG_ID, TABLE_TAG_ID, TAG_SIZE_MM
-from real.pose import PoseEstimator
-from real.stereo import pixel_rays, triangulate_rays
-from real.stereo_rig import CAMERA_NAMES, open_rig_camera
+from real.vision.pose import PoseEstimator
+from real.vision.stereo import pixel_rays, triangulate_rays
+from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
 
 
 def annotate(frame, dets):

@@ -2,7 +2,7 @@
 draw_detected_markers). Camera-measured marker poses are drawn on top of the
 arm's own marker sites so calibration drift is visible: a box per marker when
 orientation is known, a sphere when only position is, and zeroed (undetected)
-markers skipped — matching real/marker_obs.py's zeroing convention.
+markers skipped — matching real/rollout/marker_obs.py's zeroing convention.
 """
 
 import mujoco

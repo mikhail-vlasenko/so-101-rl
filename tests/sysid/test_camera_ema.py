@@ -1,4 +1,4 @@
-"""Unit test for the static-camera EMA in real.marker_obs.CameraMarkerSource.
+"""Unit test for the static-camera EMA in real.rollout.marker_obs.CameraMarkerSource.
 
 The camera is bolted down, so the pipeline EMAs the per-frame table-tag re-anchor
 (base_cam_from_table) to denoise the jitter that would otherwise move every arm/
@@ -8,8 +8,8 @@ setup in __init__) with a fixed pose plus white noise.
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from real.extrinsics import mat_to_pos_quat, pos_quat_to_mat
-from real.marker_obs import CAM_EMA_ALPHA, CameraMarkerSource
+from real.calib.extrinsics import mat_to_pos_quat, pos_quat_to_mat
+from real.rollout.marker_obs import CAM_EMA_ALPHA, CameraMarkerSource
 
 
 def _fresh_source():

@@ -1,4 +1,4 @@
-"""Integration test for the position-based calibration solve (real/calib_solve.py),
+"""Integration test for the position-based calibration solve (real/calib/calib_solve.py),
 no camera or servos.
 
 We pick a synthetic camera pose and table-tag pose, then *fabricate* exactly the
@@ -17,13 +17,13 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from real.calib_solve import (
+from real.calib.calib_solve import (
     determine_quarter_turns,
     site_mat,
     solve_camera,
     solve_table,
 )
-from real.extrinsics import mat_inv, mat_to_rt, quarter_turn_mat
+from real.calib.extrinsics import mat_inv, mat_to_rt, quarter_turn_mat
 from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_ID
 
 DEFAULT_XML = Path(__file__).resolve().parent.parent.parent / "so101" / "scene_lift.xml"

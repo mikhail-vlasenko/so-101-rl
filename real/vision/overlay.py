@@ -1,7 +1,7 @@
 """Per-detection drawing shared by the native marker viewer and the web panel.
 
 One implementation of "outline the tag, label it, draw its pose" so the camera
-page in the panel and `real.marker_view` can never drift apart in what they
+page in the panel and `real.vision.marker_view` can never drift apart in what they
 show. Draws in place on a BGR frame.
 """
 import cv2

@@ -10,9 +10,9 @@ import cv2.aruco as aruco
 import numpy as np
 import pytest
 
-from real.detect import make_detector
+from real.vision.detect import make_detector
 from real.marker_spec import FAMILIES, APRILTAG_FAMILY
-from real.pose import PoseEstimator, _object_points
+from real.vision.pose import PoseEstimator, _object_points
 
 
 def _camera_matrix():

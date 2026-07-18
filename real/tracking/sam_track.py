@@ -4,7 +4,7 @@ First step of the vision-estimator characterization (vision_multicam plan):
 SAM 3 is prompted once per view with a text label (non-interactive), SAM 2
 tracks the mask per view in streaming mode, each mask reduces to its pixel
 centroid, and the centroid pair triangulates to a base-frame point
-(real.stereo) — the same geometry the tag pipeline just validated to sub-mm.
+(real.vision.stereo) — the same geometry the tag pipeline just validated to sub-mm.
 
 The sponge's AprilTag, detected in the same frames, provides ground truth: its
 triangulated center moves rigidly with the sponge, so over a run
@@ -23,8 +23,8 @@ is assumed quasi-static; the free-running-camera sync offset is a separate,
 unmeasured term (TODO.md).
 
 Run:
-    conda run -n mujoco_env python -m real.sam_track --frames 300
-    python -m real.sam_track --gui          # live overlay window, q quits
+    conda run -n mujoco_env python -m real.tracking.sam_track --frames 300
+    python -m real.tracking.sam_track --gui          # live overlay window, q quits
 """
 import argparse
 import os
@@ -33,13 +33,13 @@ import time
 import cv2
 import numpy as np
 
-from real.detect import make_detector
-from real.extrinsics import base_cam_from_table, load_extrinsics
+from real.vision.detect import make_detector
+from real.calib.extrinsics import base_cam_from_table, load_extrinsics
 from real.marker_spec import CUBE_TAG_ID, TABLE_TAG_ID
-from real.pose import PoseEstimator
-from real.sam_seg import SAM2_MODELS, MaskTracker, load_sam3, mask_centroid, text_to_mask
-from real.stereo import pixel_rays, triangulate_rays
-from real.stereo_rig import CAMERA_NAMES, open_rig_camera
+from real.vision.pose import PoseEstimator
+from real.tracking.sam_seg import SAM2_MODELS, MaskTracker, load_sam3, mask_centroid, text_to_mask
+from real.vision.stereo import pixel_rays, triangulate_rays
+from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
 
 
 def overlay(frame, mask, centroid, tag_det, label):

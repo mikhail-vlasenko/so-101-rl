@@ -1,4 +1,4 @@
-"""Contract tests for real/extrinsics.py — the camera↔base transform algebra.
+"""Contract tests for real/calib/extrinsics.py — the camera↔base transform algebra.
 
 No hardware: we synthesise a camera pose and a known base-frame tag, push the tag
 *through* the camera (the inverse of what the rig does), then assert the pipeline
@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from real.extrinsics import (
+from real.calib.extrinsics import (
     average_transforms,
     base_cam_from_table,
     load_extrinsics,

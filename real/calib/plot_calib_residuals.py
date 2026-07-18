@@ -1,4 +1,4 @@
-"""Per-pose residual map for the encoder-bias calibration (real/calibrate_qpos.py).
+"""Per-pose residual map for the encoder-bias calibration (real/calib/calibrate_qpos.py).
 
 For every captured pose this shows, per arm tag, the gap between where the
 *calibrated model* predicts the tag (`FK(theta_enc - bias)`, base frame) and where
@@ -20,8 +20,8 @@ Residuals are tiny next to the workspace, so arrows are drawn exaggerated (see t
 reference arrow in the legend).
 
 Run:
-    conda run -n mujoco_env python -m real.plot_calib_residuals
-    conda run -n mujoco_env python -m real.plot_calib_residuals --from-samples <json>
+    conda run -n mujoco_env python -m real.calib.plot_calib_residuals
+    conda run -n mujoco_env python -m real.calib.plot_calib_residuals --from-samples <json>
 """
 import argparse
 from pathlib import Path
@@ -33,11 +33,11 @@ import mujoco
 import numpy as np
 import seaborn as sns
 
-from real.calib_solve import load_samples
-from real.calibrate_qpos import (
+from real.calib.calib_solve import load_samples
+from real.calib.calibrate_qpos import (
     DEFAULT_CAL, DEFAULT_XML, SAMPLES_PATH, _true_poses, paired_points, reject_outliers)
-from real.calibration import load_calibration, load_compliance
-from real.extrinsics import load_extrinsics
+from real.calib.calibration import load_calibration, load_compliance
+from real.calib.extrinsics import load_extrinsics
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import JOINT_NAMES, load_joint_maps
 from src.base_env import tag_cam_world_pos

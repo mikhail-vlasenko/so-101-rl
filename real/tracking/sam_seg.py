@@ -5,7 +5,7 @@ video sessions in *streaming* mode then track that mask frame-to-frame at
 camera rate — one session per camera, each with its own memory bank. The
 policy never sees a mask: downstream code reduces each view's mask to a
 centroid, and the pair of centroids triangulates in the base frame
-(real.stereo).
+(real.vision.stereo).
 
 Both models come from `transformers`, weights from the HF hub cache — no
 local checkouts or forks; HF's Sam2Video provides the streaming inference the

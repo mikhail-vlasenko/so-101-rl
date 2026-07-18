@@ -16,12 +16,12 @@ Controls (focus the preview window):
   q / ESC quit
 
 Run:
-    conda run -n mujoco_env python -m real.focus_picker
+    conda run -n mujoco_env python -m real.calib.focus_picker
 """
 import cv2
 import numpy as np
 
-from real.camera import open_camera, v4l2_set, HEIGHT
+from real.vision.camera import open_camera, v4l2_set, HEIGHT
 
 FOCUS_MIN, FOCUS_MAX, FOCUS_STEP = 0, 250, 5
 ROI_FRAC = 0.4                 # centre fraction of the frame used for the sharpness metric

@@ -69,7 +69,7 @@ class ScriptSpec:
 
 
 def _arm_loop_args() -> tuple[ArgSpec, ...]:
-    """The rollout args shared via real.rollout_common.add_common_args."""
+    """The rollout args shared via real.rollout.rollout_common.add_common_args."""
     return (
         ArgSpec("--execute", "flag", "Execute on real servos (default: dry-run)"),
         ArgSpec("--max-steps", "int", "Max policy steps"),
@@ -162,7 +162,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     # ---- Real arm ----
     ScriptSpec(
         id="rollout_lift", title="Rollout: lift", page="real",
-        module="real.rollout_lift", arg_style="argparse",
+        module="real.rollout.rollout_lift", arg_style="argparse",
         description="Lift policy on the real arm. Marker source 'camera' tracks "
                     "the real sponge via its tag; 'fk' uses a lockstep sim cube. "
                     "Dry-run unless Execute is checked.",
@@ -183,7 +183,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ),
     ScriptSpec(
         id="rollout_reach", title="Rollout: reach", page="real",
-        module="real.rollout_real", arg_style="argparse",
+        module="real.rollout.rollout_real", arg_style="argparse",
         description="Reach policy on the real arm toward a fixed waypoint. "
                     "Dry-run unless Execute is checked.",
         args=(
@@ -236,7 +236,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ),
     ScriptSpec(
         id="read_kp", title="Read servo gains", page="real",
-        module="real.read_kp", arg_style="argparse",
+        module="real.diagnostics.read_kp", arg_style="argparse",
         description="Dump position-loop gains and related registers from every servo.",
         args=(ArgSpec("--port", "str", "Serial port", default="/dev/ttyACM0"),),
         resources=(Resource.SERIAL,),
@@ -244,7 +244,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     # ---- Camera (interactive cv2 tools stay native windows) ----
     ScriptSpec(
         id="calibrate_camera", title="Calibrate intrinsics", page="camera",
-        module="real.calibrate_camera", arg_style="argparse",
+        module="real.calib.calibrate_camera", arg_style="argparse",
         description="Checkerboard intrinsic calibration (native cv2 window).",
         args=(
             ArgSpec("--camera", "choice", "C922 unit (per-lens intrinsics)",
@@ -255,7 +255,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ),
     ScriptSpec(
         id="sam_track", title="SAM stereo tracking", page="camera",
-        module="real.sam_track", arg_style="argparse",
+        module="real.tracking.sam_track", arg_style="argparse",
         description="Text-prompt SAM3 once per view, track with real-time SAM2, "
                     "triangulate the mask centroids and compare against the sponge "
                     "tag's triangulated center (estimator characterization).",
@@ -274,7 +274,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ),
     ScriptSpec(
         id="stereo_check", title="Stereo triangulation check", page="camera",
-        module="real.stereo_check", arg_style="argparse",
+        module="real.tracking.stereo_check", arg_style="argparse",
         description="Triangulate the sponge tag from both table-anchored cameras "
                     "and report metric accuracy (recovered tag edge vs printed size) "
                     "and cross-view ray consistency.",
@@ -288,7 +288,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ),
     ScriptSpec(
         id="focus_picker", title="Focus picker", page="camera",
-        module="real.focus_picker", arg_style="argparse",
+        module="real.calib.focus_picker", arg_style="argparse",
         description="Interactively pick the pinned focus_absolute value (native cv2 window).",
         resources=(Resource.CAMERA,),
         native_gui=True,
@@ -296,7 +296,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     # ---- Sysid ----
     ScriptSpec(
         id="calibrate_qpos", title="Calibrate encoder bias", page="sysid",
-        module="real.calibrate_qpos", arg_style="argparse",
+        module="real.calib.calibrate_qpos", arg_style="argparse",
         description="Self-drive the arm through a Cartesian sweep and jointly solve "
                     "encoder zero-offsets + camera extrinsics from the arm tags (writes "
                     "calibration.yaml + extrinsics.yaml). The sim view shows the sweep "

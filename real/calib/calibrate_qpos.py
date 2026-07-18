@@ -39,7 +39,7 @@ panel's sim-view slot shows whichever is running.
 Gravity compliance: on top of the constant encoder bias, the lift/elbow/wrist_flex
 links flex elastically under gravity load, so the true joint angle lags the encoder by
 `compliance * tau_grav` (per-joint, rad per N.m). Those three coefficients are solved
-jointly with the bias and mounts (see real/compliance.py, COMP_JOINTS) and written to
+jointly with the bias and mounts (see real/calib/compliance.py, COMP_JOINTS) and written to
 calibration.yaml; deployment applies the same correction. It roughly halves the
 held-out marker residual (cross-validated 3.6 -> 2.0 mm mean, 8.2 -> 4.7 mm max).
 
@@ -67,9 +67,9 @@ physical tag is a systematic sim-vs-real offset in the marker channels (measured
 mean / ~3 mm at the tails before this write-back existed).
 
 Run:
-    conda run -n mujoco_env python -m real.calibrate_qpos --execute
-    conda run -n mujoco_env python -m real.calibrate_qpos              # dry-run: preview poses
-    conda run -n mujoco_env python -m real.calibrate_qpos --from-samples <json>
+    conda run -n mujoco_env python -m real.calib.calibrate_qpos --execute
+    conda run -n mujoco_env python -m real.calib.calibrate_qpos              # dry-run: preview poses
+    conda run -n mujoco_env python -m real.calib.calibrate_qpos --from-samples <json>
 """
 import argparse
 import re
@@ -83,22 +83,22 @@ import numpy as np
 from omegaconf import OmegaConf
 from scipy.optimize import least_squares
 
-from real.calibrate_camera import FOCUS_ABSOLUTE
-from real.calib_solve import (
+from real.calib.calibrate_camera import FOCUS_ABSOLUTE
+from real.calib.calib_solve import (
     determine_quarter_turns,
     load_samples,
     save_samples,
     sim_cam_R_opencv,
     solve_table,
 )
-from real.calibration import CALIBRATION_PATH, save_calibration
-from real.camera import open_camera
-from real.compliance import COMP_JOINTS, gravity_deflection
-from real.detect import make_detector
-from real.extrinsics import EXTRINSICS_PATH, rigid_register, save_extrinsics
+from real.calib.calibration import CALIBRATION_PATH, save_calibration
+from real.vision.camera import open_camera
+from real.calib.compliance import COMP_JOINTS, gravity_deflection
+from real.vision.detect import make_detector
+from real.calib.extrinsics import EXTRINSICS_PATH, rigid_register, save_extrinsics
 from real.marker_spec import ARM_TAG_TO_SITE, MARKER_EXPOSURE, MARKER_GAIN, TABLE_TAG_ID
-from real.overlay import annotate_detections
-from real.pose import PoseEstimator, load_intrinsics
+from real.vision.overlay import annotate_detections
+from real.vision.pose import PoseEstimator, load_intrinsics
 from real.twin.constants import (
     SERVO_POSITION_DEADZONE,
     SERVO_POSITION_KP,
@@ -111,7 +111,7 @@ from src.units import max_raw_delta_per_step
 from sysid.record_real import CONFIG_YAML, HOMING_S, SETTLE_S, smooth_ramp, stream
 from sysid.trajectories import SYSID_HZ
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
 # The marker sites are defined in the arm XML (included by DEFAULT_XML); the solved
 # mounts are written back there so training FK matches the physical tags.
@@ -597,7 +597,7 @@ def paired_points(samples, model, data, qposadr, site_ids):
 
 def _true_poses(samples, model, data, qposadr, b_full, compliance):
     """Map each sample's encoder qpos to the true motor pose -- subtract the constant
-    bias, then the load-dependent gravity deflection (real/compliance.py) -- leaving the
+    bias, then the load-dependent gravity deflection (real/calib/compliance.py) -- leaving the
     tag dict untouched. The settled FK in paired_points then applies gear play on top."""
     out = []
     for qpos, poses in samples:
@@ -684,7 +684,7 @@ def mount_bias_residuals(params, samples, model, data, qposadr, site_ids, nomina
     """Residual for the joint bias + per-tag mount-offset + gravity-compliance solve
     (`params` layout: see _unpack_calibration). Each offset shifts its tag's site to
     nominal+offset in the parent-body frame and the compliance bends the motor pose
-    (real/compliance.py) before the settled FK, so dst is the fully-corrected base-frame
+    (real/calib/compliance.py) before the settled FK, so dst is the fully-corrected base-frame
     tag centre; the camera stays the closed-form Umeyama inner fit. The trailing
     MOUNT_PRIOR_W terms are the XML prior, pulling every offset toward 0 so a
     near-degenerate direction can't trade against a joint bias. Compliance carries no
@@ -703,7 +703,7 @@ def mount_bias_residuals(params, samples, model, data, qposadr, site_ids, nomina
 def solve_calibration(samples, model, data, qposadr, site_ids):
     """Solve the 4 observable joint biases jointly with each arm tag's 3D mount-centre
     offset (XML-prior-regularised; see MOUNT_PRIOR_W) and the per-joint gravity
-    compliance (COMP_JOINTS; see real/compliance.py). Leaves model.site_pos at the
+    compliance (COMP_JOINTS; see real/calib/compliance.py). Leaves model.site_pos at the
     solved mounts so the caller's camera/table fit uses the same forward model, and
     returns (b_full, offsets, compliance) with offsets {tag: 3-vector in the body
     frame, m} and compliance a 6-vector (rad per N.m, 0 on the rigid joints)."""

@@ -1,4 +1,4 @@
-"""Tests for the gravity-compliance forward model (real/compliance.py): the torque
+"""Tests for the gravity-compliance forward model (real/calib/compliance.py): the torque
 signs that justify which joints are compliant, and that the read (subtract deflection)
 and write (add deflection) halves are inverses to first order.
 """
@@ -7,7 +7,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from real.compliance import (
+from real.calib.compliance import (
     COMP_JOINTS,
     encoder_from_true,
     gravity_deflection,

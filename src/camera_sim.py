@@ -5,7 +5,7 @@ samples the world at its capture instant, becomes available to the control
 loop `delay` seconds later (mid-exposure -> sensor readout -> USB transfer ->
 MJPG decode -> AprilTag detection; measure it with sysid/probe_cam_latency.py),
 and each policy tick then consumes the newest available frame
-(real/marker_obs.py). With a 30 fps camera against 15 Hz control the consumed
+(real/rollout/marker_obs.py). With a 30 fps camera against 15 Hz control the consumed
 pose is `delay` plus zero-to-one frame interval old, and that staleness
 follows a sawtooth that drifts as the camera and control clocks beat against
 each other. Joint encoders have no analog of any of this: the bus read is ~2 ms,
@@ -121,7 +121,7 @@ class CameraSim:
         (capture_t, frame) pairs — empty if no new frame is due yet. The
         caller keeps the newest as its current frame and folds every one into
         any per-tag held state, exactly like the real capture thread updates
-        per frame (real/marker_obs.py)."""
+        per frame (real/rollout/marker_obs.py)."""
         while self._next_capture_t <= t + self._EPS:
             capture_t = self._next_capture_t
             frame = capture_fn(self._state_at(capture_t))

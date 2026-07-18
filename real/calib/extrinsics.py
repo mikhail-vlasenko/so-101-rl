@@ -1,7 +1,7 @@
 """Camera ↔ arm-base extrinsics: the rigid transforms that put measured marker
 poses into the base frame the policy was trained in.
 
-The camera (`real/pose.py`) reports every tag in its own frame as a solvePnP
+The camera (`real/vision/pose.py`) reports every tag in its own frame as a solvePnP
 ``(rvec, tvec)``. The policy, however, consumes marker poses in the arm **base**
 frame (MuJoCo world = the `base` body), as xyz + axis-angle rotation vector
 (`src/base_env.py::marker_world_poses`). The single missing link is the camera's

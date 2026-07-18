@@ -67,7 +67,7 @@ Hardware:
 
 Calibrated the Logitech C922 from a plain checkerboard (8×10 squares = 7×9 inner
 corners, 20 mm). Result: **RMS ~0.21 px** over ~29 views, stable across repeat
-runs (`fx≈fy≈968`, `cx≈648`, `cy≈335`). Saved to `real/camera_intrinsics.yaml`
+runs (`fx≈fy≈968`, `cx≈648`, `cy≈335`). Saved to `real/vision/camera_intrinsics.yaml`
 (camera_matrix, dist_coeffs, focus_absolute, pattern, square size).
 
 Tools (all in `real/`):
@@ -104,7 +104,7 @@ What we learned (C922 / UVC quirks — don't relitigate):
 
 ### Step 1 — qpos offsets
 
-**Implemented** by `real/calibrate_qpos.py` (self-driven, position-only). The arm
+**Implemented** by `real/calib/calibrate_qpos.py` (self-driven, position-only). The arm
 drives *itself* to a spread of sim-generated poses (collision-free, in-limits,
 arm tag facing the camera), captures `(encoder qpos, arm-tag tvec)`, and solves
 `qpos_bias` *jointly* with `T_base_cam` so FK(θ_enc − b) lands the tags where the
@@ -133,7 +133,7 @@ Deviations from the orientation-based sketch below, deliberate for a first cut:
   wrist_flex links flex elastically under gravity, so a per-joint coefficient
   `compliance_i` (rad per N·m) is solved jointly with the bias and mounts and applied
   as `θ_true = θ_enc − b − compliance·τ_grav(θ_enc − b)` at both solve and deployment
-  time (`real/compliance.py`). It roughly halves the residual (committed run 8.2 → 2.4
+  time (`real/calib/compliance.py`). It roughly halves the residual (committed run 8.2 → 2.4
   mm RMS; cross-validated held-out 3.6 → 2.0 mm mean, 8.2 → 4.7 mm max). The backlash
   probe (`sysid/probe_backlash.py`) confirmed the mechanism is elastic flex, not gear
   play (link-vs-motor hysteresis ≤0.2°).
@@ -181,12 +181,12 @@ compliance:    [c1, c2, c3, c4, c5, c6]   # rad per N·m (0 on rigid joints)
 cube_pos_bias: [x, y, z]                   # m, base frame
 ```
 
-The real-robot wrapper (`ArmLoop`, `real/rollout_common.py`), on every encoder read,
+The real-robot wrapper (`ArmLoop`, `real/rollout/rollout_common.py`), on every encoder read,
 maps raw → true joint angle through the bias *and* the gravity compliance:
 
 ```python
 q_bc   = raw_to_rad(raw) - qpos_bias
-qpos   = q_bc - compliance * τ_grav(q_bc)      # real/compliance.py
+qpos   = q_bc - compliance * τ_grav(q_bc)      # real/calib/compliance.py
 obs[cube_idx:cube_idx + 3] -= cube_pos_bias
 ```
 

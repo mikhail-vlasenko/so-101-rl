@@ -3,7 +3,7 @@
 Turns a tag's four image corners into its 3-D pose relative to the camera:
 translation in metres and rotation as a Rodrigues vector. One solver for both
 families — `cv2.solvePnP` with `SOLVEPNP_IPPE_SQUARE`, the method built for square
-planar fiducials — which works because `real.detect` hands us every tag's corners
+planar fiducials — which works because `real.vision.detect` hands us every tag's corners
 in the *same* canonical order (TL, TR, BR, BL), so the recovered pose means the
 same thing no matter which detector found the tag.
 
@@ -20,7 +20,7 @@ import yaml
 from real.marker_spec import TAG_SIZE_MM
 
 def intrinsics_path(camera):
-    """Per-unit intrinsics file for a camera name from `real.camera.SERIALS`.
+    """Per-unit intrinsics file for a camera name from `real.vision.camera.SERIALS`.
 
     Intrinsics are per-lens — the two C922 units differ by ~1.4% in focal
     length — so each unit gets its own file. "main" keeps the legacy unsuffixed

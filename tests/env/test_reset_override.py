@@ -7,7 +7,7 @@ import pytest
 from src.base_env import RuntimeEnvConfig, sample_cube_orientation
 from src.lift_env import SO101LiftEnv
 from src.train import make_env
-from real.rollout_common import load_env_cfg
+from real.rollout.rollout_common import load_env_cfg
 
 QPOS = np.array([0.3, -1.5, 1.57, -0.4, 1.45, -0.01])
 

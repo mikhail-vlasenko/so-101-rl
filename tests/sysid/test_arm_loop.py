@@ -1,4 +1,4 @@
-"""Contract tests for the shared real-arm rollout core (real.rollout_common.ArmLoop)
+"""Contract tests for the shared real-arm rollout core (real.rollout.rollout_common.ArmLoop)
 against a fake bus — no hardware. The loop must shape actions exactly like
 training (action_to_target quantization + deadzone), gate all writes on
 execute, and report sim-time velocities regardless of --slow.
@@ -10,7 +10,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from real.rollout_common import DEFAULT_CAL, REPO_ROOT, ArmLoop
+from real.rollout.rollout_common import DEFAULT_CAL, REPO_ROOT, ArmLoop
 from real.twin.constants import (
     SERVO_POSITION_DEADZONE,
     SERVO_POSITION_KP,
@@ -198,7 +198,7 @@ def test_compliance_applied_on_read_and_inverted_on_write(model, jm):
     bias-only reading) and a hold action still round-trips to the present raw — the
     read/write mapping stays an exact inverse to first order, so the arm doesn't drift.
     """
-    from real.compliance import COMP_JOINTS, gravity_deflection
+    from real.calib.compliance import COMP_JOINTS, gravity_deflection
 
     raw0 = _mid_raw(jm)
     direction = np.ones(len(jm.items), dtype=np.int8)

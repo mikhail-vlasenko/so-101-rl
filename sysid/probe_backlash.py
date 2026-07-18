@@ -46,7 +46,7 @@ import mujoco
 import numpy as np
 from omegaconf import OmegaConf
 
-from real.calibrate_qpos import (
+from real.calib.calibrate_qpos import (
     CAPTURE_FRAMES,
     DEFAULT_CAL,
     DEFAULT_XML,
@@ -57,8 +57,8 @@ from real.calibrate_qpos import (
     generate_poses,
     preview_poses,
 )
-from real.calibration import load_calibration
-from real.extrinsics import load_extrinsics
+from real.calib.calibration import load_calibration
+from real.calib.extrinsics import load_extrinsics
 from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_ID
 from real.twin.constants import SERVO_POSITION_DEADZONE, SERVO_POSITION_KP
 from real.twin.mapping import JOINT_NAMES, load_joint_maps, raw_to_rad

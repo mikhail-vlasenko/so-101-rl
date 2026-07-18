@@ -1,8 +1,8 @@
 """In-server camera capture for the panel's camera page.
 
 Owns the C922 while streaming: a capture thread reads frames, runs the marker
-detector + pose estimator, draws the same overlays as `real.marker_view`
-(via `real.overlay.annotate_detections`), and publishes JPEGs into a FrameBox
+detector + pose estimator, draws the same overlays as `real.vision.marker_view`
+(via `real.vision.overlay.annotate_detections`), and publishes JPEGs into a FrameBox
 that the panel serves at /camera/stream.
 
 The service registers itself as a CAMERA holder in the Runner's resource
@@ -17,12 +17,12 @@ import threading
 
 import cv2
 
-from real.calibrate_camera import FOCUS_ABSOLUTE
-from real.camera import open_camera, set_exposure, v4l2_set
-from real.detect import make_detector
+from real.calib.calibrate_camera import FOCUS_ABSOLUTE
+from real.vision.camera import open_camera, set_exposure, v4l2_set
+from real.vision.detect import make_detector
 from real.marker_spec import MARKER_EXPOSURE, MARKER_GAIN
-from real.overlay import annotate_detections
-from real.pose import PoseEstimator, load_intrinsics
+from real.vision.overlay import annotate_detections
+from real.vision.pose import PoseEstimator, load_intrinsics
 
 from panel.registry import Resource
 from panel.runner import ResourceBusyError, Runner

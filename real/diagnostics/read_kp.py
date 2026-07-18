@@ -1,15 +1,15 @@
 """Read the position-loop Kp (Feetech SMS-STS addr 21) from every SO-101 servo.
 
 Usage:
-    python -m real.read_kp                 # default port /dev/ttyACM0
-    python -m real.read_kp --port /dev/ttyACM0
+    python -m real.diagnostics.read_kp                 # default port /dev/ttyACM0
+    python -m real.diagnostics.read_kp --port /dev/ttyACM0
 """
 
 from __future__ import annotations
 
 import argparse
 
-from .twin.servo_io import ADDR_POSITION_KP, ServoBus
+from ..twin.servo_io import ADDR_POSITION_KP, ServoBus
 
 JOINT_NAMES = [
     "shoulder_pan", "shoulder_lift", "elbow_flex",

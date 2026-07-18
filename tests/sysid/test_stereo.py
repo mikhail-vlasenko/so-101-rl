@@ -1,4 +1,4 @@
-"""Contract tests for real/stereo.py: back-projection and ray triangulation.
+"""Contract tests for real/vision/stereo.py: back-projection and ray triangulation.
 
 Synthetic round-trip with the full camera model: project known base-frame
 points through two realistic distorted cameras with cv2.projectPoints, then
@@ -9,8 +9,8 @@ direction, OpenCV camera axes) shows up as centimetres, not tenths.
 import numpy as np
 import pytest
 
-from real.extrinsics import mat_inv, mat_to_rt
-from real.stereo import pixel_rays, triangulate_rays
+from real.calib.extrinsics import mat_inv, mat_to_rt
+from real.vision.stereo import pixel_rays, triangulate_rays
 
 K = np.array([[970.0, 0.0, 640.0],
               [0.0, 968.0, 360.0],

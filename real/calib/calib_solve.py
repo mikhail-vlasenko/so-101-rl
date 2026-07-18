@@ -1,7 +1,7 @@
 """Position-based calibration solve from arm-tag samples (no camera or servos).
 
-Shared by the encoder-bias calibrator (`real/calibrate_qpos.py`) and the residual
-plot (`real/plot_calib_residuals.py`). A "sample" is `(qpos[6], {tag_id: (rvec,
+Shared by the encoder-bias calibrator (`real/calib/calibrate_qpos.py`) and the residual
+plot (`real/calib/plot_calib_residuals.py`). A "sample" is `(qpos[6], {tag_id: (rvec,
 tvec)})`: the joint angles at a captured pose and each tag's pose in the camera
 frame. From a spread of samples these helpers register the camera in the arm base
 frame, anchor the fixed table tag, and recover each arm tag's glue offset.
@@ -27,7 +27,7 @@ import json
 import mujoco
 import numpy as np
 
-from real.extrinsics import (
+from real.calib.extrinsics import (
     average_transforms,
     rigid_register,
     rt_to_mat,
