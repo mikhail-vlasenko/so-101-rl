@@ -24,33 +24,13 @@ import os
 
 import cv2
 import numpy as np
-import yaml
 
-from real.camera import open_camera, device_index_for_serial, SERIALS
 from real.detect import make_detector
 from real.extrinsics import base_cam_from_table, load_extrinsics, rt_to_mat
-from real.marker_spec import (
-    CUBE_TAG_ID,
-    MARKER_EXPOSURE,
-    MARKER_GAIN,
-    TABLE_TAG_ID,
-    TAG_SIZE_MM,
-)
-from real.pose import PoseEstimator, intrinsics_path, load_intrinsics
+from real.marker_spec import CUBE_TAG_ID, TABLE_TAG_ID, TAG_SIZE_MM
+from real.pose import PoseEstimator
 from real.stereo import pixel_rays, triangulate_rays
-
-CAMERA_NAMES = ("main", "aux")
-
-
-def open_rig_camera(name):
-    """Open one unit at its own calibrated focus with its own intrinsics."""
-    path = intrinsics_path(name)
-    with open(path) as f:
-        focus = int(yaml.safe_load(f)["focus_absolute"])
-    camera_matrix, dist_coeffs = load_intrinsics(path)
-    cap = open_camera(device=device_index_for_serial(SERIALS[name]), focus=focus,
-                      exposure=MARKER_EXPOSURE, gain=MARKER_GAIN)
-    return cap, camera_matrix, dist_coeffs
+from real.stereo_rig import CAMERA_NAMES, open_rig_camera
 
 
 def annotate(frame, dets):

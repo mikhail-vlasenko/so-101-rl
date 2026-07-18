@@ -2,6 +2,32 @@
 
 Long-term tasks and ideas. Not a changelog.
 
+## Binocular vision (dual C922 + SAM), follow-ups
+
+Geometry stack and SAM tracking are live (`real/stereo.py`, `real/sam_track.py`;
+static baseline 2026-07-18: SAM-vs-tag jitter ~0.1 mm, SAM ray gap ~0.7 mm, 14.6 fps
+sequential loop). Open, roughly in order:
+
+- **Characterize under motion + occlusion, not just at rest.** Move the sponge by hand
+  and let the arm occlude each view during `sam_track` runs; measure drift,
+  re-detection snap, and the occlusion-shrink bias (mask centroid shifts toward the
+  visible part). These measured errors — not hand-guessed Gaussians — become the DR
+  model per the vision plan.
+- **Sync-offset measurement.** Free-running cameras are up to ~half a frame apart;
+  irrelevant static, ~3 mm at 0.2 m/s. Log V4L2 capture timestamps for both cameras,
+  measure the offset and its drift; if needed, interpolate the smoother track to the
+  other camera's capture time (classical fix, no hardware sync).
+- **Thread the per-camera capture+track loop.** Sequential reads + serial SAM2 calls
+  cap `sam_track` at ~14.6 fps; the two views are independent until triangulation
+  (marker_obs's thread pattern applies). ~25 fps should be reachable with tiny.
+- **Re-prompt on track loss.** `sam_track` prompts SAM3 once at startup; a view whose
+  mask stays empty for K frames should re-run SAM3 (one-shot, ~0.4 s) instead of
+  serving held state forever.
+- **`sam2._C` / setup.py note.** The real-time SAM2 fork's CUDA ext was built under an
+  older toolkit; system nvcc (13.2) can no longer rebuild it against torch cu128. The
+  fork's setup.py was patched locally to honor `SAM2_BUILD_CUDA=0`; if the prebuilt
+  `_C.so` ever breaks, either install a cu12.8 toolkit or upgrade the fork.
+
 ## Sim-to-real fidelity (reach env)
 
 Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/lifting itself even though sim trains fine. Also worth noting: experiments so far have been on the **leader** arm, not the follower the policy will ultimately deploy on. Leader has different mechanical load (no payload, no gripper jaws engaged, possibly different calibration), so some of this gap may collapse once we move to the follower. Independently though, sim has several optimistic assumptions:

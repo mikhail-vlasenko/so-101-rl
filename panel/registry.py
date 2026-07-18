@@ -254,6 +254,25 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         native_gui=True,
     ),
     ScriptSpec(
+        id="sam_track", title="SAM stereo tracking", page="camera",
+        module="real.sam_track", arg_style="argparse",
+        description="Text-prompt SAM3 once per view, track with real-time SAM2, "
+                    "triangulate the mask centroids and compare against the sponge "
+                    "tag's triangulated center (estimator characterization).",
+        args=(
+            ArgSpec("--prompt", "str", "SAM3 text prompt", default="sponge"),
+            ArgSpec("--model", "choice", "SAM2 tracker size", default="tiny",
+                    choices=("tiny", "base+")),
+            ArgSpec("--frames", "int", "Frames to accumulate", default="300"),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+            ArgSpec("--gui", "flag", "Live overlay window (native cv2)"),
+            ArgSpec("--save-frames", "str", "Directory for annotated frame pair"),
+        ),
+        resources=(Resource.CAMERA,),
+        native_gui=True,
+    ),
+    ScriptSpec(
         id="stereo_check", title="Stereo triangulation check", page="camera",
         module="real.stereo_check", arg_style="argparse",
         description="Triangulate the sponge tag from both table-anchored cameras "
