@@ -1,74 +1,85 @@
 """SAM segmentation for the rig: one-shot text prompt + per-camera mask tracking.
 
-SAM 3.1 turns a text prompt ("sponge") into an initial mask on one frame; the
-real-time SAM 2 fork then tracks that mask frame-to-frame at camera rate — one
-tracker instance per camera, each with its own memory bank. The policy never
-sees a mask: downstream code reduces each view's mask to a centroid, and the
-pair of centroids triangulates in the base frame (real.stereo), replacing the
-demo script's monocular depth model.
+SAM 3 turns a text prompt ("sponge") into an initial mask on one frame; SAM 2
+video sessions in *streaming* mode then track that mask frame-to-frame at
+camera rate — one session per camera, each with its own memory bank. The
+policy never sees a mask: downstream code reduces each view's mask to a
+centroid, and the pair of centroids triangulates in the base frame
+(real.stereo).
 
-The model checkouts and checkpoints live outside this repo (both envs share
-the same editable installs); the paths are pinned here as the single source.
-Everything runs CUDA + bfloat16, matching how the checkpoints were validated.
+Both models come from `transformers`, weights from the HF hub cache — no
+local checkouts or forks; HF's Sam2Video provides the streaming inference the
+official Meta repo lacks. SAM 2 runs bfloat16 (~15 ms per 720p frame for tiny
+on the rig's RTX 4090 — fp32 is 3.6x slower); SAM 3 stays fp32, it runs once.
+`facebook/sam3` is the hub's transformers-format checkpoint (sam3.1 exists
+only in the original format); measured mask parity on rig frames: centroid
+within 0.2 px of sam3.1.
 """
 import cv2
 import numpy as np
 import torch
-from PIL import Image
 
-SAM2_DIR = "/home/mikhail/robot_arm/camera_stuff/RGBTrack/segment-anything-2-real-time"
-# ~18 ms/frame (tiny) vs ~24 ms (base+) per 720p view on the rig's RTX 4090.
+SAM3_ID = "facebook/sam3"
 SAM2_MODELS = {
-    "tiny": ("configs/sam2.1/sam2.1_hiera_t.yaml",
-             f"{SAM2_DIR}/checkpoints/sam2.1_hiera_tiny.pt"),
-    "base+": ("configs/sam2.1/sam2.1_hiera_b+.yaml",
-              f"{SAM2_DIR}/checkpoints/sam2.1_hiera_base_plus.pt"),
+    "tiny": "facebook/sam2.1-hiera-tiny",
+    "base+": "facebook/sam2.1-hiera-base-plus",
 }
 
 
 def load_sam3():
-    """Build the SAM 3.1 image model + processor for one-shot text prompting.
+    """Load the SAM 3 model + processor for one-shot text prompting.
 
-    Import is deferred so that merely importing this module (e.g. the panel
-    registry check) doesn't pull the full SAM3 stack.
+    Imports are deferred so importing this module stays cheap; transformers
+    alone costs seconds.
     """
-    from sam3.model.sam3_image_processor import Sam3Processor
-    from sam3.model_builder import build_sam3_image_model, download_ckpt_from_hf
-    ckpt = download_ckpt_from_hf(version="sam3.1")
-    return Sam3Processor(build_sam3_image_model(checkpoint_path=ckpt, load_from_HF=False))
+    from transformers import Sam3Model, Sam3Processor
+    model = Sam3Model.from_pretrained(SAM3_ID).to("cuda").eval()
+    processor = Sam3Processor.from_pretrained(SAM3_ID)
+    return model, processor
 
 
-def text_to_mask(sam3_processor, frame_bgr, prompt):
+def text_to_mask(sam3, frame_bgr, prompt):
     """Highest-scoring mask for `prompt`: (HxW bool at frame resolution, score).
 
     Raises when nothing matches — bad framing must fail loud at startup, not
     silently track an empty mask.
     """
+    model, processor = sam3
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-        state = sam3_processor.set_image(Image.fromarray(rgb))
-        out = sam3_processor.set_text_prompt(prompt=prompt, state=state)
-    masks, scores = out["masks"], out["scores"]
-    if len(masks) == 0:
+    inputs = processor(images=rgb, text=prompt, return_tensors="pt").to(model.device)
+    with torch.inference_mode():
+        outputs = model(**inputs)
+    results = processor.post_process_instance_segmentation(
+        outputs, threshold=0.5, mask_threshold=0.5,
+        target_sizes=inputs.get("original_sizes").tolist())[0]
+    scores = results["scores"]
+    if len(scores) == 0:
         raise RuntimeError(f"SAM3 found no match for {prompt!r}")
     top = int(scores.argmax())
-    return masks[top].squeeze(0).cpu().numpy().astype(bool), float(scores[top])
+    return results["masks"][top].cpu().numpy().astype(bool), float(scores[top])
 
 
 class MaskTracker:
-    """Real-time SAM 2 mask tracker bound to one camera stream."""
+    """Streaming SAM 2 mask tracker bound to one camera stream."""
 
     def __init__(self, model):
-        from sam2.build_sam import build_sam2_camera_predictor
-        cfg, ckpt = SAM2_MODELS[model]
-        self._pred = build_sam2_camera_predictor(cfg, ckpt)
+        from transformers import Sam2VideoModel, Sam2VideoProcessor
+        repo = SAM2_MODELS[model]
+        self._model = Sam2VideoModel.from_pretrained(
+            repo, dtype=torch.bfloat16).to("cuda").eval()
+        self._processor = Sam2VideoProcessor.from_pretrained(repo)
+        self._session = None
 
     def prime(self, frame_bgr, mask):
-        """Seed the tracker's memory with an initial mask (from text_to_mask)."""
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            self._pred.load_first_frame(frame_bgr)
-            self._pred.add_new_mask(frame_idx=0, obj_id=1,
-                                    mask=torch.from_numpy(mask))
+        """Seed a fresh streaming session with an initial mask (from
+        text_to_mask) and condition it on this frame."""
+        self._session = self._processor.init_video_session(
+            inference_device="cuda", dtype=torch.bfloat16)
+        inputs = self._preprocess(frame_bgr)
+        self._processor.add_inputs_to_inference_session(
+            inference_session=self._session, frame_idx=0, obj_ids=1,
+            input_masks=mask, original_size=inputs.original_sizes[0])
+        self._forward(inputs)
 
     def track(self, frame_bgr):
         """Propagate to the next frame: HxW bool mask at frame resolution.
@@ -76,9 +87,19 @@ class MaskTracker:
         An all-False mask means the tracker lost the object this frame — the
         caller's held-pose/age convention deals with it, same as a hidden tag.
         """
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            _, logits = self._pred.track(frame_bgr)
-        return logits[0, 0].cpu().numpy() > 0
+        return self._forward(self._preprocess(frame_bgr))
+
+    def _preprocess(self, frame_bgr):
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        return self._processor(images=rgb, device="cuda", return_tensors="pt")
+
+    def _forward(self, inputs):
+        with torch.inference_mode():
+            out = self._model(inference_session=self._session,
+                              frame=inputs.pixel_values[0].to(torch.bfloat16))
+        masks = self._processor.post_process_masks(
+            [out.pred_masks], original_sizes=inputs.original_sizes)[0]
+        return masks[0, 0].cpu().numpy().astype(bool)
 
 
 def mask_centroid(mask):

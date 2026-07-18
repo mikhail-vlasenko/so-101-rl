@@ -1,8 +1,8 @@
 """Dual-camera SAM tracking → triangulated object position vs tag ground truth.
 
 First step of the vision-estimator characterization (vision_multicam plan):
-SAM 3.1 is prompted once per view with a text label (non-interactive), the
-real-time SAM 2 fork tracks the mask per view, each mask reduces to its pixel
+SAM 3 is prompted once per view with a text label (non-interactive), SAM 2
+tracks the mask per view in streaming mode, each mask reduces to its pixel
 centroid, and the centroid pair triangulates to a base-frame point
 (real.stereo) — the same geometry the tag pipeline just validated to sub-mm.
 

@@ -4,9 +4,9 @@ Long-term tasks and ideas. Not a changelog.
 
 ## Binocular vision (dual C922 + SAM), follow-ups
 
-Geometry stack and SAM tracking are live (`real/stereo.py`, `real/sam_track.py`;
-static baseline 2026-07-18: SAM-vs-tag jitter ~0.1 mm, SAM ray gap ~0.7 mm, 14.6 fps
-sequential loop). Open, roughly in order:
+Geometry stack and SAM tracking are live (`real/stereo.py`, `real/sam_track.py`,
+both SAMs from `transformers`; static baseline 2026-07-18: SAM-vs-tag jitter ~0.1 mm,
+SAM ray gap ~0.7 mm, 15.8 fps sequential loop). Open, roughly in order:
 
 - **Characterize under motion + occlusion, not just at rest.** Move the sponge by hand
   and let the arm occlude each view during `sam_track` runs; measure drift,
@@ -18,15 +18,13 @@ sequential loop). Open, roughly in order:
   measure the offset and its drift; if needed, interpolate the smoother track to the
   other camera's capture time (classical fix, no hardware sync).
 - **Thread the per-camera capture+track loop.** Sequential reads + serial SAM2 calls
-  cap `sam_track` at ~14.6 fps; the two views are independent until triangulation
+  cap `sam_track` at ~15.8 fps; the two views are independent until triangulation
   (marker_obs's thread pattern applies). ~25 fps should be reachable with tiny.
 - **Re-prompt on track loss.** `sam_track` prompts SAM3 once at startup; a view whose
   mask stays empty for K frames should re-run SAM3 (one-shot, ~0.4 s) instead of
   serving held state forever.
-- **`sam2._C` / setup.py note.** The real-time SAM2 fork's CUDA ext was built under an
-  older toolkit; system nvcc (13.2) can no longer rebuild it against torch cu128. The
-  fork's setup.py was patched locally to honor `SAM2_BUILD_CUDA=0`; if the prebuilt
-  `_C.so` ever breaks, either install a cu12.8 toolkit or upgrade the fork.
+- **EdgeTAM** (`transformers` ships it) is an efficiency-focused SAM2-style tracker —
+  candidate if GPU budget ever tightens (e.g. higher camera count or rates).
 
 ## Sim-to-real fidelity (reach env)
 
