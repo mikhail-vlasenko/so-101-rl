@@ -1,9 +1,11 @@
 """Tests for the sponge-box spawn (orientation sampling) and marker observations.
 
-The 6 x 4 x 2.5 cm sponge box must spawn standing on one of its two non-largest
-faces (4 or 6 cm tall, both occurring), stable under settling. The marker obs
-dims must carry the world poses of the marker_finger / marker_wrist sites
-(xyz + axis-angle rotation vector each).
+The 6 x 4 x 2.5 cm sponge box may spawn resting on ANY face (tag-free tracking
+imposes no facing constraint): side-standing 4 or 6 cm tall AND flat on the
+largest face, all occurring, stable under settling; the curriculum crutch flags
+restrict the set. Every spawn must be comfortably visible to both cameras. The
+marker obs dims must carry the world poses of the marker_finger / marker_wrist
+sites (xyz + axis-angle rotation vector each).
 """
 
 import numpy as np
@@ -13,16 +15,19 @@ import mujoco
 from hydra import compose, initialize
 
 from src.base_env import (
-    RuntimeEnvConfig, cube_tag_occluded, marker_dropout_prob, marker_world_poses, markers_visible,
-    obs_dim_for, sample_cube_orientation,
+    RuntimeEnvConfig, cube_surface_points_world, cube_visible_surface,
+    marker_world_poses, markers_visible, obs_dim_for, sample_cube_orientation,
 )
 from src.lift_env import SO101LiftEnv
+from src.shape_obs import VISIBLE_FRACTION_MIN
 
 
 MARKER_FINGER_POS = slice(12, 15)
 MARKER_FINGER_ROT = slice(15, 18)
 MARKER_WRIST_POS = slice(18, 21)
 MARKER_WRIST_ROT = slice(21, 24)
+
+HALF = np.array([0.03, 0.02, 0.0125])
 
 
 @pytest.fixture(scope="module")
@@ -35,30 +40,47 @@ def env():
                                              marker_include_rot=True))
 
 
-def test_sample_cube_orientation_rest_heights():
+def test_sample_cube_orientation_all_faces():
+    """Default sampling rests the box on any face: all three rest heights
+    occur, including the flat largest-face pose, and the vertical body axis is
+    always exactly vertical."""
     rng = np.random.default_rng(0)
-    half = np.array([0.03, 0.02, 0.0125])
     rest_halves = set()
-    for _ in range(200):
-        quat, rest_half_z = sample_cube_orientation(rng, half)
-        assert rest_half_z in (0.03, 0.02)
+    for _ in range(300):
+        quat, rest_half_z = sample_cube_orientation(rng, HALF)
+        assert rest_half_z in (0.03, 0.02, 0.0125)
         rest_halves.add(rest_half_z)
         np.testing.assert_allclose(np.linalg.norm(quat), 1.0, atol=1e-9)
-        # The face touching the floor must be a non-largest face: the geom
-        # z-axis (smallest half-extent) must end up horizontal.
+        # Exactly one body axis is vertical (its |world z| is 1), the others flat.
         mat = np.empty(9)
         mujoco.mju_quat2Mat(mat, quat)
-        z_axis_world = mat.reshape(3, 3)[:, 2]
-        assert abs(z_axis_world[2]) < 1e-9
+        z_components = np.abs(mat.reshape(3, 3)[2, :])
+        assert np.isclose(z_components.max(), 1.0, atol=1e-9)
+        assert np.sum(z_components > 1e-9) == 1
+    assert rest_halves == {0.03, 0.02, 0.0125}, "all three rest heights must occur"
+
+
+def test_sample_cube_orientation_no_flat_spawns():
+    """cube_no_flat_spawns excludes the largest-face poses: only the historic
+    side-standing spawns (both occurring)."""
+    rng = np.random.default_rng(0)
+    rest_halves = set()
+    for _ in range(200):
+        quat, rest_half_z = sample_cube_orientation(rng, HALF, no_flat_spawns=True)
+        assert rest_half_z in (0.03, 0.02)
+        rest_halves.add(rest_half_z)
+        mat = np.empty(9)
+        mujoco.mju_quat2Mat(mat, quat)
+        # The z body axis (smallest half-extent) must end up horizontal.
+        assert abs(mat.reshape(3, 3)[:, 2][2]) < 1e-9
     assert rest_halves == {0.03, 0.02}, "both standing heights must occur"
 
 
 def test_sample_cube_orientation_smallest_face_only():
     """smallest_face_only always stands on the hy*hz face (x-axis vertical, tallest)."""
     rng = np.random.default_rng(0)
-    half = np.array([0.03, 0.02, 0.0125])
     for _ in range(200):
-        quat, rest_half_z = sample_cube_orientation(rng, half, smallest_face_only=True)
+        quat, rest_half_z = sample_cube_orientation(rng, HALF, smallest_face_only=True)
         assert rest_half_z == 0.03  # hx: standing on the smallest face
         # The geom x-axis (largest half-extent) must end up vertical.
         mat = np.empty(9)
@@ -74,30 +96,41 @@ def test_sample_cube_orientation_rejects_unordered_extents():
 
 
 def test_spawn_is_stable_and_at_rest_height(env):
-    """After reset + settling with zero action, the cube must stay standing."""
+    """After reset + settling with zero action, the cube must stay resting."""
     for seed in range(5):
         env.reset(seed=seed)
         spawn_z = env._get_cube_pos()[2]
         assert spawn_z == pytest.approx(env.cube_rest_half_z)
         for _ in range(10):
             env.step(np.zeros(6, dtype=np.float32))
-        # Still standing on the same face (allow a little contact settling).
+        # Still resting on the same face (allow a little contact settling).
         assert env._get_cube_pos()[2] == pytest.approx(env.cube_rest_half_z, abs=0.002)
 
 
-def test_spawn_tag_visible(env):
-    """Every spawn must leave the cube tag genuinely visible to the camera —
-    strictly facing (inside the NEAR band, not the flaky grazing band), the
-    ray past the already-placed arm unobstructed, and no arm contact — the sim
-    twin of placing the real sponge where the camera sees its tag."""
+def test_spawn_flat_faces_occur(env):
+    """The env-level spawn (rejection-sampled on visibility) must still
+    produce flat largest-face poses — they can't all be rejected."""
+    rest_halves = set()
+    for seed in range(40):
+        env.reset(seed=seed)
+        rest_halves.add(round(env.cube_rest_half_z, 4))
+    assert round(float(env.cube_half_extents[2]), 4) in rest_halves, \
+        "no flat spawn in 40 resets"
+
+
+def test_spawn_visible_to_both_cameras(env):
+    """Every spawn must be comfortably visible in BOTH camera views (at least
+    VISIBLE_FRACTION_MIN of the facing surface) with no arm contact — the sim
+    twin of placing the real sponge in both cameras' clear view."""
     for seed in range(50):
         env.reset(seed=seed)
-        tag_pos, _ = marker_world_poses(env.data, [env.cube_tag_site_id])
-        normal = env.data.site_xmat[env.cube_tag_site_id].reshape(3, 3)[:, 2]
-        assert marker_dropout_prob(tag_pos, normal[None], env.tag_cam,
-                                   p_near=1.0, p_far=0.0)[0] < 1.0, seed
-        assert not cube_tag_occluded(env.model, env.data, env.cube_tag_site_id,
-                                     env.tag_cam_pos, env.cube_body_id), seed
+        points, normals = cube_surface_points_world(env.data, env.cube_geom_id,
+                                                    env.cube_half_extents)
+        for cam in env.cube_cams:
+            frac, centroid = cube_visible_surface(env.model, env.data, cam,
+                                                  env.cube_body_id, points, normals)
+            assert frac >= VISIBLE_FRACTION_MIN, seed
+            assert centroid is not None
         assert not env._cube_arm_contact(), seed
 
 
@@ -147,10 +180,11 @@ def test_marker_rot_is_rotation_vector(env):
 def test_default_obs_drops_marker_rotations():
     """The default (marker_include_rot=False) obs carries marker positions only:
     6 dims shorter than the rot-included layout, and the marker section equals the
-    two FK positions back-to-back (cube_pos follows immediately, no rot dims)."""
+    two FK positions back-to-back (the live centroid follows the marker ages)."""
     with initialize(config_path="../../conf", version_base=None):
         cfg = compose(config_name="config", overrides=["env=lift"])
-    # marker_always_visible so neither pose goes stale regardless of the spawn pose.
+    # marker_always_visible so neither pose goes stale regardless of the spawn
+    # pose — and the live channel serves the clean true center.
     env = SO101LiftEnv(env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
                        cfg=RuntimeEnvConfig(marker_always_visible=True))
     assert env.marker_include_rot is False
@@ -161,8 +195,8 @@ def test_default_obs_drops_marker_rotations():
     assert obs.shape == (env.obs_dim + env.priv_dim,)
     marker_pos, _ = marker_world_poses(env.data, env.marker_site_ids)
     # qpos(6)+qvel(6)=12, then pos_finger(3), pos_wrist(3), marker_age(2),
-    # then cube_tag pos(3).
+    # then live(3).
     np.testing.assert_allclose(obs[12:15], marker_pos[0], atol=1e-6)
     np.testing.assert_allclose(obs[15:18], marker_pos[1], atol=1e-6)
-    (cube_tag_pos,), _ = marker_world_poses(env.data, [env.cube_tag_site_id])
-    np.testing.assert_allclose(obs[20:23], cube_tag_pos, atol=1e-6)
+    np.testing.assert_allclose(obs[20:23], env.data.geom_xpos[env.cube_geom_id],
+                               atol=1e-6)

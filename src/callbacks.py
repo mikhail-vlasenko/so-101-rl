@@ -52,14 +52,17 @@ class FloorContactCallback(BaseCallback):
 
 
 class MarkerHiddenCallback(BaseCallback):
-    """Log mean per-episode fraction of marker-steps (arm tags) and cube-tag
-    steps hidden from the tag camera."""
+    """Log mean per-episode obs-availability metrics: fraction of marker-steps
+    (arm tags) hidden from the tag camera, fraction of steps the cube's live
+    channel had no both-view measurement, and the mean served precise-channel
+    age."""
 
     def _on_step(self) -> bool:
         for done, info in zip(self.locals["dones"], self.locals["infos"]):
             if not done:
                 continue
-            for key in ("marker_hidden_ratio", "cube_hidden_ratio"):
+            for key in ("marker_hidden_ratio", "live_hidden_ratio",
+                        "precise_age_mean"):
                 if key in info:
                     val = info[key]
                     self.logger.record_mean(f"rollout/{key}", val)

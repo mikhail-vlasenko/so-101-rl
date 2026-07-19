@@ -4,43 +4,52 @@
 # stage 2 fine-tunes the resulting checkpoint back under `dr=full`.
 
 # Per-sample Gaussian noise added to observations during training (sim2real domain
-# randomization): qpos per step (encoder read), marker/cube per camera frame (solvePnP),
+# randomization): qpos per step (encoder read), markers/cube channels per camera frame,
 # frozen into the frame at capture. Derived obs (cube_to_target) inherit the noise via
-# the noisy cube_pos. Reward always uses true state. No qvel_sigma: the qvel obs is the
-# backward difference of consecutive noisy qpos over the control tick — exactly the real
-# pipeline (ArmLoop.tick) — so its noise is sqrt(2)*qpos_sigma/control_dt (~0.11 rad/s),
-# inherited rather than configured.
+# the noisy live centroid. Reward always uses true state. No qvel_sigma: the qvel obs is
+# the backward difference of consecutive noisy qpos over the control tick — exactly the
+# real pipeline (ArmLoop.tick) — so its noise is sqrt(2)*qpos_sigma/control_dt
+# (~0.11 rad/s), inherited rather than configured.
 obs_noise:
   qpos_sigma: 0.005        # rad,   joint encoder jitter (~0.3°)
-  marker_rot_sigma: 0.02   # rad,   per-frame AprilTag orientation jitter (~1°); also the cube tag's rot
-  # Marker/cube position noise is anisotropic in the camera frame (src/marker_noise.py):
+  marker_rot_sigma: 0.02   # rad,   per-frame AprilTag orientation jitter (~1°)
+  # Marker position noise is anisotropic in the camera frame (src/marker_noise.py):
   # small in the image plane, large along each tag's own camera ray (solvePnP range from
   # apparent size). lateral = (Z/f)*tag_px_noise, depth = (Z**2/(f*W))*tag_px_noise*tag_depth_factor,
   # with f (~968 px) from camera_intrinsics.yaml and W (0.02 m) the printed tag edge.
-  # At the scene's mean tag distance Z~0.44 m: ~0.09 mm lateral, ~4 mm depth — on par with
-  # the old isotropic marker_pos_sigma/cube_sigma (3.5/5.2 mm vector RMS) this replaced, so
-  # the DR stage is no harder overall, just squashed onto the ray. px_noise sits at the
-  # calibrated reproj residual (0.21 px) un-inflated: per-frame i.i.d. redraws overstate the
-  # temporal churn of the real error (mostly pose-locked — see TODO.md), so the honest
-  # deploy-conditions inflation waits for the pose-locked/temporal split.
+  # At the scene's mean tag distance Z~0.44 m: ~0.09 mm lateral, ~4 mm depth. px_noise
+  # sits at the calibrated reproj residual (0.21 px) un-inflated: per-frame i.i.d.
+  # redraws overstate the temporal churn of the real error (mostly pose-locked — see
+  # TODO.md), so the honest deploy-conditions inflation waits for the pose-locked/
+  # temporal split.
   tag_px_noise: 0.2        # px,    effective solvePnP corner error, arm marker tags
-  cube_px_noise: 0.2       # px,    same for the cube tag (own knob: light eases markers but not the cube)
   tag_depth_factor: 2.0    #        depth-error amplification over the image-plane baseline
+  # Tag-free cube channels (src/base_env.py dual-view pipeline): isotropic —
+  # two-view triangulation has no solvePnP depth pathology. PLACEHOLDERS until
+  # re-seeded from the Stage-3 dataset measurements (real/tracking/eval_estimator.py);
+  # these values also define the estimator acceptance envelope (2σ).
+  live_sigma: 0.003        # m,    per-frame triangulated visible-centroid jitter
+  precise_sigma: 0.003     # m,    per-refresh hull-center error
+  sqrtm_rot_sigma: 0.08    # rad,  per-refresh random rotation of the box axes before √M (~5°)
 
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
 # differentiating biased qpos has zero DC offset, so a velocity bias is non-physical.
-# marker_pos_sigma/cube_sigma are per-tag independent (each tag's own glue placement /
-# pose-estimate error); marker_common_sigma is a separate shift shared by ALL tags — the
-# real pipeline re-anchors the camera from one table tag every frame and EMAs it
-# (real/marker_obs.py), so that anchor's calibration offset settles into a common-mode
-# shift on finger, wrist, and cube alike. qpos biases are the small residual left after
-# the real rig subtracts the bulk calibration offset pre-policy — see calibration_plan.md.
+# marker_pos_sigma is per-tag independent (each tag's own glue placement / pose-estimate
+# error); live/precise are the cube channels' own systematic offsets (segmentation-mask /
+# hull-estimator geometry, PLACEHOLDERS like the noise sigmas above); marker_common_sigma
+# is a separate shift shared by ALL camera-derived positions — the real pipeline
+# re-anchors the cameras from one table tag every frame and EMAs it (real/marker_obs.py),
+# so that anchor's calibration offset settles into a common-mode shift on finger, wrist,
+# and both cube channels alike. qpos biases are the small residual left after the real
+# rig subtracts the bulk calibration offset pre-policy — see calibration_plan.md.
 obs_bias:
   qpos_sigma: 0.01
   marker_pos_sigma: 0.002    # m,    per-tag glue placement / pose-estimate error
   marker_rot_sigma: 0.02     # rad,  tag alignment error (~3°)
-  cube_sigma: 0.002
+  live_sigma: 0.003          # m,    systematic visible-surface/segmentation offset
+  precise_sigma: 0.003       # m,    systematic hull-center offset
+  precise_rot_sigma: 0.05    # rad,  constant rotation of the estimated box axes (~3°)
   marker_common_sigma: 0.0015 # m,   shared shift on all tags (table calib; ~extrinsics.yaml spread_mm 2.28)
 
 # Observation latency (sim2real): only camera-derived obs (markers, cube) lag.
@@ -67,18 +76,22 @@ cam_latency:
 # missed, so its obs freezes at the last detected pose while its age channel grows
 # (same convention as a tag turned away). `near` applies in the grazing 65-70°
 # boundary band (flakier detection), `far` to tags comfortably facing the camera.
-# Tags past 70° are always missed (camera physics, not this knob). Gates the cube
-# tag too, which additionally misses whenever the camera ray is occluded (mj_ray).
-# Losing the pose is its own cost — there is no reward term.
+# Tags past 70° are always missed (camera physics, not this knob). The live cube
+# channel reuses the same knob for the segmentation tracker's per-frame misses:
+# `near` when the object is only partially visible in some view, `far` when
+# comfortably visible in both (either camera losing it entirely is a certain
+# miss — geometry, not this knob). Losing the pose is its own cost — there is
+# no reward term.
 marker_dropout:
   near: 0.02
   far: 0.01
 
 # Per-episode sponge resize (physical DR, not vision): each of the box's three
 # full side lengths is jittered by an independent uniform +/- cube_size_jitter
-# (resampled every reset), so the policy sees a range of sponge sizes. The
+# (resampled every reset), so the policy sees a range of sponge sizes — and,
+# through the true √M in the obs, must actually read the episode's shape. The
 # nominal 6x4x2.5 cm box is the center; draws that would break the strict
-# long>mid>short face ordering (required by sample_cube_orientation and the
-# tag-glued-to-the-largest-face convention) are reject-sampled. Applies to every
-# cube env (lift + pickplace) since it's the same physical sponge. Meters.
+# long>mid>short face ordering (required by sample_cube_orientation) are
+# reject-sampled. Applies to every cube env (lift + pickplace) since it's the
+# same physical sponge. Meters.
 cube_size_jitter: 0.01

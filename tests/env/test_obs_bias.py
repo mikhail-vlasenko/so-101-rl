@@ -1,12 +1,14 @@
 """Tests for per-episode observation bias (sim2real domain randomization).
 
 Bias is sampled once at reset() and held constant for the whole episode. It
-adds to qpos / marker poses / cube_pos in the observation. The per-tag marker
-biases are independent (each tag's own glue/pose-estimate error), plus a
-marker_common_sigma shift shared by ALL tags (the camera re-anchor / table
-calibration offset the real pipeline propagates to every tag). No qvel bias —
-velocity from differentiating biased qpos has zero DC offset. Reward path always
-reads self.data (true state).
+adds to qpos / marker poses / the cube channels in the observation. The
+per-tag marker biases are independent (each tag's own glue/pose-estimate
+error), the cube channels carry their own live/precise offsets plus a constant
+rotation of the estimated box axes, and a marker_common_sigma shift is shared
+by ALL camera-derived positions (the camera re-anchor / table calibration
+offset the real pipeline propagates everywhere). No qvel bias — velocity from
+differentiating biased qpos has zero DC offset. Reward path always reads
+self.data (true state).
 """
 
 import numpy as np
@@ -16,33 +18,41 @@ from hydra import compose, initialize
 
 from src.base_env import RuntimeEnvConfig
 from src.pickplace_env import SO101PickPlaceEnv
+from src.shape_obs import sqrtm_from_upper
 
 
 SIGMAS = {
     "qpos_sigma": 0.01,
     "marker_pos_sigma": 0.005,     # independent per-tag
     "marker_rot_sigma": 0.05,
-    "cube_sigma": 0.008,           # independent, cube
-    "marker_common_sigma": 0.004,  # shared shift on all tags
+    "live_sigma": 0.008,           # independent, live centroid
+    "precise_sigma": 0.006,        # independent, precise center
+    "precise_rot_sigma": 0.05,     # constant rotation of the estimated axes
+    "marker_common_sigma": 0.004,  # shared shift on all camera positions
 }
 
 NOISE_SIGMAS = {
     "qpos_sigma": 0.005,
     "marker_rot_sigma": 0.02,
     "tag_px_noise": 0.4,
-    "cube_px_noise": 0.4,
     "tag_depth_factor": 2.0,
+    "live_sigma": 0.003,
+    "precise_sigma": 0.003,
+    "sqrtm_rot_sigma": 0.08,
 }
 
+# Actor-block layout (marker_include_rot=True, prev_actions_n=2): see
+# tests/env/test_obs_noise.py.
 QPOS = slice(0, 6)
 QVEL = slice(6, 12)
 MARKER_FINGER_POS = slice(12, 15)
 MARKER_FINGER_ROT = slice(15, 18)
 MARKER_WRIST_POS = slice(18, 21)
 MARKER_WRIST_ROT = slice(21, 24)
-CUBE = slice(26, 29)
-CUBE_ROT = slice(29, 32)
-C2T = slice(33, 35)
+LIVE = slice(26, 29)
+CENTER = slice(30, 33)
+SQRTM = slice(33, 39)
+C2T = slice(40, 42)
 
 
 @pytest.fixture(scope="module")
@@ -77,12 +87,14 @@ def test_bias_constant_within_episode(cfg):
         diffs.append(obs_b - obs_c)
     first = diffs[0]
     assert not np.allclose(first[QPOS], 0)
-    assert not np.allclose(first[CUBE], 0)
+    assert not np.allclose(first[LIVE], 0)
+    assert not np.allclose(first[CENTER], 0)
     for d in diffs[1:]:
         np.testing.assert_allclose(d[QPOS], first[QPOS], atol=1e-6)
         np.testing.assert_allclose(d[MARKER_FINGER_POS], first[MARKER_FINGER_POS], atol=1e-6)
         np.testing.assert_allclose(d[MARKER_WRIST_POS], first[MARKER_WRIST_POS], atol=1e-6)
-        np.testing.assert_allclose(d[CUBE], first[CUBE], atol=1e-6)
+        np.testing.assert_allclose(d[LIVE], first[LIVE], atol=1e-6)
+        np.testing.assert_allclose(d[CENTER], first[CENTER], atol=1e-6)
 
 
 def test_bias_changes_across_episodes(cfg):
@@ -104,7 +116,7 @@ def test_bias_changes_across_episodes(cfg):
 
     assert not np.allclose(diff0[QPOS], diff1[QPOS])
     assert not np.allclose(diff0[MARKER_FINGER_POS], diff1[MARKER_FINGER_POS])
-    assert not np.allclose(diff0[CUBE], diff1[CUBE])
+    assert not np.allclose(diff0[LIVE], diff1[LIVE])
 
 
 def test_marker_bias_common_plus_independent(cfg):
@@ -142,8 +154,8 @@ def test_bias_magnitude_matches_sigmas(cfg):
     qpos_diffs = np.empty((n, 6))
     marker_pos_diffs = np.empty((n, 6))
     marker_rot_diffs = np.empty((n, 6))
-    cube_diffs = np.empty((n, 3))
-    cube_rot_diffs = np.empty((n, 3))
+    live_diffs = np.empty((n, 3))
+    center_diffs = np.empty((n, 3))
     for i in range(n):
         env_clean.reset(seed=i)
         env_biased.reset(seed=i)
@@ -154,19 +166,36 @@ def test_bias_magnitude_matches_sigmas(cfg):
         marker_pos_diffs[i, 3:] = obs_b[MARKER_WRIST_POS] - obs_c[MARKER_WRIST_POS]
         marker_rot_diffs[i, :3] = obs_b[MARKER_FINGER_ROT] - obs_c[MARKER_FINGER_ROT]
         marker_rot_diffs[i, 3:] = obs_b[MARKER_WRIST_ROT] - obs_c[MARKER_WRIST_ROT]
-        cube_diffs[i] = obs_b[CUBE] - obs_c[CUBE]
-        cube_rot_diffs[i] = obs_b[CUBE_ROT] - obs_c[CUBE_ROT]
-    # Each tag's per-axis bias is common + independent, so its std combines both.
+        live_diffs[i] = obs_b[LIVE] - obs_c[LIVE]
+        center_diffs[i] = obs_b[CENTER] - obs_c[CENTER]
+    # Each channel's per-axis bias is common + independent, so its std combines both.
     marker_pos_std = np.sqrt(SIGMAS["marker_common_sigma"] ** 2 + SIGMAS["marker_pos_sigma"] ** 2)
-    cube_std = np.sqrt(SIGMAS["marker_common_sigma"] ** 2 + SIGMAS["cube_sigma"] ** 2)
+    live_std = np.sqrt(SIGMAS["marker_common_sigma"] ** 2 + SIGMAS["live_sigma"] ** 2)
+    center_std = np.sqrt(SIGMAS["marker_common_sigma"] ** 2 + SIGMAS["precise_sigma"] ** 2)
     np.testing.assert_allclose(qpos_diffs.std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.15)
     np.testing.assert_allclose(marker_pos_diffs.std(axis=0).mean(), marker_pos_std, rtol=0.15)
     np.testing.assert_allclose(marker_rot_diffs.std(axis=0).mean(),
                                SIGMAS["marker_rot_sigma"], rtol=0.15)
-    np.testing.assert_allclose(cube_diffs.std(axis=0).mean(), cube_std, rtol=0.15)
-    # The cube tag's rot bias reuses marker_rot_sigma (same AprilTag pipeline).
-    np.testing.assert_allclose(cube_rot_diffs.std(axis=0).mean(),
-                               SIGMAS["marker_rot_sigma"], rtol=0.15)
+    np.testing.assert_allclose(live_diffs.std(axis=0).mean(), live_std, rtol=0.15)
+    np.testing.assert_allclose(center_diffs.std(axis=0).mean(), center_std, rtol=0.15)
+
+
+def test_precise_rot_bias_rotates_sqrtm_axes(cfg):
+    """precise_rot_sigma turns the served √M's axes without touching its
+    eigenvalues — a constant estimator-orientation error, not a resize."""
+    env_clean = _pickplace(cfg, obs_bias=None, marker_always_visible=True)
+    env_biased = _pickplace(cfg, obs_bias=SIGMAS, marker_always_visible=True)
+    rotated = 0
+    for i in range(20):
+        env_clean.reset(seed=i)
+        env_biased.reset(seed=i)
+        obs_c, *_ = env_clean.step(_zero_action())
+        obs_b, *_ = env_biased.step(_zero_action())
+        w_clean = np.linalg.eigvalsh(sqrtm_from_upper(obs_c[SQRTM]))
+        w_biased = np.linalg.eigvalsh(sqrtm_from_upper(obs_b[SQRTM]))
+        np.testing.assert_allclose(w_biased, w_clean, atol=1e-9)
+        rotated += not np.allclose(obs_c[SQRTM], obs_b[SQRTM])
+    assert rotated == 20
 
 
 def test_qvel_unbiased(cfg):
@@ -180,12 +209,12 @@ def test_qvel_unbiased(cfg):
     np.testing.assert_array_equal(obs_c[QVEL], obs_b[QVEL])
 
 
-def test_cube_to_target_uses_biased_cube_pos(cfg):
-    """Derived cube_to_target must inherit the cube_pos bias."""
+def test_cube_to_target_uses_biased_live_centroid(cfg):
+    """Derived cube_to_target must inherit the live-centroid bias."""
     env = _pickplace(cfg, obs_bias=SIGMAS)
     env.reset(seed=0)
     obs, *_ = env.step(_zero_action())
-    expected_c2t = obs[CUBE][:2] - env.place_target[:2]
+    expected_c2t = obs[LIVE][:2] - env.place_target[:2]
     np.testing.assert_allclose(obs[C2T], expected_c2t, atol=1e-7)
 
 

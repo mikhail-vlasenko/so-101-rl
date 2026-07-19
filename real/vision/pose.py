@@ -11,24 +11,12 @@ Scale comes from the tag's true printed edge length (`real.marker_spec.TAG_SIZE_
 get the size wrong and the reported distance scales by the same factor. Distortion
 is handled (the solver takes the calibrated `dist_coeffs`).
 """
-import os
-
 import cv2
 import numpy as np
 import yaml
 
 from real.marker_spec import TAG_SIZE_MM
-
-def intrinsics_path(camera):
-    """Per-unit intrinsics file for a camera name from `real.vision.camera.SERIALS`.
-
-    Intrinsics are per-lens — the two C922 units differ by ~1.4% in focal
-    length — so each unit gets its own file. "main" keeps the legacy unsuffixed
-    name that predates the second camera.
-    """
-    suffix = "" if camera == "main" else f"_{camera}"
-    return os.path.join(os.path.dirname(__file__), f"camera_intrinsics{suffix}.yaml")
-
+from real.vision.intrinsics import intrinsics_path
 
 INTRINSICS_PATH = intrinsics_path("main")
 

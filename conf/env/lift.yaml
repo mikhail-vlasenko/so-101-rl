@@ -9,6 +9,7 @@ lift_env:
   cube_low: [0.15, -0.15]    # xy only; spawn z + orientation come from sample_cube_orientation
   cube_high: [0.30, 0.15]
   cube_smallest_face_only: ${cube_smallest_face_only}   # defined in config.yaml
+  cube_no_flat_spawns: ${cube_no_flat_spawns}           # defined in config.yaml
   target_height: 0.10
   # floor_contact_penalty / floor_proximity_* / floor_force_coeff / poke_force_coeff / cube_tip_coeff are
   # careful-behavior shaping, owned by the `shaping` config group

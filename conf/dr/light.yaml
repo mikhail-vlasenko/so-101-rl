@@ -7,22 +7,26 @@
 # Only the DR knobs differ from full; prev_actions_n / history_taps live in
 # config.yaml and MUST stay identical across stages (they change obs dim).
 
-# Anisotropic marker/cube position noise (src/marker_noise.py): same shape as dr=full,
+# Anisotropic marker position noise (src/marker_noise.py): same shape as dr=full,
 # lower magnitude on the arm markers (tag_px_noise scaled down; depth_factor kept, it is
-# a geometry ratio). The cube tag keeps the full-level px error (~4 mm vec RMS at its mean
-# distance) — the curriculum eases the arm's self-perception, not the manipulated object.
+# a geometry ratio). The cube channels keep the full-level sigmas — the curriculum eases
+# the arm's self-perception, not the manipulated object.
 obs_noise:
   qpos_sigma: 0.005
   marker_rot_sigma: 0.01
   tag_px_noise: 0.1
-  cube_px_noise: 0.2
   tag_depth_factor: 2.0
+  live_sigma: 0.003
+  precise_sigma: 0.003
+  sqrtm_rot_sigma: 0.08
 
 obs_bias:
   qpos_sigma: 0.01
   marker_pos_sigma: 0.002
   marker_rot_sigma: 0.02
-  cube_sigma: 0.002
+  live_sigma: 0.003
+  precise_sigma: 0.003
+  precise_rot_sigma: 0.05
   marker_common_sigma: 0.0015
 
 # Same as dr=full: latency is measured hardware timing, not a difficulty knob.

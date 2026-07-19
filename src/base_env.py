@@ -16,17 +16,27 @@ from src.camera_sim import CameraSim
 from src.marker_noise import CameraIntrinsics, anisotropic_pos_noise, load_camera_intrinsics
 from src.obs_history import ObsHistory
 from src.servo_profile import ServoProfile
+from src.shape_obs import (
+    MARKER_AGE_CAP_S,
+    STATIC_DWELL_S,
+    VISIBLE_FRACTION_MIN,
+    ObjectObsState,
+    box_sqrtm,
+    is_static,
+    sqrtm_upper,
+)
 from src.units import action_to_target
-from real.marker_spec import ARM_TAG_TO_SITE, CUBE_TAG_ID, TAG_SIZE_MM
+from real.marker_spec import ARM_TAG_TO_SITE, TAG_SIZE_MM
 
 
 def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
-    """Actor block: qpos(6) + qvel(6) + markers(2*M) + marker_age(2) + cube_tag(6)
-    + cube_age(1) + extra(4) + prev_actions(N*6). The full env observation is
-    [this actor block per history tap | priv_dim_for privileged tail]
-    (src/obs_history.py; one block per entry of conf/config.yaml:history_taps);
-    only the critic may read the tail (asymmetric critic — the actor
-    structurally slices it off, see src/networks.TakeFirst).
+    """Actor block: qpos(6) + qvel(6) + markers(2*M) + marker_age(2) + live(3)
+    + live_age(1) + center(3) + sqrtM(6) + precise_age(1) + extra(4) +
+    prev_actions(N*6). The full env observation is [this actor block per
+    history tap | priv_dim_for privileged tail] (src/obs_history.py; one block
+    per entry of conf/config.yaml:history_taps); only the critic may read the
+    tail (asymmetric critic — the actor structurally slices it off, see
+    src/networks.TakeFirst).
 
     Each marker contributes its world xyz (M=3); when marker_include_rot is true it
     also contributes a world rotation vector (axis-angle, +3 dims, M=6) — the same
@@ -36,29 +46,34 @@ def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
     latency when freshly detected, growing while the tag is undetected and its
     last pose is held.
 
-    The cube is observed the same way: cube_tag is the world pose (xyz +
-    axis-angle rotation vector, always both) of the AprilTag on the sponge's
-    largest face — the raw tag pose, never inferred back to a sponge center —
-    and cube_age is its own age channel under the identical hold-last-pose
-    convention.
+    The cube is observed tag-free through the two-camera object channels
+    (src/shape_obs.py): `live` is the triangulated centroid of the two views'
+    visible-surface centroids with its own age — fast, biased toward the
+    visible surface, gone stale when either camera loses the object; `center`
+    + `sqrtM` (upper triangle, shape_obs.SQRTM_UPPER_ORDER) are the estimated
+    body center and shape tensor, refreshed only while the object is static
+    and well visible, with `precise_age` growing in between. Both channels
+    hold their last measurement exactly like the markers.
     """
     marker_dim = 6 if marker_include_rot else 3
-    # 12 = qpos(6) + qvel(6); 11 = cube_tag(3+3) + cube_age(1) + extra(4)
-    return 12 + N_MARKERS * marker_dim + N_MARKERS + 11 + prev_actions_n * 6
+    # 12 = qpos(6) + qvel(6); 18 = live(3) + live_age(1) + center(3) +
+    # sqrtM(6) + precise_age(1) + extra(4)
+    return 12 + N_MARKERS * marker_dim + N_MARKERS + 18 + prev_actions_n * 6
 
 
 def priv_dim_for(marker_include_rot: bool = False) -> int:
     """Privileged tail appended after the actor block (asymmetric critic):
-    true cube pose (3+3, world pos + axis-angle) + cube velocity (6, free-joint
-    qvel) + jaw contact flags (2) + the episode's sampled DR latents: qpos bias
-    (6), per-tag marker pos bias (2*3), marker rot bias (2*3, only when the rot
-    obs it perturbs is in the actor block), cube tag pos/rot bias (3+3),
-    common-mode pos bias (3), camera pipeline delay (1), sponge half extents
-    (3). Contents built by SO101BaseEnv._priv_tail; normalization constants in
-    src/obs_norm.py."""
-    # 3+3+6+2 cube pose/vel + jaws; 6 qpos bias; 3+3+3 cube/cube-rot/common
-    # bias; 1 cam delay; 3 half extents
-    dim = 14 + 6 + N_MARKERS * 3 + 9 + 1 + 3
+    true cube pose (3+3, world pos + axis-angle) + true √M (6, upper triangle)
+    + cube velocity (6, free-joint qvel) + jaw contact flags (2) + the
+    episode's sampled DR latents: qpos bias (6), per-tag marker pos bias
+    (2*3), marker rot bias (2*3, only when the rot obs it perturbs is in the
+    actor block), live centroid bias (3), precise center bias (3), precise
+    rot-perturb (3, axis-angle), common-mode pos bias (3), camera pipeline
+    delay (1), sponge half extents (3). Contents built by
+    SO101BaseEnv._priv_tail; normalization constants in src/obs_norm.py."""
+    # 3+3+6+6+2 cube pose/sqrtM/vel + jaws; 6 qpos bias; 3+3+3 live/precise/
+    # precise-rot bias; 3 common bias; 1 cam delay; 3 half extents
+    dim = 20 + 6 + N_MARKERS * 3 + 9 + 3 + 1 + 3
     if marker_include_rot:
         dim += N_MARKERS * 3
     return dim
@@ -70,25 +85,24 @@ def priv_dim_for(marker_include_rot: bool = False) -> int:
 MARKER_SITE_NAMES = ["marker_finger", "marker_wrist"]
 N_MARKERS = len(MARKER_SITE_NAMES)
 
-# AprilTag id 1 on the sponge's largest face (real/marker_spec.py ROLES);
-# the site of the same name in the scene XMLs mirrors it.
+# AprilTag id 1 on the sponge's largest face. The obs path no longer reads it
+# (the cube channels are tag-free) — the site survives only as the GT anchor
+# for legacy-teacher distillation (distill.teacher_obs=legacy_tag; delete with
+# it, see TODO.md). MARKER_AGE_CAP_S itself lives in src/shape_obs.py (shared
+# with the real pipeline) and is re-exported here for the marker path.
 CUBE_TAG_SITE_NAME = "cube_tag"
 
-# Undetected tags keep their last measured pose in the obs while their age
-# channel grows, capped here; a tag never detected this episode reads an
-# all-zero pose with age pinned at the cap. Shared with the real pipeline
-# (real/rollout/marker_obs.py) — the identical convention on both sides.
-MARKER_AGE_CAP_S = 1.0
-
-# Fixed camera in so101.xml standing in for the physical webcam that watches
-# the tags. A tag counts as visible when it projects inside the camera frame
-# (CameraModel.in_view — the real camera's field of view) *and* the angle between
-# its outward normal (+z of the site frame) and the tag->camera ray is under
-# MAX — past that the AprilTag detector loses the grazing view. NEAR marks a
-# softer band: from NEAR up to MAX the view grazes and the detector flakes, so
-# the DR dropout (marker_dropout_prob) drops those tags more often than tags
-# comfortably facing the camera.
+# Fixed cameras in so101.xml standing in for the two physical webcams: tag_cam
+# (main) watches the AprilTags, and together with tag_cam_aux drives the
+# dual-view cube channels. A tag counts as visible when it projects inside the
+# main camera frame (CameraModel.in_view — the real camera's field of view)
+# *and* the angle between its outward normal (+z of the site frame) and the
+# tag->camera ray is under MAX — past that the AprilTag detector loses the
+# grazing view. NEAR marks a softer band: from NEAR up to MAX the view grazes
+# and the detector flakes, so the DR dropout (marker_dropout_prob) drops those
+# tags more often than tags comfortably facing the camera.
 TAG_CAM_NAME = "tag_cam"
+TAG_CAM_AUX_NAME = "tag_cam_aux"
 MARKER_VIS_MAX_ANGLE_DEG = 70.0
 MARKER_VIS_NEAR_ANGLE_DEG = 65.0
 _MARKER_VIS_COS_MIN = np.cos(np.radians(MARKER_VIS_MAX_ANGLE_DEG))
@@ -175,19 +189,21 @@ def tag_cam_world_pos(model, data):
     return tag_cam_model(model, data).pos
 
 
-def tag_cam_model(model, data):
-    """CameraModel for TAG_CAM_NAME: its world pose (cam_xpos / cam_xmat, both
-    filled by mj_camlight — the mount is qpos-independent, so this needs no prior
-    forward) plus the calibrated intrinsics. Single source for the camera geometry
-    the marker-visibility FOV check consumes."""
-    cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, TAG_CAM_NAME)
-    assert cam_id >= 0, f"Camera '{TAG_CAM_NAME}' not found in model"
+def tag_cam_model(model, data, name=TAG_CAM_NAME, camera="main"):
+    """CameraModel for a fixed scene camera: its world pose (cam_xpos /
+    cam_xmat, both filled by mj_camlight — the mounts are qpos-independent, so
+    this needs no prior forward) plus that physical unit's calibrated
+    intrinsics (real/vision/intrinsics.py names). Single source for the camera
+    geometry the visibility checks consume; defaults to the main tag camera,
+    pass (TAG_CAM_AUX_NAME, "aux") for the second unit."""
+    cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, name)
+    assert cam_id >= 0, f"Camera '{name}' not found in model"
     # cam_xpos/cam_xmat are filled by mj_camlight, which needs body frames from mj_kinematics.
     mujoco.mj_kinematics(model, data)
     mujoco.mj_camlight(model, data)
     return CameraModel(pos=data.cam_xpos[cam_id].copy(),
                        mat=data.cam_xmat[cam_id].reshape(3, 3).copy(),
-                       intr=load_camera_intrinsics())
+                       intr=load_camera_intrinsics(camera))
 
 
 def markers_visible(data, site_ids, cam):
@@ -224,63 +240,84 @@ def marker_dropout_prob(pos, normals, cam, p_near, p_far):
     return prob
 
 
-# The camera's visible stand-in geoms (tag_cam_body/lens in so101.xml) sit
-# within ~4 cm of the camera position, so the occlusion ray stops this far
-# short of the camera to keep them from self-occluding every tag. Nothing else
-# in the scene lives that close to the camera.
+# The cameras' visible stand-in geoms (tag_cam[_aux]_body/lens in so101.xml)
+# sit within ~4 cm of each camera position, so the occlusion ray stops this
+# far short of the camera to keep them from self-occluding every point.
+# Nothing else in the scene lives that close to the cameras.
 _CAM_GEOM_CLEARANCE_M = 0.06
 
+# Body-frame sample grid on the sponge box's surface for the per-camera
+# visible-surface test (cube_visible_surface): a 3x3 grid per face at these
+# fractions of the face half-extents (interior points — corners/edges belong
+# to two faces and would double-count), on all six faces. Scaled by the
+# episode's actual half extents at capture time.
+_FACE_GRID_FRACTIONS = (-0.7, 0.0, 0.7)
 
-def cube_tag_sample_points(data, site_id, half_extents):
-    """The tag centre plus its four square corners, in world coordinates.
 
-    Corners are the site box's ±x/±y half-extents mapped through the site's
-    world rotation — the printed AprilTag's quad, the geometry the detector must
-    see whole. z (tag thickness) is ignored: corners lie in the tag plane.
+def _unit_box_surface_points():
+    """(points (54, 3), normals (54, 3)) on the unit box [-1, 1]^3: a 3x3 grid
+    per face with the face's outward normal."""
+    pts, normals = [], []
+    for axis in range(3):
+        u, v = (axis + 1) % 3, (axis + 2) % 3
+        for sign in (-1.0, 1.0):
+            for a in _FACE_GRID_FRACTIONS:
+                for b in _FACE_GRID_FRACTIONS:
+                    p = np.zeros(3)
+                    p[axis] = sign
+                    p[u] = a
+                    p[v] = b
+                    n = np.zeros(3)
+                    n[axis] = sign
+                    pts.append(p)
+                    normals.append(n)
+    return np.array(pts), np.array(normals)
+
+
+CUBE_SURFACE_UNIT_POINTS, CUBE_SURFACE_UNIT_NORMALS = _unit_box_surface_points()
+
+
+def cube_surface_points_world(data, cube_geom_id, half_extents):
+    """(points (54, 3), normals (54, 3)) of the box-surface sample grid in
+    world coordinates, from the cube geom's current world pose."""
+    R = data.geom_xmat[cube_geom_id].reshape(3, 3)
+    c = data.geom_xpos[cube_geom_id]
+    pts = c + (CUBE_SURFACE_UNIT_POINTS * np.asarray(half_extents)) @ R.T
+    return pts, CUBE_SURFACE_UNIT_NORMALS @ R.T
+
+
+def cube_visible_surface(model, data, cam, cube_body_id, points, normals):
+    """What one camera sees of the box surface: (visible_fraction, centroid).
+
+    A sample point is *facing* when its outward normal points toward the
+    camera (self-occlusion of the convex box, no ray needed); a facing point
+    is *visible* when it also projects inside the camera frame (cam.in_view)
+    and an mj_ray toward the camera clears every other geom (arm meshes, ring
+    walls, floor — the shapes that block the real view; the cube's own body is
+    excluded, the facing test already handles it). visible_fraction is
+    visible/facing — 1.0 for an unoccluded fully-framed box regardless of its
+    orientation, mirroring the real pipeline's mask-area-vs-baseline occlusion
+    measure. centroid is the mean of the visible points (the visible-surface
+    point a segmentation-mask centroid's ray aims at), or None when nothing is
+    visible.
     """
-    xmat = data.site_xmat[site_id].reshape(3, 3)
-    center = data.site_xpos[site_id]
-    hx, hy = half_extents[0], half_extents[1]
-    pts = [center]
-    for sx in (-1.0, 1.0):
-        for sy in (-1.0, 1.0):
-            pts.append(center + sx * hx * xmat[:, 0] + sy * hy * xmat[:, 1])
-    return pts
-
-
-def cube_tag_occluded(model, data, site_id, cam_pos, cube_body_id):
-    """True when a geom blocks the cube tag's view of the camera at its centre
-    or any of its four corners.
-
-    Casts an mj_ray from each sample point (see cube_tag_sample_points) toward
-    the camera against all geoms (static included — ring walls and floor block;
-    so do the arm's visual meshes, the shapes the camera actually sees). The
-    cube's own body is excluded so a tag facing away stays the angle check's
-    job, not a self-occlusion. Any blocked ray hides the tag: a real AprilTag
-    decode fails when part of its quad is occluded, not just its centre.
-    """
-    cam_pos = np.asarray(cam_pos, dtype=np.float64)
+    to_cam = cam.pos - points
+    facing = np.einsum("ij,ij->i", normals, to_cam) > 0.0
+    n_facing = int(facing.sum())
+    if n_facing == 0:
+        return 0.0, None
+    candidates = facing & cam.in_view(points)
     geomid = np.zeros(1, dtype=np.int32)
-    for pt in cube_tag_sample_points(data, site_id, model.site_size[site_id]):
-        vec = cam_pos - pt
+    visible_pts = []
+    for pt, vec in zip(points[candidates], to_cam[candidates]):
         dist = float(np.linalg.norm(vec))
         hit = mujoco.mj_ray(model, data, pt.astype(np.float64), vec / dist,
                             None, 1, cube_body_id, geomid)
-        if 0.0 <= hit < dist - _CAM_GEOM_CLEARANCE_M:
-            return True
-    return False
-
-
-def cube_tag_visible(model, data, site_id, cam, cube_body_id):
-    """Geometric visibility of the cube tag from the CameraModel `cam`: the
-    markers_visible checks (inside the camera frame, plane angle under
-    MARKER_VIS_MAX_ANGLE_DEG) plus an unobstructed ray to the camera. No
-    stochastic dropout — used by tests and the real-arm rollout's FK branch."""
-    pos, _ = marker_world_poses(data, [site_id])
-    normal = data.site_xmat[site_id].reshape(3, 3)[:, 2]
-    if marker_dropout_prob(pos, normal[None], cam, p_near=0.0, p_far=0.0)[0] >= 1.0:
-        return False
-    return not cube_tag_occluded(model, data, site_id, cam.pos, cube_body_id)
+        if not (0.0 <= hit < dist - _CAM_GEOM_CLEARANCE_M):
+            visible_pts.append(pt)
+    if not visible_pts:
+        return 0.0, None
+    return len(visible_pts) / n_facing, np.mean(visible_pts, axis=0)
 
 
 class CamState(NamedTuple):
@@ -291,50 +328,80 @@ class CamState(NamedTuple):
     marker_pos: np.ndarray     # (N_MARKERS, 3)
     marker_rot: np.ndarray     # (N_MARKERS, 3) axis-angle
     marker_normal: np.ndarray  # (N_MARKERS, 3) outward tag normals
-    cube_tag_pos: np.ndarray   # (3,)
-    cube_tag_rot: np.ndarray   # (3,) axis-angle
-    cube_tag_normal: np.ndarray  # (3,) outward tag normal
-    cube_tag_occluded: bool
+    cube_center: np.ndarray    # (3,) GT box center
+    cube_rot_mat: np.ndarray   # (3, 3) GT box world rotation
+    cube_vis_frac: np.ndarray  # (2,) per-camera visible fraction (main, aux)
+    cube_vis_centroid: np.ndarray  # (2, 3) per-camera visible-point centroid
+    cube_seen: np.ndarray      # (2,) bool — any surface point visible per camera
 
 
 class CamFrame(NamedTuple):
     """One processed detection: dropout, bias, and noise frozen at capture time.
-    marker_pos/rot entries are only meaningful where detected — _ingest_frame
-    folds the detected ones into the held per-tag state the obs serves."""
+    marker_pos/rot entries are only meaningful where detected, live only when
+    live_detected — _ingest_frame folds the detected ones into the held state
+    the obs serves. precise_center/sqrtm are always present (GT + frozen
+    noise); whether they refresh the precise channel is the ingest-time static
+    gate's call."""
     marker_pos: np.ndarray  # (N_MARKERS, 3)
     marker_rot: np.ndarray  # (N_MARKERS, 3)
     detected: np.ndarray    # (N_MARKERS,) bool
-    cube_tag_pos: np.ndarray  # (3,)
-    cube_tag_rot: np.ndarray  # (3,)
-    cube_detected: bool
+    live: np.ndarray        # (3,) measured live centroid (visible-surface avg)
+    live_gate: np.ndarray   # (3,) pre-noise live measurement for the static gate
+    live_priv: np.ndarray   # (3,) privileged live: GT center, same bias/noise
+    live_detected: bool
+    vis_frac: np.ndarray    # (2,) per-camera visible fraction at capture
+    precise_center: np.ndarray  # (3,)
+    precise_sqrtm: np.ndarray   # (3, 3)
 
 
-def sample_cube_orientation(rng, half_extents, smallest_face_only=False):
-    """Spawn orientation for the sponge box: standing on a non-largest face.
+# Resting orientations of the box: which body axis is vertical (with sign) and
+# the matching half-extent index for the rest height. Quats are the 90-degree
+# tilts (or identity/flip for z) that put that axis vertical; a uniform yaw is
+# composed on top in sample_cube_orientation.
+_S = np.sqrt(0.5)
+_REST_FACES = {
+    "x_down": (np.array([_S, 0.0, _S, 0.0]), 0),   # +x -> -z (legacy crutch pose)
+    "x_up": (np.array([_S, 0.0, -_S, 0.0]), 0),
+    "y_up": (np.array([_S, _S, 0.0, 0.0]), 1),
+    "y_down": (np.array([_S, -_S, 0.0, 0.0]), 1),
+    "z_up": (np.array([1.0, 0.0, 0.0, 0.0]), 2),   # flat on the largest face
+    "z_down": (np.array([0.0, 1.0, 0.0, 0.0]), 2),
+}
+_SIDE_FACES = ("x_down", "x_up", "y_up", "y_down")
+_FLAT_FACES = ("z_up", "z_down")
+
+
+def sample_cube_orientation(rng, half_extents, smallest_face_only=False,
+                            no_flat_spawns=False):
+    """Spawn orientation for the sponge box: resting on any face + free yaw.
 
     half_extents (hx, hy, hz) must be strictly ordered hx > hy > hz (the
-    6 x 4 x 2.5 cm box). The box stands either on its hy*hz face (x-axis up,
-    2*hx tall) or its hx*hz face (y-axis up, 2*hy tall), never on the largest
-    hx*hy face, with a uniform random yaw. Returns (quat wxyz, rest_half_z).
+    6 x 4 x 2.5 cm box). By default the box rests on any of its six faces —
+    flat on a largest hx*hy face included, since the tag-free object channels
+    impose no facing constraint — chosen uniformly, with a uniform random yaw.
+    Returns (quat wxyz, rest_half_z).
 
-    smallest_face_only (simplified-starts curriculum crutch): always stand on
-    the smallest hy*hz face (x-axis vertical) so the box presents the same
-    upright, easy-to-grasp pose every episode. See conf/config.yaml.
+    Curriculum crutches (conf/config.yaml, no obs-dim change):
+    - smallest_face_only: always stand on the smallest hy*hz face (x-axis
+      vertical, tallest, easiest-to-grasp pose every episode).
+    - no_flat_spawns: exclude the flat largest-face poses, i.e. the historic
+      side-standing spawn distribution.
     """
     hx, hy, hz = half_extents
     assert hx > hy > hz, f"expected strictly ordered half extents, got {half_extents}"
-    s = np.sqrt(0.5)
-    if smallest_face_only or rng.uniform() < 0.5:
-        tilt = np.array([s, 0.0, s, 0.0])  # 90 deg about y: x-axis vertical
-        rest_half_z = hx
+    if smallest_face_only:
+        face = "x_down"
+    elif no_flat_spawns:
+        face = _SIDE_FACES[rng.integers(len(_SIDE_FACES))]
     else:
-        tilt = np.array([s, s, 0.0, 0.0])  # 90 deg about x: y-axis vertical
-        rest_half_z = hy
+        faces = _SIDE_FACES + _FLAT_FACES
+        face = faces[rng.integers(len(faces))]
+    tilt, rest_axis = _REST_FACES[face]
     yaw = rng.uniform(-np.pi, np.pi)
     yaw_quat = np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
     quat = np.empty(4)
     mujoco.mju_mulQuat(quat, yaw_quat, tilt)
-    return quat, float(rest_half_z)
+    return quat, float(half_extents[rest_axis])
 
 FIXED_JAW_NAMES = [
     "fixed_jaw_box1", "fixed_jaw_box2", "fixed_jaw_box3",
@@ -519,9 +586,10 @@ class SO101ArmEnv(gym.Env):
 
 
 class SO101BaseEnv(SO101ArmEnv):
-    """Base class for the cube-manipulation tasks: adds the cube + AprilTag
-    camera observation pipeline (markers, cube tag, hold-last-pose ages, DR
-    noise/bias/latency/dropout) and the cube-centric reset/step skeleton on
+    """Base class for the cube-manipulation tasks: adds the AprilTag marker
+    pipeline (hold-last-pose ages, DR noise/bias/latency/dropout), the
+    tag-free dual-view cube channels (live centroid + static-gated precise
+    center/√M, src/shape_obs.py) and the cube-centric reset/step skeleton on
     top of SO101ArmEnv."""
 
     TASK_ID: float  # 0.0 = lift, 1.0 = pickplace
@@ -533,11 +601,15 @@ class SO101BaseEnv(SO101ArmEnv):
                          xml_path=xml_path, prev_actions_n=cfg.prev_actions_n,
                          env_cfg=env_cfg)
         # dict with keys qpos_sigma, marker_rot_sigma, tag_px_noise,
-        # cube_px_noise, tag_depth_factor; or None. Marker/cube position noise is
-        # anisotropic in the camera frame (src/marker_noise.py) instead of a
-        # single sigma: tag_px_noise (arm markers) / cube_px_noise (cube tag)
-        # with tag_depth_factor derive the depth-vs-lateral split. The
-        # camera re-anchor's common-mode error is per-episode only
+        # tag_depth_factor, live_sigma, precise_sigma, sqrtm_rot_sigma; or
+        # None. Marker position noise is anisotropic in the camera frame
+        # (src/marker_noise.py): tag_px_noise with tag_depth_factor derive the
+        # depth-vs-lateral split. The cube channels use isotropic sigmas —
+        # live_sigma per frame on the triangulated centroid (two-view
+        # triangulation has no solvePnP depth pathology), precise_sigma per
+        # refresh on the estimated center, sqrtm_rot_sigma a per-refresh small
+        # random rotation of the box axes before building √M. The camera
+        # re-anchor's common-mode error is per-episode only
         # (obs_bias.marker_common_sigma): the real pipeline EMAs the static
         # camera pose (real/rollout/marker_obs.py), leaving no meaningful per-frame
         # common jitter. No qvel key: the qvel obs is the backward difference of
@@ -560,18 +632,23 @@ class SO101BaseEnv(SO101ArmEnv):
         # once the control period is known.
         self.cam_latency = cfg.cam_latency
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
-        # cube_sigma, marker_common_sigma; or None. The per-tag marker biases are
-        # sampled independently (each tag's own glue/pose-estimate error); the cube
-        # tag's pos bias uses cube_sigma and its rot bias reuses marker_rot_sigma
-        # (same AprilTag pipeline). marker_common_sigma adds a separate shared shift
-        # applied to every tag (the camera re-anchor / table calibration offset,
-        # correlated across tags) — see _common_pos_bias.
+        # live_sigma, precise_sigma, precise_rot_sigma, marker_common_sigma; or
+        # None. The per-tag marker biases are sampled independently (each tag's
+        # own glue/pose-estimate error). The cube channels get per-episode
+        # biases of their own: live_sigma the systematic visible-surface/
+        # segmentation offset, precise_sigma the estimator's center offset,
+        # precise_rot_sigma a constant small rotation (axis-angle) of the box
+        # axes the estimator reports. marker_common_sigma adds a separate
+        # shared shift applied to every camera-derived position (the camera
+        # re-anchor / table calibration offset, correlated across tags and the
+        # cube channels alike) — see _common_pos_bias.
         self.obs_bias = cfg.obs_bias
         self._qpos_bias = np.zeros(len(JOINT_NAMES))
         self._marker_pos_bias = np.zeros((N_MARKERS, 3))
         self._marker_rot_bias = np.zeros((N_MARKERS, 3))
-        self._cube_bias = np.zeros(3)
-        self._cube_rot_bias = np.zeros(3)
+        self._live_bias = np.zeros(3)
+        self._precise_bias = np.zeros(3)
+        self._precise_rot_bias = np.zeros(3)
         # Common-mode shift shared by every tag (arm markers + cube) for the whole
         # episode: the real pipeline re-anchors the camera from one table tag
         # (real/rollout/marker_obs.py), so its calibration/detection error moves all tags
@@ -592,25 +669,31 @@ class SO101BaseEnv(SO101ArmEnv):
             sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
             assert sid >= 0, f"Marker site '{name}' not found in XML"
             self.marker_site_ids.append(sid)
-        # Full pinhole camera (world pose + calibrated intrinsics): the FOV
-        # visibility check reads its frame bounds, the noise/occlusion paths its
-        # position (self.tag_cam_pos below).
+        # Full pinhole cameras (world pose + per-unit calibrated intrinsics):
+        # tag_cam (main) gates the arm markers' FOV/angle visibility and,
+        # together with tag_cam_aux, drives the dual-view cube channels
+        # (cube_visible_surface per camera, main first).
         self.tag_cam = tag_cam_model(self.model, self.data)
         self.tag_cam_pos = self.tag_cam.pos
+        self.tag_cam_aux = tag_cam_model(self.model, self.data,
+                                         TAG_CAM_AUX_NAME, "aux")
+        self.cube_cams = (self.tag_cam, self.tag_cam_aux)
         # Camera geometry for the anisotropic (camera-frame) marker noise: focal
         # length from the solved intrinsics and each obs tag's printed edge length,
         # both the same calibration the real solvePnP pipeline uses (src/marker_noise.py,
-        # real/marker_spec.py). All arm/cube tags happen to be 20 mm, but map through
+        # real/marker_spec.py). All arm tags happen to be 20 mm, but map through
         # marker_spec so the obs slots stay the single source of truth.
         self._focal_px = self.tag_cam.intr.focal_px
         site_to_tag = {site: tag for tag, site in ARM_TAG_TO_SITE.items()}
         self._marker_tag_sizes = np.array(
             [TAG_SIZE_MM[site_to_tag[name]] / 1000.0 for name in MARKER_SITE_NAMES])
-        self._cube_tag_size = TAG_SIZE_MM[CUBE_TAG_ID] / 1000.0
 
         self.cube_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
         assert self.cube_geom_id >= 0, "Cube geom 'cube_geom' not found in XML"
         self.cube_body_id = int(self.model.geom_bodyid[self.cube_geom_id])
+        # Legacy tag site: not on the obs path (the cube channels are
+        # tag-free); kept as the GT anchor for legacy-teacher distillation and
+        # doubling as the live-channel render tint target.
         self.cube_tag_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE,
                                                   CUBE_TAG_SITE_NAME)
         assert self.cube_tag_site_id >= 0, \
@@ -646,6 +729,7 @@ class SO101BaseEnv(SO101ArmEnv):
         self.cube_low = np.array(task_cfg["cube_low"])
         self.cube_high = np.array(task_cfg["cube_high"])
         self.cube_smallest_face_only = bool(task_cfg["cube_smallest_face_only"])
+        self.cube_no_flat_spawns = bool(task_cfg["cube_no_flat_spawns"])
         self.floor_contact_penalty = float(task_cfg["floor_contact_penalty"])
 
         self.gripper_idx = JOINT_NAMES.index("gripper")
@@ -670,27 +754,30 @@ class SO101BaseEnv(SO101ArmEnv):
         self._cam_frame: CamFrame | None = None
         # Hold-last-pose marker state: the obs serves each tag's most recent
         # detection plus its age; a last-capture time of -inf means never seen
-        # this episode (zero pose, age pinned at MARKER_AGE_CAP_S). The cube
-        # tag holds the identical state.
+        # this episode (zero pose, age pinned at MARKER_AGE_CAP_S).
         self._held_marker_pos = np.zeros((N_MARKERS, 3))
         self._held_marker_rot = np.zeros((N_MARKERS, 3))
         self._marker_last_capture_t = np.full(N_MARKERS, -np.inf)
-        self._held_cube_tag_pos = np.zeros(3)
-        self._held_cube_tag_rot = np.zeros(3)
-        self._cube_last_capture_t = -np.inf
-        # Privileged (always-fresh) mirror of the held-tag state: every frame
+        # Dual-channel cube state (src/shape_obs.py — the module shared with
+        # the real pipeline): live + precise measurements held with their
+        # ages. _live_hist is the measured live-centroid track (capture_t,
+        # centroid) the precise-refresh static gate judges (is_static).
+        self._obj_state = ObjectObsState()
+        self._live_hist_t: list[float] = []
+        self._live_hist_p: list[np.ndarray] = []
+        # Privileged (always-fresh) mirror of the held state: every frame
         # overwrites it regardless of detection, so it serves exactly what a
         # marker_always_visible=true policy sees — same frames, same
-        # noise/bias/latency, no dropout and no hold-last-pose. Read only by
-        # privileged_obs() (the distillation teacher view, src/distill.py);
-        # never fed to this env's own policy. Needs no reset: _ingest_frame
-        # overwrites all of it unconditionally, starting with the reset frame.
+        # noise/bias/latency, no dropout, no hold-last-pose and no static
+        # gate (live = GT center + the frame's bias/noise; precise refreshed
+        # every frame). Read only by privileged_obs() (the distillation
+        # teacher view, src/distill.py); never fed to this env's own policy.
+        # Needs no reset beyond the fresh objects: _ingest_frame overwrites
+        # all of it unconditionally, starting with the reset frame.
         self._held_marker_pos_priv = np.zeros((N_MARKERS, 3))
         self._held_marker_rot_priv = np.zeros((N_MARKERS, 3))
         self._marker_last_capture_t_priv = np.full(N_MARKERS, -np.inf)
-        self._held_cube_tag_pos_priv = np.zeros(3)
-        self._held_cube_tag_rot_priv = np.zeros(3)
-        self._cube_last_capture_t_priv = -np.inf
+        self._obj_state_priv = ObjectObsState()
         self._prev_qpos_obs = None
         self._last_encoder_obs = None
 
@@ -713,27 +800,48 @@ class SO101BaseEnv(SO101ArmEnv):
         """CamState snapshot of the current MjData — recorded per substep so
         CameraSim can capture frames at any past instant of the tick."""
         marker_pos, marker_rot = marker_world_poses(self.data, self.marker_site_ids)
-        (cube_tag_pos,), (cube_tag_rot,) = marker_world_poses(
-            self.data, [self.cube_tag_site_id])
-        cube_tag_normal = self.data.site_xmat[self.cube_tag_site_id].reshape(3, 3)[:, 2]
+        points, normals = cube_surface_points_world(self.data, self.cube_geom_id,
+                                                    self.cube_half_extents)
+        vis_frac = np.zeros(2)
+        vis_centroid = np.zeros((2, 3))
+        seen = np.zeros(2, dtype=bool)
+        for i, cam in enumerate(self.cube_cams):
+            frac, centroid = cube_visible_surface(self.model, self.data, cam,
+                                                  self.cube_body_id, points, normals)
+            vis_frac[i] = frac
+            if centroid is not None:
+                vis_centroid[i] = centroid
+                seen[i] = True
         return CamState(marker_pos=marker_pos, marker_rot=marker_rot,
                         marker_normal=marker_world_normals(self.data, self.marker_site_ids),
-                        cube_tag_pos=cube_tag_pos, cube_tag_rot=cube_tag_rot,
-                        cube_tag_normal=cube_tag_normal.copy(),
-                        cube_tag_occluded=cube_tag_occluded(
-                            self.model, self.data, self.cube_tag_site_id,
-                            self.tag_cam_pos, self.cube_body_id))
+                        cube_center=self.data.geom_xpos[self.cube_geom_id].copy(),
+                        cube_rot_mat=self.data.geom_xmat[self.cube_geom_id]
+                        .reshape(3, 3).copy(),
+                        cube_vis_frac=vis_frac, cube_vis_centroid=vis_centroid,
+                        cube_seen=seen)
+
+    def _rotvec_mat(self, rotvec):
+        """(3,3) rotation matrix of a small axis-angle vector (DR rot perturb)."""
+        angle = float(np.linalg.norm(rotvec))
+        if angle == 0.0:
+            return np.eye(3)
+        quat = np.empty(4)
+        mujoco.mju_axisAngle2Quat(quat, np.asarray(rotvec) / angle, angle)
+        mat = np.empty(9)
+        mujoco.mju_quat2Mat(mat, quat)
+        return mat.reshape(3, 3)
 
     def _process_frame(self, state: CamState) -> CamFrame:
         """One simulated detection of a captured world state: roll the per-frame
         dropout (geometric visibility + DR), apply bias and per-frame noise.
         Runs exactly once per frame, at capture time — a real frame is detected
-        once, so consuming it twice re-reads the same values. Undetected tags
-        keep garbage pose entries; only the detected flags gate what
-        _ingest_frame folds into the held obs state."""
+        once, so consuming it twice re-reads the same values. Undetected
+        markers keep garbage pose entries and an undetected live channel a
+        garbage centroid; only the detected flags gate what _ingest_frame
+        folds into the held obs state."""
         if self.marker_always_visible:
             detected = np.ones(N_MARKERS, dtype=bool)
-            cube_detected = True
+            live_detected = True
         else:
             if self.marker_dropout is None:
                 p_near = p_far = 0.0
@@ -743,28 +851,40 @@ class SO101BaseEnv(SO101ArmEnv):
             prob = marker_dropout_prob(state.marker_pos, state.marker_normal,
                                        self.tag_cam, p_near, p_far)
             detected = self.np_random.random(N_MARKERS) >= prob
-            # The cube tag shares the arm tags' angle/height/dropout geometry
-            # plus the capture-time occlusion test (a blocked ray is a certain
-            # miss regardless of facing angle).
-            if state.cube_tag_occluded:
-                cube_prob = 1.0
+            # Live channel: needs BOTH views (a single view gives only a ray —
+            # no mono fallback in v1). The dropout knob stands in for the
+            # segmentation tracker's per-frame misses, `near` when the object
+            # is only partially visible somewhere (flaky mask), `far` when
+            # comfortably visible in both views.
+            if not state.cube_seen.all():
+                live_prob = 1.0
+            elif state.cube_vis_frac.min() < VISIBLE_FRACTION_MIN:
+                live_prob = p_near
             else:
-                cube_prob = marker_dropout_prob(state.cube_tag_pos[None],
-                                                state.cube_tag_normal[None],
-                                                self.tag_cam, p_near, p_far)[0]
-            cube_detected = bool(self.np_random.random() >= cube_prob)
+                live_prob = p_far
+            live_detected = bool(self.np_random.random() >= live_prob)
 
         marker_pos = state.marker_pos.copy()
         marker_rot = state.marker_rot.copy()
-        cube_tag_pos = state.cube_tag_pos.copy()
-        cube_tag_rot = state.cube_tag_rot.copy()
+        # Measured live centroid: the two views' visible-surface centroids
+        # averaged — reproducing the real triangulated point's bias toward the
+        # visible surface instead of pretending the live channel sees the true
+        # center. The privileged live is the GT center under the same
+        # bias/noise (what the marker_always_visible crutch serves).
+        live_meas = state.cube_vis_centroid.mean(axis=0)
+        live_priv = state.cube_center.copy()
+        precise_center = state.cube_center.copy()
+        R = state.cube_rot_mat
+        live_err = np.zeros(3)
         if self.obs_bias is not None:
-            # _common_pos_bias hits both arm markers and the cube (shared camera
-            # re-anchor error); the per-tag biases stay independent.
+            # _common_pos_bias hits the arm markers and both cube channels
+            # (shared camera re-anchor error); the per-channel biases stay
+            # independent.
             marker_pos = marker_pos + self._marker_pos_bias + self._common_pos_bias
             marker_rot = marker_rot + self._marker_rot_bias
-            cube_tag_pos = cube_tag_pos + self._cube_bias + self._common_pos_bias
-            cube_tag_rot = cube_tag_rot + self._cube_rot_bias
+            live_err = live_err + self._live_bias + self._common_pos_bias
+            precise_center = precise_center + self._precise_bias + self._common_pos_bias
+            R = R @ self._rotvec_mat(self._precise_rot_bias)
         if self.obs_noise is not None:
             rng = self.np_random
             px = self.obs_noise["tag_px_noise"]
@@ -777,46 +897,94 @@ class SO101BaseEnv(SO101ArmEnv):
                 marker_pos[i] += anisotropic_pos_noise(
                     rng, state.marker_pos[i], self.tag_cam_pos,
                     self._marker_tag_sizes[i], self._focal_px, px, depth_factor)
-            cube_tag_pos = cube_tag_pos + anisotropic_pos_noise(
-                rng, state.cube_tag_pos, self.tag_cam_pos,
-                self._cube_tag_size, self._focal_px,
-                self.obs_noise["cube_px_noise"], depth_factor)
             marker_rot = marker_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
                                                  size=marker_rot.shape)
-            cube_tag_rot = cube_tag_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
-                                                     size=cube_tag_rot.shape)
+            live_err = live_err + rng.normal(0, self.obs_noise["live_sigma"], size=3)
+            precise_center = precise_center + rng.normal(
+                0, self.obs_noise["precise_sigma"], size=3)
+            sqrtm_rot_sigma = self.obs_noise["sqrtm_rot_sigma"]
+            if sqrtm_rot_sigma > 0.0:
+                R = R @ self._rotvec_mat(rng.normal(0, sqrtm_rot_sigma, size=3))
+        if self.marker_always_visible:
+            # Easy-mode crutch: the live channel reads the (noisy) true center,
+            # sidestepping the visible-surface bias and any occlusion.
+            live_meas = live_priv
+        live = live_meas + live_err
         return CamFrame(marker_pos=marker_pos, marker_rot=marker_rot,
-                        detected=detected, cube_tag_pos=cube_tag_pos,
-                        cube_tag_rot=cube_tag_rot, cube_detected=cube_detected)
+                        detected=detected, live=live,
+                        # The static gate judges the PRE-noise measurement:
+                        # the injected live_sigma covers in-motion/sync error,
+                        # not the sub-mm jitter a real static track shows —
+                        # gating on the noisy value would (wrongly) never pass
+                        # under DR while the real gate passes routinely.
+                        live_gate=live_meas,
+                        live_priv=live_priv + live_err,
+                        live_detected=live_detected,
+                        vis_frac=state.cube_vis_frac.copy(),
+                        precise_center=precise_center,
+                        precise_sqrtm=box_sqrtm(R, self.cube_half_extents))
 
     def _ingest_frame(self, capture_t, frame: CamFrame):
         """Consume one camera frame: it becomes the current frame (render tint,
-        hidden metrics), and each detected tag's measurement — arm markers and
-        cube tag alike — overwrites the held pose the obs serves, the same
-        per-frame update the real capture thread applies (real/rollout/marker_obs.py)."""
+        hidden metrics), each detected marker's measurement overwrites the
+        held pose the obs serves, a detected live measurement refreshes the
+        live channel and extends the static-gate history, and the precise
+        channel refreshes when the gate passes — the same per-frame update the
+        real pipeline applies (real/rollout/marker_obs.py + object_obs.py)."""
         self._cam_frame = frame
         det = frame.detected
         self._held_marker_pos[det] = frame.marker_pos[det]
         self._held_marker_rot[det] = frame.marker_rot[det]
         self._marker_last_capture_t[det] = capture_t
         self._set_marker_render_colors(det)
-        if frame.cube_detected:
-            self._held_cube_tag_pos = frame.cube_tag_pos
-            self._held_cube_tag_rot = frame.cube_tag_rot
-            self._cube_last_capture_t = capture_t
-        self.model.site_rgba[self.cube_tag_site_id] = \
-            MARKER_VISIBLE_RGBA if frame.cube_detected else MARKER_HIDDEN_RGBA
 
-        # Privileged mirror: fold every tag in unconditionally — no dropout,
-        # no hold-last-pose — so privileged_obs() serves exactly what a
-        # marker_always_visible=true policy would see on this same frame (same
-        # capture noise/bias/latency, ages that only reflect pipeline delay).
+        if frame.live_detected:
+            self._obj_state.ingest_live(capture_t, frame.live)
+            # One measurement per instant in the static-gate history — a
+            # re-processed frame at the same time (tests, manual re-detection)
+            # replaces rather than duplicates, keeping is_static's times
+            # strictly ascending.
+            if self._live_hist_t and capture_t == self._live_hist_t[-1]:
+                self._live_hist_p[-1] = frame.live_gate
+            else:
+                self._live_hist_t.append(capture_t)
+                self._live_hist_p.append(frame.live_gate)
+            # Trim the static-gate history to the trailing dwell window (plus
+            # one pre-window sample is_static keeps for edge coverage).
+            cutoff = capture_t - 2.0 * STATIC_DWELL_S
+            while len(self._live_hist_t) > 2 and self._live_hist_t[0] < cutoff:
+                self._live_hist_t.pop(0)
+                self._live_hist_p.pop(0)
+            # Precise refresh gate: static (measured live track) + well
+            # visible in both views. The crutch refreshes unconditionally.
+            if self.marker_always_visible or (
+                    (frame.vis_frac >= VISIBLE_FRACTION_MIN).all()
+                    and is_static(self._live_hist_t, self._live_hist_p)):
+                self._obj_state.ingest_precise(capture_t, frame.precise_center,
+                                               frame.precise_sqrtm)
+        elif self.marker_always_visible:
+            # Crutch with an undetectable live geometry still serves fresh
+            # channels (live = noisy GT center, precise refreshed).
+            self._obj_state.ingest_live(capture_t, frame.live)
+            self._obj_state.ingest_precise(capture_t, frame.precise_center,
+                                           frame.precise_sqrtm)
+        # Live-channel indicator on the legacy tag site: green while both
+        # cameras measure the object, red while the live channel is stale.
+        # Visual only — never read by obs.
+        self.model.site_rgba[self.cube_tag_site_id] = \
+            MARKER_VISIBLE_RGBA if frame.live_detected else MARKER_HIDDEN_RGBA
+
+        # Privileged mirror: fold everything in unconditionally — no dropout,
+        # no hold-last-pose, no static gate — so privileged_obs() serves
+        # exactly what a marker_always_visible=true policy would see on this
+        # same frame (same capture noise/bias/latency, ages that only reflect
+        # pipeline delay).
         self._held_marker_pos_priv[:] = frame.marker_pos
         self._held_marker_rot_priv[:] = frame.marker_rot
         self._marker_last_capture_t_priv[:] = capture_t
-        self._held_cube_tag_pos_priv = frame.cube_tag_pos.copy()
-        self._held_cube_tag_rot_priv = frame.cube_tag_rot.copy()
-        self._cube_last_capture_t_priv = capture_t
+        self._obj_state_priv.ingest_live(capture_t, frame.live_priv)
+        self._obj_state_priv.ingest_precise(capture_t, frame.precise_center,
+                                            frame.precise_sqrtm)
 
     def _get_cube_pos(self):
         return self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3].copy()
@@ -824,8 +992,9 @@ class SO101BaseEnv(SO101ArmEnv):
     def _obs_extra(self, cube_pos):
         """Return task-specific obs dimensions appended after [qpos, qvel, markers, cube].
 
-        Receives the held (possibly noisy/stale) cube tag position so derived
-        quantities stay consistent with what the agent sees.
+        Receives the held (possibly noisy/stale) LIVE centroid — the carrying
+        phase needs "where is it now", not the static-refreshed center — so
+        derived quantities stay consistent with what the agent sees.
         """
         raise NotImplementedError
 
@@ -854,9 +1023,9 @@ class SO101BaseEnv(SO101ArmEnv):
         self._last_encoder_obs = (qpos, qvel)
         return qpos, qvel
 
-    def _tag_obs(self, held_pos, held_rot, marker_last_t, cube_last_t):
-        """(markers, marker_age, cube_age) from a held-tag source: the arm
-        markers' obs slice and both age channels. Shared by the student view
+    def _tag_obs(self, held_pos, held_rot, marker_last_t):
+        """(markers, marker_age) from a held-tag source: the arm markers' obs
+        slice and their age channels. Shared by the student view
         (_compute_obs, hold-last-pose state) and the privileged teacher view
         (privileged_obs, always-fresh mirror)."""
         if self.marker_include_rot:
@@ -868,8 +1037,7 @@ class SO101BaseEnv(SO101ArmEnv):
         # Clip below at 0: the frame schedule's float slack (CameraSim._EPS)
         # can put a capture an epsilon after the obs instant.
         marker_age = np.clip(self.data.time - marker_last_t, 0.0, MARKER_AGE_CAP_S)
-        cube_age = np.clip(self.data.time - cube_last_t, 0.0, MARKER_AGE_CAP_S)
-        return markers, marker_age, cube_age
+        return markers, marker_age
 
     def _priv_tail(self):
         """Privileged tail appended after the actor block (asymmetric critic,
@@ -884,32 +1052,38 @@ class SO101BaseEnv(SO101ArmEnv):
         cube_quat = self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7]
         cube_rot = np.empty(3)
         mujoco.mju_quat2Vel(cube_rot, cube_quat, 1.0)
+        true_sqrtm = sqrtm_upper(box_sqrtm(
+            self.data.geom_xmat[self.cube_geom_id].reshape(3, 3),
+            self.cube_half_extents))
         # Free-joint qvel: linear (world frame) + angular (body frame).
         cube_vel = self.data.qvel[self.cube_dofadr:self.cube_dofadr + 6]
         fixed_contact, moving_contact = self._jaw_contact_flags()
-        parts = [self._get_cube_pos(), cube_rot, cube_vel,
+        parts = [self._get_cube_pos(), cube_rot, true_sqrtm, cube_vel,
                  [float(fixed_contact), float(moving_contact)],
                  self._qpos_bias, self._marker_pos_bias.flatten()]
         if self.marker_include_rot:
             parts.append(self._marker_rot_bias.flatten())
-        parts.extend([self._cube_bias, self._cube_rot_bias, self._common_pos_bias,
+        parts.extend([self._live_bias, self._precise_bias, self._precise_rot_bias,
+                      self._common_pos_bias,
                       [self._camera.pipeline_delay_s], self.cube_half_extents])
         return np.concatenate(parts)
 
     def _compute_obs(self):
         """Build the policy observation: [actor block | privileged tail].
         qpos/qvel take the encoder path (fresh; qvel differenced like
-        real/rollout_common.ArmLoop); markers and the cube tag serve the held
-        per-tag detections with their ages; the tail is critic-only ground
+        real/rollout_common.ArmLoop); markers serve the held per-tag
+        detections with their ages; the cube channels serve the shared
+        dual-channel state (src/shape_obs.py); the tail is critic-only ground
         truth (_priv_tail)."""
         qpos, qvel = self._encoder_obs()
-        markers, marker_age, cube_age = self._tag_obs(
+        markers, marker_age = self._tag_obs(
             self._held_marker_pos, self._held_marker_rot,
-            self._marker_last_capture_t, self._cube_last_capture_t)
+            self._marker_last_capture_t)
+        live, live_age, center, sqrtm6, precise_age = \
+            self._obj_state.serve(self.data.time)
         return np.concatenate([qpos, qvel, markers, marker_age,
-                               self._held_cube_tag_pos, self._held_cube_tag_rot,
-                               [cube_age],
-                               self._obs_extra(self._held_cube_tag_pos),
+                               live, [live_age], center, sqrtm6, [precise_age],
+                               self._obs_extra(live),
                                self._prev_actions.flatten(),
                                self._priv_tail()]).astype(np.float32)
 
@@ -934,13 +1108,14 @@ class SO101BaseEnv(SO101ArmEnv):
         assert self._last_encoder_obs is not None, \
             "privileged_obs() needs a _compute_obs earlier this tick"
         qpos, qvel = self._last_encoder_obs
-        markers, marker_age, cube_age = self._tag_obs(
+        markers, marker_age = self._tag_obs(
             self._held_marker_pos_priv, self._held_marker_rot_priv,
-            self._marker_last_capture_t_priv, self._cube_last_capture_t_priv)
+            self._marker_last_capture_t_priv)
+        live, live_age, center, sqrtm6, precise_age = \
+            self._obj_state_priv.serve(self.data.time)
         return np.concatenate([qpos, qvel, markers, marker_age,
-                               self._held_cube_tag_pos_priv, self._held_cube_tag_rot_priv,
-                               [cube_age],
-                               self._obs_extra(self._held_cube_tag_pos_priv),
+                               live, [live_age], center, sqrtm6, [precise_age],
+                               self._obs_extra(live),
                                self._prev_actions.flatten(),
                                self._priv_tail()]).astype(np.float32)
 
@@ -1041,32 +1216,30 @@ class SO101BaseEnv(SO101ArmEnv):
                 print(f"WARNING: {attempt} arm position samples rejected (collision)")
 
     def _sample_visible_cube_spawn(self, max_attempts):
-        """Sample the cube spawn pose, rejecting any the camera cannot actually
-        see the tag of — matching the real protocol of placing the sponge where
-        the camera sees its tag. Requires the arm (and any task scenery) already
-        placed: a candidate must face the camera within the strict (non-grazing)
-        angle band, have an unobstructed ray past the arm and scenery, and not
-        touch the arm. Writes the accepted pose into qpos (data left forwarded)
-        and returns (cube_pos, cube_quat). Returns None when no candidate
-        passes within max_attempts."""
+        """Sample the cube spawn pose, rejecting any the two cameras cannot
+        comfortably see — matching the real protocol of placing the sponge in
+        both cameras' clear view. Requires the arm (and any task scenery)
+        already placed: a candidate must reach at least VISIBLE_FRACTION_MIN
+        visible surface in BOTH views (so the live channel detects immediately
+        and the boot precise refresh can fire) and not touch the arm. Writes
+        the accepted pose into qpos (data left forwarded) and returns
+        (cube_pos, cube_quat). Returns None when no candidate passes within
+        max_attempts."""
         for _ in range(max_attempts):
             cube_xy = self._sample_cube_pos()
             cube_quat, self.cube_rest_half_z = sample_cube_orientation(
                 self.np_random, self.cube_half_extents,
-                smallest_face_only=self.cube_smallest_face_only)
+                smallest_face_only=self.cube_smallest_face_only,
+                no_flat_spawns=self.cube_no_flat_spawns)
             cube_pos = np.array([cube_xy[0], cube_xy[1], self.cube_rest_half_z])
             self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3] = cube_pos
             self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7] = cube_quat
             mujoco.mj_forward(self.model, self.data)
-            tag_pos, _ = marker_world_poses(self.data, [self.cube_tag_site_id])
-            normal = self.data.site_xmat[self.cube_tag_site_id].reshape(3, 3)[:, 2]
-            # Strict band: p_near=1.0 rejects the flaky 65-70° grazing views,
-            # so the first camera frame comfortably detects.
-            if marker_dropout_prob(tag_pos, normal[None], self.tag_cam,
-                                   p_near=1.0, p_far=0.0)[0] >= 1.0:
-                continue
-            if cube_tag_occluded(self.model, self.data, self.cube_tag_site_id,
-                                 self.tag_cam_pos, self.cube_body_id):
+            points, normals = cube_surface_points_world(
+                self.data, self.cube_geom_id, self.cube_half_extents)
+            if any(cube_visible_surface(self.model, self.data, cam,
+                                        self.cube_body_id, points, normals)[0]
+                   < VISIBLE_FRACTION_MIN for cam in self.cube_cams):
                 continue
             if self._cube_arm_contact():
                 continue
@@ -1187,7 +1360,8 @@ class SO101BaseEnv(SO101ArmEnv):
         self._floor_contact_steps = 0
         self._cube_drag_steps = 0
         self._markers_hidden_total = 0
-        self._cube_hidden_total = 0
+        self._live_hidden_total = 0
+        self._precise_age_sum = 0.0
         self._prev_cube_xy = cube_pos[:2].copy()
 
         # Sample obs biases AFTER physics randomization so toggling obs_bias does
@@ -1199,21 +1373,33 @@ class SO101BaseEnv(SO101ArmEnv):
                                                size=(N_MARKERS, 3))
             self._marker_rot_bias = rng.normal(0, self.obs_bias["marker_rot_sigma"],
                                                size=(N_MARKERS, 3))
-            self._cube_bias = rng.normal(0, self.obs_bias["cube_sigma"], size=3)
-            self._cube_rot_bias = rng.normal(0, self.obs_bias["marker_rot_sigma"], size=3)
-            # Shared across all tags (see _common_pos_bias init): one draw the whole
-            # episode, added to every marker and the cube in _process_frame.
+            self._live_bias = rng.normal(0, self.obs_bias["live_sigma"], size=3)
+            self._precise_bias = rng.normal(0, self.obs_bias["precise_sigma"], size=3)
+            self._precise_rot_bias = rng.normal(0, self.obs_bias["precise_rot_sigma"],
+                                                size=3)
+            # Shared across all camera-derived positions (see _common_pos_bias
+            # init): one draw the whole episode, added to every marker and both
+            # cube channels in _process_frame.
             self._common_pos_bias = rng.normal(0, self.obs_bias["marker_common_sigma"], size=3)
 
         self._held_marker_pos[:] = 0.0
         self._held_marker_rot[:] = 0.0
         self._marker_last_capture_t[:] = -np.inf
-        self._held_cube_tag_pos = np.zeros(3)
-        self._held_cube_tag_rot = np.zeros(3)
-        self._cube_last_capture_t = -np.inf
+        self._obj_state = ObjectObsState()
+        self._obj_state_priv = ObjectObsState()
+        self._live_hist_t = []
+        self._live_hist_p = []
         capture_t, frame = self._camera.reset(self.np_random, self.data.time,
                                               self._capture_camera_state(),
                                               self._process_frame)
+        # The pre-episode world is static (the CameraSim reset contract), so
+        # the boot detection proves a full static dwell: seed the static-gate
+        # history one dwell back with the same measurement, letting the boot
+        # frame refresh the precise channel immediately — the real rollout's
+        # settle-before-start warmup does the same thing physically.
+        if frame.live_detected:
+            self._live_hist_t.append(capture_t - STATIC_DWELL_S)
+            self._live_hist_p.append(frame.live_gate)
         self._ingest_frame(capture_t, frame)
 
         return self._serve_obs(reset=True), {}
@@ -1260,7 +1446,8 @@ class SO101BaseEnv(SO101ArmEnv):
                                                      self._process_frame):
             self._ingest_frame(capture_t, frame)
         self._markers_hidden_total += N_MARKERS - int(self._cam_frame.detected.sum())
-        self._cube_hidden_total += not self._cam_frame.cube_detected
+        self._live_hidden_total += not self._cam_frame.live_detected
+        self._precise_age_sum += self._obj_state.serve(self.data.time)[4]
 
         truncated = self.step_count >= self.max_steps
         if terminated or truncated:
@@ -1271,7 +1458,11 @@ class SO101BaseEnv(SO101ArmEnv):
             # Fraction of marker-steps hidden from the camera (0 = always visible).
             info["marker_hidden_ratio"] = \
                 self._markers_hidden_total / (self.step_count * N_MARKERS)
-            info["cube_hidden_ratio"] = self._cube_hidden_total / self.step_count
+            # Fraction of steps the live channel had no both-view measurement,
+            # and the mean served precise-channel age — the two health signals
+            # of the dual-channel cube obs.
+            info["live_hidden_ratio"] = self._live_hidden_total / self.step_count
+            info["precise_age_mean"] = self._precise_age_sum / self.step_count
             self._on_episode_end(info)
 
         if self.render_mode == "human":

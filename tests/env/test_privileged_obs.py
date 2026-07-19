@@ -9,10 +9,10 @@ stale tags leaking in, or a desynced encoder read — silently corrupts every
 label.
 
 Obs layout (lift/pickplace, prev_actions_n=1, marker_include_rot=False):
-actor block [qpos(6), qvel(6), markers(2*3), marker_age(2), cube_tag_pos(3),
- cube_tag_rot(3), cube_age(1), extra(4), prev_actions(6)] = 37 dims, followed
-by the privileged tail (priv_dim_for = 39 dims, critic-only ground truth) —
-identical in both views, since it is GT either way.
+actor block [qpos(6), qvel(6), markers(2*3), marker_age(2), live(3),
+ live_age(1), center(3), sqrtM(6), precise_age(1), extra(4), prev_actions(6)]
+= 44 dims, followed by the privileged tail (priv_dim_for, critic-only ground
+truth) — identical in both views, since it is GT either way.
 """
 
 import numpy as np
@@ -25,11 +25,13 @@ from src.lift_env import SO101LiftEnv
 from src.pickplace_env import SO101PickPlaceEnv
 
 ENCODER = slice(0, 12)          # qpos + qvel — always shared between the views
-TAGS = slice(12, 27)            # markers, marker_age, cube pos/rot, cube_age
-CUBE_POS = slice(20, 23)
-CUBE_AGE = 26
-EXTRA = slice(27, 31)
-PREV_ACTIONS = slice(31, 37)
+TAGS = slice(12, 34)            # markers, marker_age, live(+age), center/sqrtM(+age)
+LIVE_POS = slice(20, 23)
+LIVE_AGE = 23
+CENTER = slice(24, 27)
+PRECISE_AGE = 33
+EXTRA = slice(34, 38)
+PREV_ACTIONS = slice(38, 44)
 MARKER_AGE_CAP_S = 1.0
 
 
@@ -97,12 +99,15 @@ def test_privileged_fresh_while_student_stale_under_full_dropout():
     student = _step_zero(env, 5)
     priv = env.privileged_obs()
 
-    # Student: cube tag never detected -> held pose zero, age at the cap.
-    assert np.allclose(student[CUBE_POS], 0.0)
-    assert student[CUBE_AGE] == pytest.approx(MARKER_AGE_CAP_S)
-    # Privileged: real (noise-free here) cube pose, small fresh age.
-    assert np.linalg.norm(priv[CUBE_POS]) > 0.01
-    assert priv[CUBE_AGE] < MARKER_AGE_CAP_S
+    # Student: live/precise never detected -> held values zero, ages at the cap.
+    assert np.allclose(student[LIVE_POS], 0.0)
+    assert np.allclose(student[CENTER], 0.0)
+    assert student[LIVE_AGE] == pytest.approx(MARKER_AGE_CAP_S)
+    assert student[PRECISE_AGE] == pytest.approx(MARKER_AGE_CAP_S)
+    # Privileged: real (noise-free here) cube center, small fresh ages.
+    assert np.linalg.norm(priv[LIVE_POS]) > 0.01
+    assert priv[LIVE_AGE] < MARKER_AGE_CAP_S
+    assert priv[PRECISE_AGE] < MARKER_AGE_CAP_S
 
 
 def test_privileged_shares_encoder_and_prev_actions():
@@ -162,5 +167,5 @@ def test_env_method_privileged_obs_through_vec_env():
         env_cfg=_LIFT_ENV_CFG, xml_path="so101/scene_lift.xml", cfg=runtime)])
     venv.reset()
     priv = np.stack(venv.env_method("privileged_obs"))
-    assert priv.shape == (1, 37 + priv_dim_for(False))
+    assert priv.shape == (1, 44 + priv_dim_for(False))
     venv.close()

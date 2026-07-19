@@ -1,11 +1,12 @@
 """Tests for per-sample Gaussian observation noise (sim2real domain randomization).
 
 Noise is applied at the source values: qpos per step (SO101BaseEnv._compute_obs),
-marker poses and cube_pos per camera frame (_process_frame, frozen at capture).
-Derived task obs (e.g. pickplace's cube_to_target) must inherit the noise via the
-noisy cube_pos rather than re-noising independently. There is no qvel sigma: the
-qvel obs is the backward difference of consecutive noisy qpos over the control
-tick (the real pipeline), so its noise is sqrt(2)*qpos_sigma/control_dt.
+marker poses and the cube channels per camera frame (_process_frame, frozen at
+capture). Derived task obs (e.g. pickplace's cube_to_target) must inherit the
+noise via the noisy live centroid rather than re-noising independently. There is
+no qvel sigma: the qvel obs is the backward difference of consecutive noisy qpos
+over the control tick (the real pipeline), so its noise is
+sqrt(2)*qpos_sigma/control_dt.
 """
 
 import numpy as np
@@ -14,10 +15,11 @@ import pytest
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
-from src.base_env import RuntimeEnvConfig, cube_tag_visible, markers_visible, priv_dim_for
+from src.base_env import RuntimeEnvConfig, markers_visible, priv_dim_for
 from src.lift_env import SO101LiftEnv
 from src.marker_noise import pos_noise_sigmas
 from src.pickplace_env import SO101PickPlaceEnv
+from src.shape_obs import sqrtm_from_upper
 
 
 # The obs_noise block conf/dr/full.yaml carries — the deployment DR default the
@@ -26,35 +28,41 @@ DEFAULT_OBS_NOISE = {
     "qpos_sigma": 0.005,
     "marker_rot_sigma": 0.02,
     "tag_px_noise": 0.2,
-    "cube_px_noise": 0.2,
     "tag_depth_factor": 2.0,
+    "live_sigma": 0.003,
+    "precise_sigma": 0.003,
+    "sqrtm_rot_sigma": 0.08,
 }
 
-# Behavioral tests use distinct marker/cube px values so the per-tag oracle in
-# test_per_step_noise_magnitude_matches_derived_sigmas catches a key mix-up
-# (dr=full happens to set both to 0.2, which would mask it).
+# Behavioral tests use distinct values per knob so the per-channel oracles
+# catch a key mix-up.
 SIGMAS = {
     "qpos_sigma": 0.005,
     "marker_rot_sigma": 0.02,
     "tag_px_noise": 0.4,
-    "cube_px_noise": 0.15,
     "tag_depth_factor": 2.0,
+    "live_sigma": 0.004,
+    "precise_sigma": 0.002,
+    "sqrtm_rot_sigma": 0.1,
 }
 
-# Actor-block layout: [qpos(6), qvel(6), markers(2*6), marker_age(2),
-# cube_tag_pos(3), cube_tag_rot(3), cube_age(1), task_extra(4),
-# prev_actions(2*6)]; the privileged tail (priv_dim_for) follows.
+# Actor-block layout (marker_include_rot=True, prev_actions_n=2):
+# [qpos(6), qvel(6), markers(2*6), marker_age(2), live(3), live_age(1),
+#  center(3), sqrtM(6), precise_age(1), task_extra(4), prev_actions(2*6)];
+# the privileged tail (priv_dim_for) follows.
 QPOS = slice(0, 6)
 QVEL = slice(6, 12)
 MARKER_AGE = slice(24, 26)
-CUBE = slice(26, 29)
-CUBE_ROT = slice(29, 32)
-CUBE_AGE = 32
-C2T = slice(33, 35)
-RING_H = 35
-TASK_ID = 36
-PREV_ACTIONS = slice(37, 49)
-OBS_DIM = 49 + priv_dim_for(True)
+LIVE = slice(26, 29)
+LIVE_AGE = 29
+CENTER = slice(30, 33)
+SQRTM = slice(33, 39)
+PRECISE_AGE = 39
+C2T = slice(40, 42)
+RING_H = 42
+TASK_ID = 43
+PREV_ACTIONS = slice(44, 56)
+OBS_DIM = 56 + priv_dim_for(True)
 
 
 @pytest.fixture(scope="module")
@@ -125,21 +133,22 @@ def test_constant_obs_dims_are_not_noised(cfg):
     assert obs_clean[TASK_ID] == obs_noisy[TASK_ID]
     # Prev actions are commanded values, not measurements — must not be noised.
     assert np.array_equal(obs_clean[PREV_ACTIONS], obs_noisy[PREV_ACTIONS])
-    # Marker/cube ages are frame-schedule timing, not measurements — identical
+    # Marker/channel ages are frame-schedule timing, not measurements — identical
     # too (detection here is geometric-only, so it matches across the two envs).
     assert np.array_equal(obs_clean[MARKER_AGE], obs_noisy[MARKER_AGE])
-    assert obs_clean[CUBE_AGE] == obs_noisy[CUBE_AGE]
+    assert obs_clean[LIVE_AGE] == obs_noisy[LIVE_AGE]
+    assert obs_clean[PRECISE_AGE] == obs_noisy[PRECISE_AGE]
 
 
-def test_cube_to_target_uses_noisy_cube_pos(cfg):
-    """cube_to_target must be derived from the same noisy cube_pos the agent sees,
-    not re-noised or computed from ground truth."""
+def test_cube_to_target_uses_noisy_live_centroid(cfg):
+    """cube_to_target must be derived from the same noisy live centroid the agent
+    sees, not re-noised or computed from ground truth."""
     env = _pickplace(cfg, obs_noise=SIGMAS)
     env.reset(seed=0)
     obs, *_ = env.step(_zero_action())
 
     place_target_xy = env.place_target[:2]
-    expected_c2t = obs[CUBE][:2] - place_target_xy
+    expected_c2t = obs[LIVE][:2] - place_target_xy
     np.testing.assert_allclose(obs[C2T], expected_c2t, atol=1e-7)
 
 
@@ -147,24 +156,25 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
     """Per-tag position noise is anisotropic in the camera frame: projected onto
     each tag's own ray, the depth component matches the depth sigma and the
     lateral component the lateral sigma that src.marker_noise derives from that
-    tag's live distance and size. qpos/qvel and the rotation channels stay
-    isotropic."""
+    tag's live distance and size. The cube channels are isotropic: live and
+    precise-center noise match their own sigmas per axis. qpos/qvel and the
+    rotation channels stay isotropic too."""
     env_clean = _pickplace(cfg, obs_noise=None)
     env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
 
     cam = env_noisy.tag_cam_pos       # position, for the camera-frame noise geometry
     focal = env_noisy._focal_px
     kdepth = SIGMAS["tag_depth_factor"]
-    # (obs pos slice, obs rot slice, tag size, px knob) per tag, in obs order —
-    # the arm markers draw from tag_px_noise, the cube from cube_px_noise.
-    tags = [(slice(12, 15), slice(15, 18), env_noisy._marker_tag_sizes[0], SIGMAS["tag_px_noise"]),
-            (slice(18, 21), slice(21, 24), env_noisy._marker_tag_sizes[1], SIGMAS["tag_px_noise"]),
-            (CUBE, CUBE_ROT, env_noisy._cube_tag_size, SIGMAS["cube_px_noise"])]
+    # (obs pos slice, obs rot slice, tag size) per arm marker, in obs order.
+    tags = [(slice(12, 15), slice(15, 18), env_noisy._marker_tag_sizes[0]),
+            (slice(18, 21), slice(21, 24), env_noisy._marker_tag_sizes[1])]
 
     n_samples = 1500
     norm_depth = []      # depth component / depth_sigma  -> N(0,1)
     norm_lat_sq = []     # |lateral|^2 / lateral_sigma^2  -> chi^2 with 2 dof (mean 2)
     rot_diffs = []       # rotation channels stay isotropic
+    live_diffs = []      # isotropic live-centroid noise
+    precise_diffs = []   # isotropic precise-center noise
     qpos_diffs = np.empty((n_samples, 6))
     qvel_diffs = np.empty((n_samples, 6))
     for i in range(n_samples):
@@ -175,20 +185,22 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
         qpos_diffs[i] = on[QPOS] - oc[QPOS]
         qvel_diffs[i] = on[QVEL] - oc[QVEL]
         marker_vis = markers_visible(env_noisy.data, env_noisy.marker_site_ids, env_noisy.tag_cam)
-        cube_vis = cube_tag_visible(env_noisy.model, env_noisy.data,
-                                    env_noisy.cube_tag_site_id, env_noisy.tag_cam,
-                                    env_noisy.cube_body_id)
-        for slot, (pos_sl, rot_sl, size, px) in enumerate(tags):
-            if not (cube_vis if slot == 2 else marker_vis[slot]):
+        for slot, (pos_sl, rot_sl, size) in enumerate(tags):
+            if not marker_vis[slot]:
                 continue  # a hidden tag holds a stale pose in both envs -> zero diff
             true_pos = oc[pos_sl]
             noise = on[pos_sl] - oc[pos_sl]
-            lat_s, dep_s, depth_dir = pos_noise_sigmas(true_pos, cam, size, focal, px, kdepth)
+            lat_s, dep_s, depth_dir = pos_noise_sigmas(
+                true_pos, cam, size, focal, SIGMAS["tag_px_noise"], kdepth)
             depth_c = noise @ depth_dir
             lat_c = noise - depth_c * depth_dir
             norm_depth.append(depth_c / dep_s)
             norm_lat_sq.append((lat_c @ lat_c) / (lat_s * lat_s))
             rot_diffs.append(on[rot_sl] - oc[rot_sl])
+        # The spawn guarantees both-view live detection, so both envs serve
+        # fresh channels at the same capture instants: the diff is the noise.
+        live_diffs.append(on[LIVE] - oc[LIVE])
+        precise_diffs.append(on[CENTER] - oc[CENTER])
 
     norm_depth = np.array(norm_depth)
     norm_lat_sq = np.array(norm_lat_sq)
@@ -203,11 +215,35 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
     np.testing.assert_allclose(norm_lat_sq.mean(), 2.0, rtol=0.1)
     # Rotation noise is unchanged (isotropic marker_rot_sigma on every axis).
     np.testing.assert_allclose(rot_diffs.std(), SIGMAS["marker_rot_sigma"], rtol=0.1)
+    # Cube channels: isotropic per-axis sigmas, each from its own knob.
+    np.testing.assert_allclose(np.array(live_diffs).std(),
+                               SIGMAS["live_sigma"], rtol=0.1)
+    np.testing.assert_allclose(np.array(precise_diffs).std(),
+                               SIGMAS["precise_sigma"], rtol=0.1)
 
     # qpos noise std matches; qvel = (qpos_t - qpos_{t-1})/dt inherits sqrt(2)*qpos_sigma/dt.
     np.testing.assert_allclose(qpos_diffs.std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.1)
     qvel_sigma = np.sqrt(2.0) * SIGMAS["qpos_sigma"] / env_noisy._step_dt
     np.testing.assert_allclose(qvel_diffs.std(axis=0).mean(), qvel_sigma, rtol=0.1)
+
+
+def test_sqrtm_rot_noise_preserves_eigenvalues(cfg):
+    """sqrtm_rot_sigma perturbs the box AXES only (a random rotation applied to
+    R before building √M): the served √M differs from the clean one but its
+    eigenvalues — the episode's half extents / √3 — are exactly preserved."""
+    env_clean = _pickplace(cfg, obs_noise=None)
+    env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
+    perturbed = 0
+    for i in range(20):
+        env_clean.reset(seed=i)
+        env_noisy.reset(seed=i)
+        oc, *_ = env_clean.step(_zero_action())
+        on, *_ = env_noisy.step(_zero_action())
+        w_clean = np.linalg.eigvalsh(sqrtm_from_upper(oc[SQRTM]))
+        w_noisy = np.linalg.eigvalsh(sqrtm_from_upper(on[SQRTM]))
+        np.testing.assert_allclose(w_noisy, w_clean, atol=1e-9)
+        perturbed += not np.allclose(oc[SQRTM], on[SQRTM])
+    assert perturbed == 20, "sqrtm_rot_sigma > 0 must actually rotate the axes"
 
 
 def test_depth_noise_dominates_lateral(cfg):
@@ -256,8 +292,8 @@ def test_lift_env_compatible_with_noise(lift_cfg):
                        cfg=RuntimeEnvConfig(obs_noise=SIGMAS, marker_include_rot=True))
     obs, _ = env.reset(seed=0)
     assert obs.shape == (OBS_DIM,)
-    # Lift's _obs_extra returns zeros + task_id, so [33:36] should be zero, [36]=lift TASK_ID=0.0
-    assert np.array_equal(obs[33:36], np.zeros(3, dtype=np.float32))
+    # Lift's _obs_extra returns zeros + task_id: [40:43] zero, [43]=lift TASK_ID=0.0
+    assert np.array_equal(obs[40:43], np.zeros(3, dtype=np.float32))
     assert obs[TASK_ID] == 0.0
     # Prev actions are zero immediately after reset (no action has been taken yet).
     assert np.array_equal(obs[PREV_ACTIONS], np.zeros(12, dtype=np.float32))

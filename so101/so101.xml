@@ -124,6 +124,22 @@
       <geom name="tag_cam_lens" type="cylinder" size="0.009 0.012" pos="0 0 -0.024"
             rgba="0.2 0.2 0.28 1" contype="0" conaffinity="0"/>
     </body>
+    <!-- Second (aux) C922 for the dual-view object channels (src/base_env.py
+         live/precise cube obs): ~45 deg angular separation from tag_cam about
+         the workspace center, aimed at it. PLACEHOLDER pose (main camera pose
+         rotated 45 deg about the vertical through [0.225, 0, 0.03]) — replace
+         with the measured aux T_base_cam snapshot
+         (real.tracking.stereo_check at the final rig geometry) before
+         comparing sim against recorded real data, same convention notes as
+         tag_cam_mount above. -->
+    <body name="tag_cam_aux_mount" pos="0.429603 -0.368994 0.184928"
+          quat="0.793835 0.554168 0.143358 0.205358">
+      <camera name="tag_cam_aux"/>
+      <geom name="tag_cam_aux_body" type="box" size="0.022 0.032 0.018"
+            rgba="0.05 0.05 0.06 1" contype="0" conaffinity="0"/>
+      <geom name="tag_cam_aux_lens" type="cylinder" size="0.009 0.012" pos="0 0 -0.024"
+            rgba="0.2 0.2 0.28 1" contype="0" conaffinity="0"/>
+    </body>
     <!-- Link base -->
     <body name="base" pos="0 0 0" quat="1 0 0 0" childclass="so101">
       <inertial pos="0.0137179 -5.19711e-05 0.0334843" mass="0.147" fullinertia="0.000114686 0.000136117 0.000130364 -4.59787e-07 4.97151e-06 9.75275e-08"/>

@@ -43,6 +43,13 @@ POS_SCALE = np.array([0.35, 0.35, 0.25])
 # by pi, typically around 1 in magnitude.
 ROT_SCALE = np.pi / 2
 
+# √M upper triangle (src/shape_obs.SQRTM_UPPER_ORDER): eigenvalues are the
+# half extents / √3, so the diagonal is centered on the nominal upright box's
+# diag (h/√3, computed below) and spans roughly [hz, hx]/√3 as the box tips;
+# off-diagonals are zero-centered cross terms of the same magnitude band.
+SQRTM_DIAG_SCALE = 0.02
+SQRTM_OFFDIAG_SCALE = 0.01
+
 # extra(4) dims: cube_to_target xy (pickplace, meters across the workspace;
 # lift feeds zeros), ring height (0..ring_height_max=0.05 in
 # conf/env/pickplace.yaml), task id (already 0/1).
@@ -61,8 +68,10 @@ CUBE_LINVEL_SCALE = 1.0
 CUBE_ANGVEL_SCALE = 10.0
 QPOS_BIAS_SCALE = 0.02          # rad; 2x full's obs_bias.qpos_sigma
 MARKER_POS_BIAS_SCALE = 0.01    # m;   2x full's obs_bias.marker_pos_sigma
-MARKER_ROT_BIAS_SCALE = 0.1     # rad; 2x full's obs_bias.marker_rot_sigma (cube rot bias too)
-CUBE_BIAS_SCALE = 0.01          # m;   2x full's obs_bias.cube_sigma
+MARKER_ROT_BIAS_SCALE = 0.1     # rad; 2x full's obs_bias.marker_rot_sigma
+LIVE_BIAS_SCALE = 0.006         # m;   2x full's obs_bias.live_sigma
+PRECISE_BIAS_SCALE = 0.006      # m;   2x full's obs_bias.precise_sigma
+PRECISE_ROT_BIAS_SCALE = 0.1    # rad; 2x full's obs_bias.precise_rot_sigma
 COMMON_BIAS_SCALE = 0.005       # m;   2x full's obs_bias.marker_common_sigma
 # Camera pipeline delay: [0, 0.05] s maps to [-1, 1], covering both the
 # measured 42-52 ms range and the synchronous camera's 0.
@@ -96,15 +105,27 @@ def _cube_nominal_half_extents() -> np.ndarray:
     return model.geom_size[gid].copy()
 
 
+def _sqrtm_norm() -> tuple[np.ndarray, np.ndarray]:
+    """(center, scale) of a √M upper-triangle block (both the obs precise
+    channel and the priv-tail true √M): diagonal centered on the nominal
+    upright box's h/√3, off-diagonals zero-centered."""
+    diag = _cube_nominal_half_extents() / np.sqrt(3.0)
+    center = np.concatenate([diag, np.zeros(3)])
+    scale = np.concatenate([np.full(3, SQRTM_DIAG_SCALE),
+                            np.full(3, SQRTM_OFFDIAG_SCALE)])
+    return center, scale
+
+
 def build_obs_norm(prev_actions_n: int, marker_include_rot: bool,
                    action_scale: float, n_substeps: int) -> tuple[np.ndarray, np.ndarray]:
     """(center, scale) float32 arrays for the full SO101BaseEnv obs layout:
-    the actor block (obs_dim_for: qpos, qvel, markers, marker_age, cube_tag
-    (pos + rot), cube_age, extra, prev_actions) followed by the privileged
-    tail (priv_dim_for)."""
+    the actor block (obs_dim_for: qpos, qvel, markers, marker_age, live +
+    live_age, center + sqrtM + precise_age, extra, prev_actions) followed by
+    the privileged tail (priv_dim_for)."""
     model = _load_model()
     qpos_center, qpos_scale = _qpos_norm(model)
     qvel_scale = _qvel_scale(model, action_scale, n_substeps)
+    sqrtm_center, sqrtm_scale = _sqrtm_norm()
 
     n_joints = len(JOINT_NAMES)
     center = [qpos_center, np.zeros(n_joints)]
@@ -118,12 +139,16 @@ def build_obs_norm(prev_actions_n: int, marker_include_rot: bool,
     # marker age: [0, cap] maps to [-1, 1]
     center.append(np.full(N_MARKERS, MARKER_AGE_CAP_S / 2.0))
     scale.append(np.full(N_MARKERS, MARKER_AGE_CAP_S / 2.0))
-    center.append(POS_CENTER)  # cube tag pos
+    center.append(POS_CENTER)  # live centroid
     scale.append(POS_SCALE)
-    center.append(np.zeros(3))  # cube tag rot (axis-angle, like marker rot)
-    scale.append(np.full(3, ROT_SCALE))
-    # cube tag age: [0, cap] maps to [-1, 1], same as marker age
+    # live age: [0, cap] maps to [-1, 1], same as marker age
     center.append(np.full(1, MARKER_AGE_CAP_S / 2.0))
+    scale.append(np.full(1, MARKER_AGE_CAP_S / 2.0))
+    center.append(POS_CENTER)  # precise body center
+    scale.append(POS_SCALE)
+    center.append(sqrtm_center)  # √M upper triangle
+    scale.append(sqrtm_scale)
+    center.append(np.full(1, MARKER_AGE_CAP_S / 2.0))  # precise age
     scale.append(np.full(1, MARKER_AGE_CAP_S / 2.0))
     center.append(np.zeros(4))  # extra
     scale.append(EXTRA_SCALE)
@@ -135,6 +160,8 @@ def build_obs_norm(prev_actions_n: int, marker_include_rot: bool,
     scale.append(POS_SCALE)
     center.append(np.zeros(3))  # true cube rot (axis-angle)
     scale.append(np.full(3, ROT_SCALE))
+    center.append(sqrtm_center)  # true √M upper triangle
+    scale.append(sqrtm_scale)
     center.append(np.zeros(6))  # cube velocity (linear + angular)
     scale.append(np.array([CUBE_LINVEL_SCALE] * 3 + [CUBE_ANGVEL_SCALE] * 3))
     center.append(np.full(2, 0.5))  # jaw contact flags: {0, 1} -> {-1, 1}
@@ -146,10 +173,12 @@ def build_obs_norm(prev_actions_n: int, marker_include_rot: bool,
     if marker_include_rot:
         center.append(np.zeros(N_MARKERS * 3))  # per-tag marker rot bias
         scale.append(np.full(N_MARKERS * 3, MARKER_ROT_BIAS_SCALE))
-    center.append(np.zeros(3))  # cube tag pos bias
-    scale.append(np.full(3, CUBE_BIAS_SCALE))
-    center.append(np.zeros(3))  # cube tag rot bias (drawn from marker_rot_sigma)
-    scale.append(np.full(3, MARKER_ROT_BIAS_SCALE))
+    center.append(np.zeros(3))  # live centroid bias
+    scale.append(np.full(3, LIVE_BIAS_SCALE))
+    center.append(np.zeros(3))  # precise center bias
+    scale.append(np.full(3, PRECISE_BIAS_SCALE))
+    center.append(np.zeros(3))  # precise rot-perturb (axis-angle)
+    scale.append(np.full(3, PRECISE_ROT_BIAS_SCALE))
     center.append(np.zeros(3))  # common-mode pos bias
     scale.append(np.full(3, COMMON_BIAS_SCALE))
     center.append(np.full(1, CAM_DELAY_CENTER))  # camera pipeline delay

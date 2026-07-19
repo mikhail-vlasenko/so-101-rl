@@ -18,13 +18,12 @@ from real/vision/camera_intrinsics.yaml and W from real/marker_spec.py -- the sa
 calibration the real pipeline (real/vision/pose.py, real/rollout/marker_obs.py) uses, so the
 noise is grounded in the physical setup rather than duplicated constants.
 """
-from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
 import yaml
 
-_INTRINSICS_PATH = Path(__file__).resolve().parent.parent / "real" / "vision" / "camera_intrinsics.yaml"
+from real.vision.intrinsics import intrinsics_path
 
 
 class CameraIntrinsics(NamedTuple):
@@ -45,20 +44,21 @@ class CameraIntrinsics(NamedTuple):
         return 0.5 * (self.fx + self.fy)
 
 
-def load_camera_intrinsics(path: Path = _INTRINSICS_PATH) -> CameraIntrinsics:
-    """Load the calibrated intrinsics -- the single read of the camera YAML shared
-    by the noise model (focal length) and the FOV visibility check (full matrix)."""
-    with open(path) as f:
+def load_camera_intrinsics(camera: str = "main") -> CameraIntrinsics:
+    """Load one unit's calibrated intrinsics by camera name ("main"/"aux",
+    real/vision/intrinsics.py) -- the single read of the camera YAMLs shared by
+    the noise model (focal length) and the FOV visibility check (full matrix)."""
+    with open(intrinsics_path(camera)) as f:
         d = yaml.safe_load(f)
     m = d["camera_matrix"]
     return CameraIntrinsics(fx=m[0][0], fy=m[1][1], cx=m[0][2], cy=m[1][2],
                             width=int(d["image_width"]), height=int(d["image_height"]))
 
 
-def load_focal_px(path: Path = _INTRINSICS_PATH) -> float:
+def load_focal_px(camera: str = "main") -> float:
     """Mean focal length (px) from the calibrated camera matrix -- the single
     source of truth shared with the real solvePnP pipeline (real/vision/pose.py)."""
-    return load_camera_intrinsics(path).focal_px
+    return load_camera_intrinsics(camera).focal_px
 
 
 def pos_noise_sigmas(tag_pos, cam_pos, tag_size_m, focal_px, px_noise, depth_factor):
