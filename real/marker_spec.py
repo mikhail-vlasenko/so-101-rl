@@ -26,17 +26,26 @@ APRILTAG_FAMILY = "tag36h11"
 # families). Large tags for far-range accuracy, small tags for the end effector.
 TAG_SIZE_MM = {
     0: 20.0, 1: 20.0, 2: 20.0, 3: 20.0, 4: 20.0,
+    5: 20.0, 6: 20.0, 7: 20.0,
     10: 40.0, 11: 40.0, 12: 40.0,
 }
 
 # Physical role per id, as glued on the rig. Detection keys tags by id and the
 # rollout maps id->obs slot, so this is the single source of truth for the
 # layout — keep it matching the arm. The finger/wrist sites in so101.xml carry
-# the same ids in their comments; the cube tag sits on the sponge's largest
-# face (cube_tag site in the scene XMLs). Ids 3/4 are spares; 11/12 are extra
-# table tags.
+# the same ids in their comments. Ids 11/12 are extra table tags.
+#
+# The sponge's tags (id 1 on a largest face, plus the cube_eval set on its
+# other faces) are EVAL-ONLY: they provide ground truth for the shape-tracking
+# dataset (real/tracking/record_shapes.py -> eval_estimator.py) and for
+# rollout evaluation — never the policy obs path, which is tag-free (SAM
+# stereo, real/rollout/object_obs.py). The eval set is glued for a recording
+# session and peeled afterwards; its in-plane placement is solved by
+# real/tracking/tag_body_calib.py into sponge_tags.yaml.
 ROLES = {
     0: "finger", 1: "cube", 2: "wrist",
+    3: "cube_eval", 4: "cube_eval", 5: "cube_eval",
+    6: "cube_eval", 7: "cube_eval",
     10: "table", 11: "table", 12: "table",
 }
 
@@ -47,6 +56,10 @@ ROLES = {
 ARM_TAG_TO_SITE = {0: "marker_finger", 2: "marker_wrist"}
 TABLE_TAG_ID = 10
 CUBE_TAG_ID = 1
+# Every tag glued to the sponge (id 1 + the eval-only faces), the set the
+# dataset GT pipeline detects and tag_body_calib solves.
+SPONGE_TAG_IDS = tuple(sorted(
+    tag for tag, role in ROLES.items() if role in ("cube", "cube_eval")))
 
 # Camera capture settings tuned for marker detection on this rig (shared by the
 # viewer, the pose step, and deployment). Manual exposure kills motion blur.

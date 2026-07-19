@@ -91,6 +91,42 @@ def base_cam_from_table(T_base_table, rvec_table, tvec_table):
     return T_base_table @ mat_inv(T_cam_table)
 
 
+class PoseEMA:
+    """EMA of a rigid transform stream (the re-anchored camera pose).
+
+    Blends translation linearly and orientation by quaternion nlerp
+    (sign-aligned, renormalized); the first update seeds the state. The camera
+    is bolted down within a session, so smoothing `T_base_cam` across frames
+    denoises the per-frame table-tag detection jitter that otherwise moves
+    every derived pose in common, while still tracking a real bump within a
+    few time constants. Single implementation shared by every consumer that
+    re-anchors a camera (real/rollout/marker_obs.py, real/tracking/*).
+    """
+
+    def __init__(self, alpha):
+        assert 0.0 < alpha <= 1.0, f"alpha must be in (0, 1], got {alpha}"
+        self.alpha = alpha
+        self._pos = None
+        self._quat = None
+
+    def update(self, T):
+        """Fold one 4x4 sample in; returns the smoothed 4x4."""
+        pos, quat = mat_to_pos_quat(T)
+        if self._pos is None:
+            self._pos = pos
+            self._quat = quat
+        else:
+            a = self.alpha
+            self._pos = (1.0 - a) * self._pos + a * pos
+            # quat and -quat are the same rotation; align sign before averaging
+            # so the blend takes the short way round.
+            if self._quat @ quat < 0.0:
+                quat = -quat
+            blended = (1.0 - a) * self._quat + a * quat
+            self._quat = blended / np.linalg.norm(blended)
+        return pos_quat_to_mat(self._pos, self._quat)
+
+
 def quarter_turn_mat(k):
     """4×4 rotation by k·90° about z (the tag's face normal).
 

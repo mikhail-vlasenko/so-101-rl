@@ -28,11 +28,10 @@ import numpy as np
 from real.vision.camera import open_camera
 from real.vision.detect import make_detector
 from real.calib.extrinsics import (
+    PoseEMA,
     base_cam_from_table,
     load_extrinsics,
-    mat_to_pos_quat,
     mat_to_pos_rotvec,
-    pos_quat_to_mat,
     quarter_turn_mat,
     rt_to_mat,
 )
@@ -103,8 +102,7 @@ class CameraMarkerSource:
         # EMA state for the re-anchored camera pose (see CAM_EMA_ALPHA). Seeded by
         # the first table-tag solve; touched only from the capture thread, so no
         # lock needed.
-        self._cam_ema_pos = None
-        self._cam_ema_quat = None
+        self._cam_ema = PoseEMA(CAM_EMA_ALPHA)
         self._recv_t: float | None = None
         self._read_ms = float("nan")
         self._detect_ms = float("nan")
@@ -163,25 +161,6 @@ class CameraMarkerSource:
         except Exception as exc:   # surface to the consumer thread; a dead camera
             self.error = exc       # must fail loud, not freeze the last poses
 
-    def _ema_camera(self, T_base_cam):
-        """EMA the per-frame re-anchored camera pose (CAM_EMA_ALPHA). Blends
-        translation linearly and orientation by quaternion nlerp (sign-aligned,
-        renormalized); the first solve seeds the state. Returns the smoothed 4x4."""
-        pos, quat = mat_to_pos_quat(T_base_cam)
-        if self._cam_ema_pos is None:
-            self._cam_ema_pos = pos
-            self._cam_ema_quat = quat
-        else:
-            a = CAM_EMA_ALPHA
-            self._cam_ema_pos = (1.0 - a) * self._cam_ema_pos + a * pos
-            # quat and -quat are the same rotation; align sign before averaging so
-            # the blend takes the short way round.
-            if self._cam_ema_quat @ quat < 0.0:
-                quat = -quat
-            blended = (1.0 - a) * self._cam_ema_quat + a * quat
-            self._cam_ema_quat = blended / np.linalg.norm(blended)
-        return pos_quat_to_mat(self._cam_ema_pos, self._cam_ema_quat)
-
     def _poses_to_base(self, poses: dict):
         """Camera-frame tag poses -> raw per-frame base-frame
         (pos (N,3), rot (N,3), detected (N,) bool, cube_pose); undetected/
@@ -195,7 +174,7 @@ class CameraMarkerSource:
         if TABLE_TAG_ID not in poses:
             # No table tag this frame -> can't re-anchor the camera.
             return pos, rot, detected, None
-        T_base_cam = self._ema_camera(
+        T_base_cam = self._cam_ema.update(
             base_cam_from_table(self.T_base_table, *poses[TABLE_TAG_ID]))
         for i, tag in enumerate(self.slot_tags):
             if tag in poses:
