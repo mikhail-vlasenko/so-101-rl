@@ -203,7 +203,7 @@ def test_partial_occlusion_blocks_refresh_but_not_live(env):
     # Feed it through ingest at a later time: live refreshes, precise doesn't.
     t = env.data.time + 0.5
     env._ingest_frame(t, frame)
-    live, live_age, _, _, precise_age = env._obj_state.serve(t)
+    live, live_age, _, _, precise_age = env._obj.serve(t)
     assert live_age == 0.0
     np.testing.assert_array_equal(live, frame.live)
     assert precise_age > 0.0

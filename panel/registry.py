@@ -164,7 +164,8 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         id="rollout_lift", title="Rollout: lift", page="real",
         module="real.rollout.rollout_lift", arg_style="argparse",
         description="Lift policy on the real arm. Marker source 'camera' tracks "
-                    "the real sponge via its tag; 'fk' uses a lockstep sim cube. "
+                    "the real sponge tag-free (SAM stereo dual channels); 'fk' "
+                    "uses a lockstep sim cube through the same channel logic. "
                     "Dry-run unless Execute is checked.",
         args=(
             ArgSpec("--model", "str", "Model (latest / best / path)", default="latest",
@@ -176,8 +177,13 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
                     choices=("fk", "camera")),
             ArgSpec("--family", "choice", "Marker family (camera source)", default="apriltag",
                     choices=("apriltag", "aruco")),
+            ArgSpec("--prompt", "str", "SAM3 text prompt (camera source)",
+                    default="sponge"),
+            ArgSpec("--sam2-model", "choice", "SAM2 tracker size (camera source)",
+                    default="tiny", choices=("tiny", "base+")),
+            ArgSpec("--gui", "flag", "Mask/ellipse overlay windows (camera source)"),
         ),
-        resources=(Resource.SERIAL,),
+        resources=(Resource.SERIAL, Resource.CAMERA),
         supports_stream=True,
         stream_extra_args=("--no-view",),
     ),
@@ -283,6 +289,33 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
             ArgSpec("--family", "choice", "Marker family", default="apriltag",
                     choices=("apriltag", "aruco")),
             ArgSpec("--save-frames", "str", "Directory for annotated frame pair"),
+        ),
+        resources=(Resource.CAMERA,),
+    ),
+    ScriptSpec(
+        id="tag_body_calib", title="Sponge tag placement calib", page="camera",
+        module="real.tracking.tag_body_calib", arg_style="argparse",
+        description="Solve each glued sponge tag's in-plane offset + yaw on its "
+                    "declared face from co-visible pairs -> sponge_tags.yaml "
+                    "(GT body pose for the shape dataset).",
+        args=(
+            ArgSpec("--frames", "int", "Frame pairs to accumulate", default="60"),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+        ),
+        resources=(Resource.CAMERA,),
+    ),
+    ScriptSpec(
+        id="record_shapes", title="Record shape dataset", page="camera",
+        module="real.tracking.record_shapes", arg_style="argparse",
+        description="Record dual-camera frames + tag GT + static labels into "
+                    "datasets/sponge_<stamp>/ for offline estimator evaluation "
+                    "(masks computed later by eval_estimator).",
+        args=(
+            ArgSpec("--minutes", "float", "Recording length (minutes)", default="10"),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+            ArgSpec("--out", "str", "Dataset directory (default: datasets/sponge_<stamp>)"),
         ),
         resources=(Resource.CAMERA,),
     ),

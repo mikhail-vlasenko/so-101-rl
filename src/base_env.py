@@ -20,9 +20,9 @@ from src.shape_obs import (
     MARKER_AGE_CAP_S,
     STATIC_DWELL_S,
     VISIBLE_FRACTION_MIN,
+    ObjectChannelDriver,
     ObjectObsState,
     box_sqrtm,
-    is_static,
     sqrtm_upper,
 )
 from src.units import action_to_target
@@ -758,13 +758,10 @@ class SO101BaseEnv(SO101ArmEnv):
         self._held_marker_pos = np.zeros((N_MARKERS, 3))
         self._held_marker_rot = np.zeros((N_MARKERS, 3))
         self._marker_last_capture_t = np.full(N_MARKERS, -np.inf)
-        # Dual-channel cube state (src/shape_obs.py — the module shared with
-        # the real pipeline): live + precise measurements held with their
-        # ages. _live_hist is the measured live-centroid track (capture_t,
-        # centroid) the precise-refresh static gate judges (is_static).
-        self._obj_state = ObjectObsState()
-        self._live_hist_t: list[float] = []
-        self._live_hist_p: list[np.ndarray] = []
+        # Dual-channel cube state: the shared driver (src/shape_obs.py — the
+        # exact code the real rollout drives) owns the live/precise hold-last
+        # state, the static-gate history, and the refresh gate.
+        self._obj = ObjectChannelDriver()
         # Privileged (always-fresh) mirror of the held state: every frame
         # overwrites it regardless of detection, so it serves exactly what a
         # marker_always_visible=true policy sees — same frames, same
@@ -939,35 +936,18 @@ class SO101BaseEnv(SO101ArmEnv):
         self._set_marker_render_colors(det)
 
         if frame.live_detected:
-            self._obj_state.ingest_live(capture_t, frame.live)
-            # One measurement per instant in the static-gate history — a
-            # re-processed frame at the same time (tests, manual re-detection)
-            # replaces rather than duplicates, keeping is_static's times
-            # strictly ascending.
-            if self._live_hist_t and capture_t == self._live_hist_t[-1]:
-                self._live_hist_p[-1] = frame.live_gate
-            else:
-                self._live_hist_t.append(capture_t)
-                self._live_hist_p.append(frame.live_gate)
-            # Trim the static-gate history to the trailing dwell window (plus
-            # one pre-window sample is_static keeps for edge coverage).
-            cutoff = capture_t - 2.0 * STATIC_DWELL_S
-            while len(self._live_hist_t) > 2 and self._live_hist_t[0] < cutoff:
-                self._live_hist_t.pop(0)
-                self._live_hist_p.pop(0)
-            # Precise refresh gate: static (measured live track) + well
-            # visible in both views. The crutch refreshes unconditionally.
-            if self.marker_always_visible or (
-                    (frame.vis_frac >= VISIBLE_FRACTION_MIN).all()
-                    and is_static(self._live_hist_t, self._live_hist_p)):
-                self._obj_state.ingest_precise(capture_t, frame.precise_center,
-                                               frame.precise_sqrtm)
+            self._obj.ingest_live(capture_t, frame.live, gate_point=frame.live_gate)
+            # Precise refresh gate: static (gate-history track) + well visible
+            # in both views. The crutch refreshes unconditionally.
+            if self.marker_always_visible or self._obj.gate_open(frame.vis_frac):
+                self._obj.ingest_precise(capture_t, frame.precise_center,
+                                         frame.precise_sqrtm)
         elif self.marker_always_visible:
             # Crutch with an undetectable live geometry still serves fresh
             # channels (live = noisy GT center, precise refreshed).
-            self._obj_state.ingest_live(capture_t, frame.live)
-            self._obj_state.ingest_precise(capture_t, frame.precise_center,
-                                           frame.precise_sqrtm)
+            self._obj.state.ingest_live(capture_t, frame.live)
+            self._obj.ingest_precise(capture_t, frame.precise_center,
+                                     frame.precise_sqrtm)
         # Live-channel indicator on the legacy tag site: green while both
         # cameras measure the object, red while the live channel is stale.
         # Visual only — never read by obs.
@@ -1080,7 +1060,7 @@ class SO101BaseEnv(SO101ArmEnv):
             self._held_marker_pos, self._held_marker_rot,
             self._marker_last_capture_t)
         live, live_age, center, sqrtm6, precise_age = \
-            self._obj_state.serve(self.data.time)
+            self._obj.serve(self.data.time)
         return np.concatenate([qpos, qvel, markers, marker_age,
                                live, [live_age], center, sqrtm6, [precise_age],
                                self._obs_extra(live),
@@ -1385,10 +1365,8 @@ class SO101BaseEnv(SO101ArmEnv):
         self._held_marker_pos[:] = 0.0
         self._held_marker_rot[:] = 0.0
         self._marker_last_capture_t[:] = -np.inf
-        self._obj_state = ObjectObsState()
+        self._obj = ObjectChannelDriver()
         self._obj_state_priv = ObjectObsState()
-        self._live_hist_t = []
-        self._live_hist_p = []
         capture_t, frame = self._camera.reset(self.np_random, self.data.time,
                                               self._capture_camera_state(),
                                               self._process_frame)
@@ -1398,8 +1376,7 @@ class SO101BaseEnv(SO101ArmEnv):
         # frame refresh the precise channel immediately — the real rollout's
         # settle-before-start warmup does the same thing physically.
         if frame.live_detected:
-            self._live_hist_t.append(capture_t - STATIC_DWELL_S)
-            self._live_hist_p.append(frame.live_gate)
+            self._obj.seed_static(capture_t - STATIC_DWELL_S, frame.live_gate)
         self._ingest_frame(capture_t, frame)
 
         return self._serve_obs(reset=True), {}
@@ -1447,7 +1424,7 @@ class SO101BaseEnv(SO101ArmEnv):
             self._ingest_frame(capture_t, frame)
         self._markers_hidden_total += N_MARKERS - int(self._cam_frame.detected.sum())
         self._live_hidden_total += not self._cam_frame.live_detected
-        self._precise_age_sum += self._obj_state.serve(self.data.time)[4]
+        self._precise_age_sum += self._obj.serve(self.data.time)[4]
 
         truncated = self.step_count >= self.max_steps
         if terminated or truncated:

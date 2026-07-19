@@ -154,3 +154,76 @@ class ObjectObsState:
         precise_age = float(np.clip(t - self._precise_t, 0.0, MARKER_AGE_CAP_S))
         return (self._live.copy(), live_age,
                 self._center.copy(), self._sqrtm6.copy(), precise_age)
+
+
+class ObjectChannelDriver:
+    """The full dual-channel update logic on top of ObjectObsState: live
+    ingestion, the static-gate history it feeds, and the precise-refresh gate.
+
+    This is the single implementation both twins drive — the sim env
+    (src/base_env._ingest_frame) and the real rollout
+    (real/rollout/object_obs.ObjectSource) — so the hold-last/age/static-gate
+    behavior cannot fork. The contract test in tests/real/test_object_twin.py
+    pins the sim env to it.
+
+    The caller supplies measurements; this class owns state:
+    - `ingest_live(t, live, gate_point=None)` records a live measurement (None
+      = miss, state just ages) and extends the gate history with `gate_point`
+      (defaults to `live`; the sim passes its pre-noise measurement — injected
+      DR noise is not real static jitter and must not blind the gate).
+    - `gate_open(vis_frac)` answers whether a precise refresh is allowed NOW:
+      the object is well visible in every view and its gate-history track
+      proves it static (is_static).
+    - `ingest_precise(t, center, sqrtm)` folds a precise estimate in; cheap
+      estimators call it right after a passing gate, the real hull worker
+      whenever its window average updates.
+    - `seed_static(t, point)`: pre-window static evidence — the sim's
+      pre-episode world and the real rig's settle-before-start warmup both
+      know the object stood still before the first frame.
+    """
+
+    def __init__(self):
+        self.state = ObjectObsState()
+        self._hist_t: list[float] = []
+        self._hist_p: list[np.ndarray] = []
+
+    def seed_static(self, t, point):
+        assert not self._hist_t, "seed_static must precede the first ingest"
+        self._hist_t.append(float(t))
+        self._hist_p.append(np.asarray(point, dtype=np.float64).copy())
+
+    def ingest_live(self, t, live, gate_point=None):
+        if live is None:
+            return
+        self.state.ingest_live(t, live)
+        point = np.asarray(live if gate_point is None else gate_point,
+                           dtype=np.float64).copy()
+        # One measurement per instant — a re-processed frame at the same time
+        # replaces rather than duplicates, keeping is_static's times strictly
+        # ascending.
+        if self._hist_t and t == self._hist_t[-1]:
+            self._hist_p[-1] = point
+        else:
+            self._hist_t.append(float(t))
+            self._hist_p.append(point)
+        # Trim to the trailing dwell window (plus the pre-window sample
+        # is_static keeps for edge coverage).
+        cutoff = t - 2.0 * STATIC_DWELL_S
+        while len(self._hist_t) > 2 and self._hist_t[0] < cutoff:
+            self._hist_t.pop(0)
+            self._hist_p.pop(0)
+
+    def static_now(self):
+        """Whether the gate-history track currently proves the object static
+        (the visibility half of the gate is the caller's measurement)."""
+        return is_static(self._hist_t, self._hist_p)
+
+    def gate_open(self, vis_frac):
+        return bool(np.all(np.asarray(vis_frac) >= VISIBLE_FRACTION_MIN)
+                    and self.static_now())
+
+    def ingest_precise(self, t, center, sqrtm):
+        self.state.ingest_precise(t, center, sqrtm)
+
+    def serve(self, t):
+        return self.state.serve(t)

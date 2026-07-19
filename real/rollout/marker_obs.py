@@ -1,23 +1,24 @@
 """Live AprilTag marker observations in the arm base frame for real rollouts.
 
-Replaces the FK stand-in in the rollout loop: a background thread detects the arm
-tags with the camera and maps them into the base frame through the calibrated
-extrinsics (`real/calib/extrinsics.py`, produced by `real/calib/calibrate_qpos.py`),
-so the policy consumes *measured* tag poses in the exact `(xyz, axis-angle)` form
-it saw in sim (`src/base_env.py::marker_world_poses`).
+Replaces the FK stand-in in the rollout loop: a consumer thread on the main
+camera's frame feed (real/rollout/frame_bus.py — the same frames the SAM
+object tracker consumes) detects the arm tags and maps them into the base
+frame through the calibrated extrinsics (`real/calib/extrinsics.py`, produced
+by `real/calib/calibrate_qpos.py`), so the policy consumes *measured* tag
+poses in the exact `(xyz, axis-angle)` form it saw in sim
+(`src/base_env.py::marker_world_poses`).
 
-Per frame the fixed table tag re-anchors the camera (`base_cam_from_table`), so a
-bumped camera self-corrects. A tag the camera can't see — or any frame missing
-the table tag, where the camera can't be re-anchored at all — keeps its last
-measured pose while its age grows, the same hold-last-pose + age convention
-training used for undetected tags (src/base_env.py); a tag never seen this
-session reads all-zero with age pinned at MARKER_AGE_CAP_S.
+Per frame the fixed table tag re-anchors the camera (`base_cam_from_table`,
+EMA-smoothed), so a bumped camera self-corrects. A tag the camera can't see —
+or any frame missing the table tag, where the camera can't be re-anchored at
+all — keeps its last measured pose while its age grows, the same
+hold-last-pose + age convention training used for undetected tags
+(src/base_env.py); a tag never seen this session reads all-zero with age
+pinned at MARKER_AGE_CAP_S.
 
-With track_cube the same pipeline also measures the sponge's tag (CUBE_TAG_ID
-on its largest face) and serves it via cube_pose() — the raw tag pose under the
-identical hold-last convention, exactly what the sim cube obs carries. No
-quarter_turns entry: the tag's yaw about its own normal relative to the sponge
-is uncalibrated for now (TODO.md).
+This source serves the ARM tags and the table anchor only. The manipulated
+object is tracked tag-free by real/rollout/object_obs.ObjectSource on the
+same frame bus.
 """
 import threading
 import time
@@ -25,8 +26,6 @@ import time
 import cv2
 import numpy as np
 
-from real.vision.camera import open_camera
-from real.vision.detect import make_detector
 from real.calib.extrinsics import (
     PoseEMA,
     base_cam_from_table,
@@ -35,51 +34,37 @@ from real.calib.extrinsics import (
     quarter_turn_mat,
     rt_to_mat,
 )
-from real.marker_spec import (
-    ARM_TAG_TO_SITE,
-    CUBE_TAG_ID,
-    MARKER_EXPOSURE,
-    MARKER_GAIN,
-    TABLE_TAG_ID,
-)
-from real.vision.pose import PoseEstimator, load_intrinsics
+from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_ID
+from real.rollout.frame_bus import CAPTURE_TO_READ_S
+from real.vision.detect import make_detector
+from real.vision.pose import PoseEstimator
 from src.base_env import MARKER_AGE_CAP_S, MARKER_SITE_NAMES, N_MARKERS
 
 # EMA weight for the re-anchored camera pose. The camera is bolted down (static
 # within a session), so smoothing base_cam_from_table across frames denoises the
-# per-frame table-tag detection jitter that otherwise moves every arm/cube tag in
+# per-frame table-tag detection jitter that otherwise moves every arm tag in
 # common. At 30 fps, 0.05 is a ~0.7 s time constant: heavy denoising while still
 # tracking a real bump within a couple of seconds.
 CAM_EMA_ALPHA = 0.05
 
-# The marker-age obs is consume-time minus *capture* time (src/camera_sim.py),
-# but the thread only knows when cap.read() returned; the probe
-# (sysid/probe_cam_latency.py, run probe_1783181402) measured the
-# capture -> cap.read() leg at 39.5 ms, so each frame's capture instant is
-# t_recv minus this.
-CAPTURE_TO_READ_S = 0.0395
-
 
 class CameraMarkerSource:
-    """Threaded camera → base-frame marker poses. start() → marker_poses() → stop()."""
+    """Frame-feed consumer → base-frame marker poses. start() → marker_poses() → stop().
 
-    def __init__(self, family: str = "apriltag", on_frame=None,
-                 track_cube: bool = False):
-        # focus from the calibration: the extrinsics (and intrinsics) are only
-        # valid at the focus they were solved at, so we open the lens there.
-        # quarter_turns un-rotate each tag's measured pose to the sim convention.
-        self.T_base_table, _, self.focus, self.quarter_turns = load_extrinsics()
+    `feed` is the main camera's started CameraFeed; the capture settings
+    (per-unit calibrated focus, marker exposure/gain) are the feed's concern
+    (real/vision/stereo_rig.py).
+    """
+
+    def __init__(self, feed, family: str = "apriltag", on_frame=None):
+        self.T_base_table, _, _, self.quarter_turns = load_extrinsics()
+        self.feed = feed
         self.detector = make_detector(family)
-        self.estimator = PoseEstimator(*load_intrinsics())
         # Obs slot order is MARKER_SITE_NAMES; map each slot to its physical tag id.
         site_to_tag = {site: tag for tag, site in ARM_TAG_TO_SITE.items()}
         self.slot_tags = [site_to_tag[name] for name in MARKER_SITE_NAMES]
         self._wanted = set(ARM_TAG_TO_SITE) | {TABLE_TAG_ID}
-        # Also detect the sponge's tag and maintain its held pose (cube_pose()).
-        self.track_cube = bool(track_cube)
-        if self.track_cube:
-            self._wanted.add(CUBE_TAG_ID)
-        # Called from the capture thread after every processed frame with
+        # Called from the consumer thread after every processed frame with
         # (t_recv, pos (N,3), rot (N,3), detect_ms) — base-frame poses,
         # undetected tags zeroed. Lets a recorder (sysid/probe_cam_latency.py)
         # timestamp every frame instead of polling for the newest one.
@@ -96,29 +81,27 @@ class CameraMarkerSource:
         # never. Until it is fresh the camera can't be mapped to the base frame at
         # all (every pose is zeroed/held), so warmup() blocks on it.
         self._table_last_capture_t = -np.inf
-        self._cube_pos = np.zeros(3)
-        self._cube_rot = np.zeros(3)
-        self._cube_last_capture_t = -np.inf
-        # EMA state for the re-anchored camera pose (see CAM_EMA_ALPHA). Seeded by
-        # the first table-tag solve; touched only from the capture thread, so no
-        # lock needed.
+        # EMA state for the re-anchored camera pose (see CAM_EMA_ALPHA). Seeded
+        # by the first table-tag solve; touched only from the consumer thread.
         self._cam_ema = PoseEMA(CAM_EMA_ALPHA)
         self._recv_t: float | None = None
         self._read_ms = float("nan")
         self._detect_ms = float("nan")
         self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._cap = None
         self._thread = None
-        self.error = None      # set if the capture loop dies; readers re-raise it
+        self.error = None      # set if the consumer loop dies; readers re-raise it
+        self.estimator = None  # built in start() from the feed's intrinsics
 
     def start(self) -> None:
-        self._cap = open_camera(focus=self.focus, exposure=MARKER_EXPOSURE, gain=MARKER_GAIN)
+        assert self.feed.camera_matrix is not None, \
+            "start the CameraFeed before the CameraMarkerSource"
+        self.estimator = PoseEstimator(self.feed.camera_matrix,
+                                       self.feed.dist_coeffs)
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        # Block until the first frame lands so a camera that never delivers
-        # fails loud here instead of serving zeroed poses (and NaN staleness,
-        # which no downstream age gate would catch) for the whole rollout.
+        # Block until the first frame is processed so a dead feed fails loud
+        # here instead of serving zeroed poses for the whole rollout.
         deadline = time.monotonic() + 5.0
         while True:
             if self.error is not None:
@@ -127,53 +110,48 @@ class CameraMarkerSource:
                 if self._recv_t is not None:
                     return
             if time.monotonic() > deadline:
-                raise RuntimeError("no camera frame within 5 s of start()")
+                raise RuntimeError("no processed camera frame within 5 s of start()")
             time.sleep(0.01)
 
     def _loop(self) -> None:
         try:
+            seq = 0
             while not self._stop.is_set():
-                t_read = time.monotonic()
-                ok, frame = self._cap.read()
-                t_recv = time.monotonic()
-                if not ok:
-                    raise RuntimeError("camera read failed mid-session")
+                seq, t_capture, frame = self.feed.wait_next(seq)
+                _, read_ms = self.feed.stats()
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 t_det = time.monotonic()
                 poses = {d.id: self.estimator.estimate(d)
                          for d in self.detector.detect(gray) if d.id in self._wanted}
                 detect_ms = (time.monotonic() - t_det) * 1e3
-                pos, rot, detected, cube_pose = self._poses_to_base(poses)
+                pos, rot, detected = self._poses_to_base(poses)
+                t_recv = t_capture + CAPTURE_TO_READ_S
                 with self._lock:
                     self._pos[detected] = pos[detected]
                     self._rot[detected] = rot[detected]
-                    self._last_capture_t[detected] = t_recv - CAPTURE_TO_READ_S
+                    self._last_capture_t[detected] = t_capture
                     if TABLE_TAG_ID in poses:
-                        self._table_last_capture_t = t_recv - CAPTURE_TO_READ_S
-                    if cube_pose is not None:
-                        self._cube_pos, self._cube_rot = cube_pose
-                        self._cube_last_capture_t = t_recv - CAPTURE_TO_READ_S
+                        self._table_last_capture_t = t_capture
                     self._recv_t = t_recv
-                    self._read_ms = (t_recv - t_read) * 1e3
+                    self._read_ms = read_ms
                     self._detect_ms = detect_ms
                 if self._on_frame is not None:
                     self._on_frame(t_recv, pos, rot, detect_ms)
-        except Exception as exc:   # surface to the consumer thread; a dead camera
+        except Exception as exc:   # surface to the consumer thread; a dead feed
             self.error = exc       # must fail loud, not freeze the last poses
 
     def _poses_to_base(self, poses: dict):
         """Camera-frame tag poses -> raw per-frame base-frame
-        (pos (N,3), rot (N,3), detected (N,) bool, cube_pose); undetected/
-        un-anchored tags zeroed with detected=False, cube_pose is (pos, rot)
-        or None when the cube tag wasn't measured this frame. These are the
-        per-frame values (used as-is for _on_frame telemetry) — the held obs
-        state only folds in the detected ones."""
+        (pos (N,3), rot (N,3), detected (N,) bool); undetected/un-anchored
+        tags zeroed with detected=False. These are the per-frame values (used
+        as-is for _on_frame telemetry) — the held obs state only folds in the
+        detected ones."""
         pos = np.zeros((N_MARKERS, 3))
         rot = np.zeros((N_MARKERS, 3))
         detected = np.zeros(N_MARKERS, dtype=bool)
         if TABLE_TAG_ID not in poses:
             # No table tag this frame -> can't re-anchor the camera.
-            return pos, rot, detected, None
+            return pos, rot, detected
         T_base_cam = self._cam_ema.update(
             base_cam_from_table(self.T_base_table, *poses[TABLE_TAG_ID]))
         for i, tag in enumerate(self.slot_tags):
@@ -182,19 +160,13 @@ class CameraMarkerSource:
                 T_cam_tag = rt_to_mat(*poses[tag]) @ quarter_turn_mat(-self.quarter_turns[tag])
                 pos[i], rot[i] = mat_to_pos_rotvec(T_base_cam @ T_cam_tag)
                 detected[i] = True
-        cube_pose = None
-        if self.track_cube and CUBE_TAG_ID in poses:
-            # Raw tag pose, no quarter_turns un-rotation: the sim cube_tag site
-            # bakes the calibrated 90 deg in-plane glue yaw (so101/scene_*.xml),
-            # so the raw measured tag frame already matches the sim convention.
-            cube_pose = mat_to_pos_rotvec(T_base_cam @ rt_to_mat(*poses[CUBE_TAG_ID]))
-        return pos, rot, detected, cube_pose
+        return pos, rot, detected
 
     def marker_poses(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(pos (N,3), rot (N,3), age_s (N,)) in the base frame: each tag's
         most recent detection and its age at this instant, capped at
         MARKER_AGE_CAP_S like training; never-seen tags are zero with age at
-        the cap. Re-raises any exception that killed the capture thread —
+        the cap. Re-raises any exception that killed the consumer thread —
         otherwise a dead camera would silently serve the held poses forever."""
         if self.error is not None:
             raise self.error
@@ -203,21 +175,6 @@ class CameraMarkerSource:
             rot = self._rot.copy()
             last_capture_t = self._last_capture_t.copy()
         age = np.minimum(MARKER_AGE_CAP_S, time.monotonic() - last_capture_t)
-        return pos, rot, age
-
-    def cube_pose(self) -> tuple[np.ndarray, np.ndarray, float]:
-        """(pos (3,), rot (3,), age_s) of the cube tag in the base frame —
-        marker_poses() semantics: held last detection plus its age, capped at
-        MARKER_AGE_CAP_S; zeros with age at the cap when never seen. Re-raises
-        any exception that killed the capture thread."""
-        assert self.track_cube, "CameraMarkerSource was constructed without track_cube"
-        if self.error is not None:
-            raise self.error
-        with self._lock:
-            pos = self._cube_pos.copy()
-            rot = self._cube_rot.copy()
-            last_capture_t = self._cube_last_capture_t
-        age = min(MARKER_AGE_CAP_S, time.monotonic() - last_capture_t)
         return pos, rot, age
 
     def frame_stats(self) -> tuple[float, float, float]:
@@ -269,8 +226,8 @@ class CameraMarkerSource:
             time.sleep(0.02)
 
     def stop(self) -> None:
+        """Stop the consumer thread; the CameraFeed (and its device) belongs
+        to the caller."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
-        if self._cap is not None:
-            self._cap.release()

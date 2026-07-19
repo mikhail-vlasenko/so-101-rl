@@ -40,6 +40,11 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from real.rollout.rollout_common import load_policy
+from real.rollout.rollout_lift import (
+    SQRTM_COLS,
+    FkObjectSource,
+    sample_visible_fk_spawn,
+)
 from src.base_env import (
     JOINT_NAMES,
     MARKER_AGE_CAP_S,
@@ -49,7 +54,6 @@ from src.base_env import (
     markers_visible,
     obs_dim_for,
     priv_dim_for,
-    sample_cube_orientation,
     tag_cam_model,
 )
 from src.lift_env import SO101LiftEnv
@@ -80,24 +84,33 @@ def load_rollout(csv_path: Path) -> dict:
         "qpos": df[[f"qpos_{n}" for n in JOINT_NAMES]].to_numpy(),
         "ee": df[["ee_x", "ee_y", "ee_z"]].to_numpy(),
         "cube": df[["cube_x", "cube_y", "cube_z"]].to_numpy(),
-        # Cube-tag obs exactly as the policy saw it (raw tag pose + age) —
-        # the [cube_tag(6), cube_age(1)] slice of the actor block, in obs order.
-        "ctag": df[[f"ctag_{ax}" for ax in "xyz"]
-                   + [f"ctag_r{ax}" for ax in "xyz"] + ["cube_age_s"]].to_numpy(),
+        # Object channels exactly as the policy saw them — the [live(3),
+        # live_age(1), center(3), sqrtM(6), precise_age(1)] slice of the
+        # actor block, in obs order.
+        "obj": df[[f"live_{ax}" for ax in "xyz"] + ["live_age_s"]
+                  + [f"center_{ax}" for ax in "xyz"]
+                  + [f"sqrtm_{c}" for c in SQRTM_COLS]
+                  + ["precise_age_s"]].to_numpy(),
         "marker_age_s": df["marker_age_ms"].to_numpy() * 1e-3,
     }
 
 
 def reproduce_spawn(seed: int, env_cfg: dict, model: mujoco.MjModel,
                     csv_cube0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Replicate real/rollout/rollout_lift.py's cube spawn rng sequence for --seed and
-    cross-check it against the CSV's first cube position."""
+    """Replicate real/rollout/rollout_lift.py's cube spawn rng sequence for --seed
+    (the both-camera-visible rejection loop included) and cross-check it
+    against the CSV's first cube position."""
+    data = mujoco.MjData(model)
     cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
+    cube_body_id = int(model.geom_bodyid[cube_geom_id])
+    cube_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
+    cube_qposadr = int(model.jnt_qposadr[cube_joint_id])
+    fk_object = FkObjectSource(model, data, cube_geom_id, cube_body_id)
     rng = np.random.default_rng(seed)
-    cube_xy = rng.uniform(np.array(env_cfg["cube_low"], dtype=np.float64),
-                          np.array(env_cfg["cube_high"], dtype=np.float64))
-    cube_quat, rest_half_z = sample_cube_orientation(rng, model.geom_size[cube_geom_id])
-    cube_pos = np.array([cube_xy[0], cube_xy[1], rest_half_z])
+    cube_pos, cube_quat = sample_visible_fk_spawn(
+        fk_object, data, cube_qposadr, rng,
+        np.array(env_cfg["cube_low"], dtype=np.float64),
+        np.array(env_cfg["cube_high"], dtype=np.float64))
     err = np.linalg.norm(cube_pos[:2] - csv_cube0[:2])
     assert err < SPAWN_XY_TOL, (
         f"seed {seed} reproduces cube spawn {cube_pos[:2]} but the CSV starts at "
@@ -196,7 +209,7 @@ def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float,
         # real/rollout_lift.build_actor_frame.
         frame = np.concatenate([
             q, qvel, held_pos.flatten(), held_age,
-            rec["ctag"][k - 1],
+            rec["obj"][k - 1],
             np.array([0.0, 0.0, 0.0, LIFT_TASK_ID]),
             rec["actions"][k - 1],
         ]).astype(np.float32)

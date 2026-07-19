@@ -59,6 +59,7 @@ from omegaconf import OmegaConf
 
 from real.calib.calibration import load_calibration, load_compliance
 from real.calib.compliance import gravity_deflection
+from real.rollout.frame_bus import CameraFeed
 from real.rollout.marker_obs import CameraMarkerSource
 from real.twin.constants import INTERP_HZ, SERVO_ACCEL, SERVO_POSITION_KP, SERVO_SPEED
 from real.twin.control import clamp_raw_delta, stream_sub_targets
@@ -322,7 +323,8 @@ def main() -> int:
             print(f"  camera: {len(frames)} frames, last has {n_det}/"
                   f"{len(MARKER_SITE_NAMES)} arm tags")
 
-    marker_source = CameraMarkerSource(args.family, on_frame=on_frame)
+    feed = CameraFeed("main")
+    marker_source = CameraMarkerSource(feed, args.family, on_frame=on_frame)
     bus = ServoBus(args.port, jm.servo_ids())
 
     stopped = {"flag": False}
@@ -333,6 +335,7 @@ def main() -> int:
 
     bus.connect()
     try:
+        feed.start()
         marker_source.start()
         raw0 = bus.read_all()
         q0_true = _true_qpos(model, data, qposadr, [raw0], jm, direction,
@@ -367,6 +370,7 @@ def main() -> int:
             t_enc, raws = _record_passive(bus, args.seconds, stopped)
     finally:
         marker_source.stop()
+        feed.stop()
         bus.close()
 
     assert len(t_enc) > 2 * MIN_CAM_SAMPLES, f"too few encoder samples: {len(t_enc)}"
