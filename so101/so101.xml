@@ -104,17 +104,21 @@
 
   <worldbody>
     <!-- Sim stand-in for the physical webcam, to the right of the arm (-y, the
-         same "right" as the marker_wrist comment). Pose is MEASURED: set from
-         extrinsics.yaml t_base_cam_fixed (real/calibrate_qpos.py solve), with the
-         OpenCV camera frame converted to MuJoCo's OpenGL convention (looks down
-         -z, +y up) — re-set it after moving the camera and recalibrating. The
-         pose lives on this fixed mount body so the camera and its visible
-         stand-in geoms share one source of truth; src/base_env.tag_cam_model
-         resolves the world pose via cam_xpos/cam_xmat. The marker-visibility
-         check consumes both: the position for the facing-angle test, and the
-         full orientation for the field-of-view (in-frame) projection. -->
-    <body name="tag_cam_mount" pos="0.108758 -0.405595 0.184928"
-          quat="0.776112 0.618043 -0.0498893 -0.114824">
+         same "right" as the marker_wrist comment). Pose is MEASURED: live
+         table-tag anchoring averaged over 100 frames
+         (python -m real.diagnostics.snapshot_cam_mount --camera main,
+         2026-07-20, per-frame spread 0.21 mm / 0.03 deg), the same anchoring
+         the runtime pipeline uses — re-run and paste after moving a camera.
+         The OpenCV camera frame is converted to MuJoCo's OpenGL convention
+         (looks down -z, +y up; pinned by
+         tests/real/test_cam_mount_convention.py). The pose lives on this
+         fixed mount body so the camera and its visible stand-in geoms share
+         one source of truth; src/base_env.tag_cam_model resolves the world
+         pose via cam_xpos/cam_xmat. The marker-visibility check consumes
+         both: the position for the facing-angle test, and the full
+         orientation for the field-of-view (in-frame) projection. -->
+    <body name="tag_cam_mount" pos="0.093519 -0.403917 0.187257"
+          quat="0.778682 0.618765 -0.032269 -0.098703">
       <camera name="tag_cam"/>
       <!-- Visible webcam stand-in (body + forward-facing lens). No collision
            (contype/conaffinity 0) and default group 0 so it renders but never
@@ -125,15 +129,12 @@
             rgba="0.2 0.2 0.28 1" contype="0" conaffinity="0"/>
     </body>
     <!-- Second (aux) C922 for the dual-view object channels (src/base_env.py
-         live/precise cube obs): ~45 deg angular separation from tag_cam about
-         the workspace center, aimed at it. PLACEHOLDER pose (main camera pose
-         rotated 45 deg about the vertical through [0.225, 0, 0.03]) — replace
-         with the measured aux T_base_cam snapshot
-         (real.tracking.stereo_check at the final rig geometry) before
-         comparing sim against recorded real data, same convention notes as
-         tag_cam_mount above. -->
-    <body name="tag_cam_aux_mount" pos="0.429603 -0.368994 0.184928"
-          quat="0.793835 0.554168 0.143358 0.205358">
+         live/precise cube obs), angularly separated from tag_cam about the
+         workspace center. Pose MEASURED like tag_cam_mount above
+         (snapshot_cam_mount --camera aux, 2026-07-20, spread 0.48 mm /
+         0.04 deg). -->
+    <body name="tag_cam_aux_mount" pos="0.391045 -0.362292 0.174077"
+          quat="0.761401 0.574720 0.186670 0.234774">
       <camera name="tag_cam_aux"/>
       <geom name="tag_cam_aux_body" type="box" size="0.022 0.032 0.018"
             rgba="0.05 0.05 0.06 1" contype="0" conaffinity="0"/>

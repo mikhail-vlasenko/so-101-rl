@@ -13,11 +13,12 @@ Open, roughly in order:
 - **Record the dataset and run the acceptance eval.** Glue the eval tags
   (`marker_spec` cube_eval ids), `tag_body_calib`, `record_shapes`, then
   `eval_estimator --estimator hull` — ship on green, escalate per plan
-  decision 3 on the occlusion/component slices; widening the ~45° camera
-  separation is the first lever before any estimator escalation. Re-seed the
-  placeholder `live_sigma`/`precise_sigma`/`sqrtm_rot_sigma` (+ bias keys) in
-  `conf/dr/*` from the measured numbers, and re-set the sim `tag_cam_aux`
-  pose from the measured aux `T_base_cam`.
+  decision 3 on the occlusion/component slices; widening the ~40° camera
+  separation (measured 2026-07-20, both sim mounts snapshotted via
+  `real.diagnostics.snapshot_cam_mount`) is the first lever before any
+  estimator escalation. Re-seed the placeholder
+  `live_sigma`/`precise_sigma`/`sqrtm_rot_sigma` (+ bias keys) in `conf/dr/*`
+  from the measured numbers.
 - **Mono live fallback.** The live channel requires BOTH views; one lost view
   stales it even though a single mask still gives a ray. Measure the dataset's
   both-view availability first — only build the fallback if the number says
