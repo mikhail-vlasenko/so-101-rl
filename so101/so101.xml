@@ -133,8 +133,8 @@
          workspace center. Pose MEASURED like tag_cam_mount above
          (snapshot_cam_mount --camera aux, 2026-07-20, spread 0.48 mm /
          0.04 deg). -->
-    <body name="tag_cam_aux_mount" pos="0.391045 -0.362292 0.174077"
-          quat="0.761401 0.574720 0.186670 0.234774">
+    <body name="tag_cam_aux_mount" pos="0.406084 -0.185864 0.146871"
+          quat="0.676244 0.535463 0.305925 0.402969">
       <camera name="tag_cam_aux"/>
       <geom name="tag_cam_aux_body" type="box" size="0.022 0.032 0.018"
             rgba="0.05 0.05 0.06 1" contype="0" conaffinity="0"/>

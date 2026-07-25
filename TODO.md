@@ -10,10 +10,6 @@ The dual-channel pipeline is implemented end to end (plan:
 `real/tracking/{tag_body_calib,record_shapes,eval_estimator,hull_shape}.py`).
 Open, roughly in order:
 
-- **Re-snapshot the aux sim mount.** The aux camera was remounted wider on
-  2026-07-25; `so101.xml` still carries the old pose, so sim visibility and
-  spawn rejection model a camera that isn't there. Run
-  `real.diagnostics.snapshot_cam_mount --camera aux` before any training.
 - **Record the dataset and run the acceptance eval.** Glue the eval tags
   (`marker_spec` cube_eval ids), `tag_body_calib`, `record_shapes`, then
   `eval_estimator --estimator hull` — ship on green, escalate per plan
