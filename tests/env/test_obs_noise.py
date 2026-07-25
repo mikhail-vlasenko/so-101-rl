@@ -227,10 +227,12 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
 
 def test_shape_carries_no_per_refresh_noise(cfg):
     """There is deliberately no per-refresh √M noise knob. On the rig a
-    stationary sponge produced a bit-identical hull across 129 refreshes, so
-    the estimator's shape error is a per-episode bias
+    stationary sponge's shape estimate moved under 0.05 mm across 129
+    refreshes, two orders of magnitude below the bias it carries, so the
+    estimator's shape error is modelled as a per-episode bias
     (obs_bias.sqrtm_depth_sigma, tests/env/test_obs_bias.py), not jitter —
-    obs_noise must leave the served shape untouched."""
+    obs_noise must leave the served shape untouched. `precise_sigma` still
+    noises the precise channel's CENTER per refresh; only the shape is exempt."""
     env_clean = _pickplace(cfg, obs_noise=None)
     env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
     for i in range(10):

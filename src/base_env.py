@@ -610,8 +610,9 @@ class SO101BaseEnv(SO101ArmEnv):
         # live_sigma per frame on the triangulated centroid (two-view
         # triangulation has no solvePnP depth pathology) and precise_sigma per
         # refresh on the estimated center. There is deliberately no per-refresh
-        # √M noise: on the rig a stationary sponge gave a bit-identical shape
-        # across 129 refreshes, so the estimator's shape error is pure bias
+        # √M noise: on the rig a stationary sponge's shape estimate moved under
+        # 0.05 mm across 129 refreshes — two orders of magnitude below the bias
+        # it carries — so the estimator's shape error is modelled as bias
         # (obs_bias.sqrtm_depth_sigma), not jitter. The camera
         # re-anchor's common-mode error is per-episode only
         # (obs_bias.marker_common_sigma): the real pipeline EMAs the static
