@@ -34,6 +34,18 @@ WARMUP_FRAMES = 10
 # binocular triangulation.
 SERIALS = {"main": "D12FB3AF", "aux": "0AB5B87F"}
 
+# Anti-flicker mode (UVC power_line_frequency) for the manual-exposure path.
+# The rig runs on 50 Hz mains, so an exposure has to span whole 10 ms light
+# periods or the rolling shutter records dark bands (see MARKER_EXPOSURE).
+# This C922's menu labels don't match that intent: entry 1 ("50 Hz") makes the
+# camera clamp any exposure written before streaming starts to 83 (1/120 s) —
+# which is what banded the main unit for months, silently, since the readback
+# was never checked — while entry 2 ("60 Hz") applies the requested value.
+POWER_LINE_FREQUENCY = 2
+# The camera reports the exposure it actually applied and quantizes slightly
+# (100 -> 99). Anything further off means it overrode us: fail loud.
+EXPOSURE_TOLERANCE = 0.05
+
 
 def device_index_for_serial(serial):
     """Resolve a C922 USB serial to its current /dev/videoN index.
@@ -60,15 +72,34 @@ def v4l2_set(ctrl, value, device=None):
                    check=True)
 
 
+def v4l2_get(ctrl, device=None):
+    """Read back a V4L2/UVC control by name. Raises on failure — fail loud."""
+    device = resolve_device(device)
+    out = subprocess.run(["v4l2-ctl", "-d", f"/dev/video{device}", "-C", ctrl],
+                         check=True, capture_output=True, text=True).stdout
+    return int(out.split(":")[1])
+
+
 def set_exposure(value, device=None):
     """Switch to manual exposure and set exposure_time_absolute (100 us units).
 
-    Also pins the framerate so the camera can't lengthen exposure by dropping FPS.
-    Lower value = less motion blur but darker; raise gain to compensate.
+    Also pins the framerate so the camera can't lengthen exposure by dropping FPS,
+    and the anti-flicker mode so the requested exposure isn't quantized away
+    (POWER_LINE_FREQUENCY). Lower value = less motion blur but darker; raise gain
+    to compensate. Verifies the readback: a camera that silently applies a
+    different exposure changes both brightness and mains banding.
     """
+    device = resolve_device(device)
+    value = int(value)
     v4l2_set("auto_exposure", 1, device)               # 1 = manual exposure mode
     v4l2_set("exposure_dynamic_framerate", 0, device)
-    v4l2_set("exposure_time_absolute", int(value), device)
+    v4l2_set("power_line_frequency", POWER_LINE_FREQUENCY, device)
+    v4l2_set("exposure_time_absolute", value, device)
+    actual = v4l2_get("exposure_time_absolute", device)
+    if abs(actual - value) > EXPOSURE_TOLERANCE * value:
+        raise RuntimeError(
+            f"/dev/video{device} applied exposure {actual}, not the requested "
+            f"{value} — check power_line_frequency")
 
 
 def set_auto_exposure(device=None):
