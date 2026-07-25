@@ -158,8 +158,7 @@ class CameraMarkerSource:
             # The camera is bolted down, so its anchor is a static property of
             # the session, not a per-frame measurement: coast on the smoothed
             # value rather than letting the sponge or the arm covering the
-            # table tag stale every arm marker at once. table_age() is how long
-            # we have been coasting.
+            # table tag stale every arm marker at once.
             T_base_cam = self._cam_ema.value()
         else:
             return pos, rot, detected   # never anchored this session

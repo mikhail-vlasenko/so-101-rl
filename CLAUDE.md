@@ -44,6 +44,13 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
   `prev_actions_n`, `marker_include_rot`) or the `src/obs_norm.py` constants
   invalidates checkpoints. Migrate with `src/distill.py`, not checkpoint surgery,
   and always follow distillation with a short PPO fine-tune (`resume=`).
+- **Camera poses**: the real pipeline never stores one — every camera re-anchors
+  per frame from the table tag, coasting on the last EMA'd anchor while the tag
+  is occluded (`real/rollout/{marker_obs,object_obs}.py`). The sim mounts
+  (`so101.xml` `tag_cam_mount` / `tag_cam_aux_mount`) are snapshots of that
+  anchoring, so **re-run `real.diagnostics.snapshot_cam_mount --camera <main|aux>`
+  after any remount** — otherwise sim visibility, spawn rejection and the fk twin
+  model a camera that isn't there.
 - **Sim/real twins**: some behavior is implemented twice and must stay identical —
   marker hold-last-pose/age (`src/base_env.py` ↔ `real/rollout/marker_obs.py`),
   `ObsHistory` feeding, `action_to_target`. Change one side, change the other;

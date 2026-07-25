@@ -10,32 +10,39 @@ The dual-channel pipeline is implemented end to end (plan:
 `real/tracking/{tag_body_calib,record_shapes,eval_estimator,hull_shape}.py`).
 Open, roughly in order:
 
+- **Re-snapshot the aux sim mount.** The aux camera was remounted wider on
+  2026-07-25; `so101.xml` still carries the old pose, so sim visibility and
+  spawn rejection model a camera that isn't there. Run
+  `real.diagnostics.snapshot_cam_mount --camera aux` before any training.
 - **Record the dataset and run the acceptance eval.** Glue the eval tags
   (`marker_spec` cube_eval ids), `tag_body_calib`, `record_shapes`, then
   `eval_estimator --estimator hull` — ship on green, escalate per plan
-  decision 3 on the occlusion/component slices; widening the ~40° camera
-  separation (measured 2026-07-20, both sim mounts snapshotted via
-  `real.diagnostics.snapshot_cam_mount`) is the first lever before any
-  estimator escalation. Re-seed the placeholder
+  decision 3 on the occlusion/component slices. Re-seed the placeholder
   `live_sigma`/`precise_sigma`/`sqrtm_rot_sigma` (+ bias keys) in `conf/dr/*`
   from the measured numbers.
+- **Hull's residual vertical bias, and the wrong shape of DR knob.** Widening
+  the cameras fixed the in-plane axes (real rig long axis 1.40× → 1.02×) but
+  the vertical half extent still reads ~1.45×: neither camera sees the top
+  face, so the hull's ceiling is set by where the two silhouettes cross —
+  azimuth can't fix it, and raising a camera doesn't either. Either add a
+  third, higher view or model it. Note `sqrtm_rot_sigma` models the error as
+  a random rotation of the box axes, which is the wrong shape: the hull adds
+  mass along a *fixed world direction* (the cameras' common depth axis,
+  world-stationary to within 8° across sponge yaws), which reproduces the
+  inflation, the compressed anisotropy and the yaw-dependent principal-axis
+  confusion from one parameter.
 - **Mono live fallback.** The live channel requires BOTH views; one lost view
   stales it even though a single mask still gives a ray. Measure the dataset's
   both-view availability first — only build the fallback if the number says
   it matters.
 - **Static-gate noise margin during settling.** `is_static` judges consecutive
-  live-centroid speeds, which divide by the frame interval and so amplify
-  measurement noise by 1/dt. The first real dry run
-  (`rollout_lift_1784992194`) says the margin is comfortable while genuinely
-  static — 0.13 mm of net drift over 280 ticks, worst step 0.37 mm
-  (0.006 m/s) against the 0.02 m/s bound, no false trip — and that the test
-  reacts to true motion onset within one frame (it caught a 2.7 mm hand
-  nudge in the last three ticks, which a window-extent test would have
-  missed until 5 mm of travel). Unmeasured: the settling regime right after
-  motion, where blur, camera-sync skew and tracker lag all inflate the live
-  noise. Measure false-trip rate on the dataset's post-motion segments before
-  changing the statistic — a spatial-extent test trades onset latency for
-  noise robustness and this rig may not need the trade.
+  live-centroid speeds, so measurement noise is amplified by 1/dt. Measured
+  margin while genuinely static is comfortable (worst step 0.006 m/s against
+  the 0.02 bound) and the speed test catches motion onset within one frame —
+  a spatial-extent test would trade that away. Unmeasured: the settling
+  regime right after motion, where blur, sync skew and tracker lag inflate
+  the live noise. Measure the false-trip rate on the dataset's post-motion
+  segments before swapping the statistic.
 - **Occlusion-gate baseline honesty.** `ObjectSource` gauges visibility as
   mask area vs the current static window's max, so an occlusion present from
   the window's first frame inflates the baseline and can let a degraded hull
@@ -72,8 +79,6 @@ Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/li
 - **Marker noise anisotropy — remaining pieces.** Position noise is now anisotropic in the camera frame (`src/marker_noise.py`: small lateral, large depth along each tag's ray, sigmas derived from the calibrated intrinsics + per-tag distance/size), plus a per-episode common-mode bias (`obs_bias.marker_common_sigma`) — the table re-anchor, whose real-side jitter `real/rollout/marker_obs.py` damps by EMAing the static camera (`CAM_EMA_ALPHA`); a per-frame common-mode residual knob existed briefly and was removed as negligible post-EMA. Open: (1) rotation noise is still isotropic (`marker_rot_sigma`) — the angle-dependent orientation wobble isn't modeled (no rot channel is in the default obs; matters only if `marker_include_rot` ever lands); (2) the new DR knobs (`tag_px_noise`, `tag_depth_factor`, `marker_common_sigma`) and `CAM_EMA_ALPHA` are seeded from geometry/back-of-envelope, not yet tuned against measured real solvePnP logs — ties into the dropout-rate tuning item below.
 
 - **Pose-locked (semi-static) tag noise — arm markers only now.** Sim's per-tag noise is i.i.d. per frame, but a static tag under static lighting feeds the detector nearly the same pixels every frame, so the real error is mostly a *repeatable, pose-dependent bias* plus a small temporal jitter — it neither re-draws every frame the way `_process_frame` samples it, nor averages away on the real rig. The cube half of this item is largely superseded by the two-regime object obs: the precise channel *is* pose-locked by construction (refreshed only on static windows, held in between, with per-episode biases as the pose-locked error), and the live channel's error budget is measured, not modeled from px noise. Remaining scope: the finger/wrist tags — constantly moving, they decorrelate over ~1 px of image motion, so i.i.d. is a fair approximation; only revisit (split `tag_px_noise` into a pose-locked + jitter component, measured via a ~30 s static log with `real.marker_view`) if a policy shows filtering artifacts near static arm poses.
-
-- **Correlated marker dropout — closed on the real side.** Losing the *table* tag used to stale BOTH arm tags at once (no re-anchor, so both held poses froze) while sim rolls `marker_dropout` independently per tag. `real/rollout/marker_obs.py` now coasts on the smoothed anchor when the tag is occluded (the camera is bolted down, so its pose is static), which both removes the correlated stall and matches sim's independent dropout. Remaining: a *bumped* camera during a long occlusion would be tracked only once the tag reappears — `table_age()` surfaces the coasting time if a rollout ever needs to alarm on it. (Camera latency itself is done: `src/camera_sim.py` + `sysid/probe_cam_latency.py`, measured `delay_ms: [42, 52]` in `conf/dr`.)
 
 - **Bursty marker dropout.** Sim dropout is i.i.d. per frame (conditioned on the grazing-angle band), but real detector misses cluster in bursts (a grazing view or partial occlusion persists across frames). Since undetected tags now *hold* their last pose while the age channel grows, burst length directly shapes the held-pose error distribution the policy trains against — consider a two-state Markov dropout (p_enter, p_exit) in `base_env._process_frame`, tuned against measured real dropout runs.
 
