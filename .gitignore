@@ -2,6 +2,7 @@ __pycache__/
 *.log
 logs/
 outputs/
+datasets/
 wandb/
 *.zip
 MUJOCO_LOG.TXT

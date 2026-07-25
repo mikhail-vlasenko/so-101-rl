@@ -27,7 +27,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import yaml
-from scipy.spatial.transform import Rotation
 
 from real.calib.extrinsics import (
     PoseEMA,
@@ -35,7 +34,6 @@ from real.calib.extrinsics import (
     base_cam_from_table,
     load_extrinsics,
     mat_to_pos_quat,
-    rt_to_mat,
 )
 from real.marker_spec import SPONGE_TAG_IDS, TABLE_TAG_ID
 from real.tracking.tag_body_calib import SPONGE_TAGS_PATH, body_pose_from_tag, load_sponge_tags

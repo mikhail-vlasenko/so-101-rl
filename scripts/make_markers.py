@@ -1,8 +1,8 @@
 """Generate one print-ready PDF of fiducial markers at exact physical sizes.
 
-Lays out, on a single A4 sheet:
-    - 2 cm: 5 ArUco (ids 0-4) + 5 AprilTag (ids 0-4)
-    - 4 cm: 3 ArUco (ids 10-12) + 3 AprilTag (ids 10-12)
+Lays out, on a single A4 sheet, every id in `marker_spec.TAG_SIZE_MM` in both
+families: the 4 cm table tags (10-12) and the 2 cm arm/sponge tags (0-7, the
+latter including the eval-only sponge set 3-7).
 
 Each marker is drawn at its true millimetre size, so printed at 100%
 (no fit-to-page) the outer black square matches the caption — measure an edge
