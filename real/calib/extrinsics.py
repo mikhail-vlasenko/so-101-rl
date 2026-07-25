@@ -109,6 +109,18 @@ class PoseEMA:
         self._pos = None
         self._quat = None
 
+    @property
+    def seeded(self):
+        """True once at least one sample has been folded in."""
+        return self._pos is not None
+
+    def value(self):
+        """The current smoothed 4x4 without folding in a new sample — for
+        consumers that must coast through frames with no measurement (a
+        bolted-down camera whose anchor tag is momentarily occluded)."""
+        assert self.seeded, "PoseEMA has no sample yet"
+        return pos_quat_to_mat(self._pos, self._quat)
+
     def update(self, T):
         """Fold one 4x4 sample in; returns the smoothed 4x4."""
         pos, quat = mat_to_pos_quat(T)

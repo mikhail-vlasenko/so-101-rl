@@ -9,12 +9,14 @@ poses in the exact `(xyz, axis-angle)` form it saw in sim
 (`src/base_env.py::marker_world_poses`).
 
 Per frame the fixed table tag re-anchors the camera (`base_cam_from_table`,
-EMA-smoothed), so a bumped camera self-corrects. A tag the camera can't see —
-or any frame missing the table tag, where the camera can't be re-anchored at
-all — keeps its last measured pose while its age grows, the same
-hold-last-pose + age convention training used for undetected tags
-(src/base_env.py); a tag never seen this session reads all-zero with age
-pinned at MARKER_AGE_CAP_S.
+EMA-smoothed), so a bumped camera self-corrects. Frames that miss the table
+tag coast on the last smoothed anchor — the camera is bolted down, so its
+pose is a static property of the session, and an occluding sponge or arm must
+not stale every arm marker at once (only a session that has never seen the
+table tag has nothing to map through). A tag the camera can't see keeps its
+last measured pose while its age grows, the same hold-last-pose + age
+convention training used for undetected tags (src/base_env.py); a tag never
+seen this session reads all-zero with age pinned at MARKER_AGE_CAP_S.
 
 This source serves the ARM tags and the table anchor only. The manipulated
 object is tracked tag-free by real/rollout/object_obs.ObjectSource on the
@@ -149,11 +151,18 @@ class CameraMarkerSource:
         pos = np.zeros((N_MARKERS, 3))
         rot = np.zeros((N_MARKERS, 3))
         detected = np.zeros(N_MARKERS, dtype=bool)
-        if TABLE_TAG_ID not in poses:
-            # No table tag this frame -> can't re-anchor the camera.
-            return pos, rot, detected
-        T_base_cam = self._cam_ema.update(
-            base_cam_from_table(self.T_base_table, *poses[TABLE_TAG_ID]))
+        if TABLE_TAG_ID in poses:
+            T_base_cam = self._cam_ema.update(
+                base_cam_from_table(self.T_base_table, *poses[TABLE_TAG_ID]))
+        elif self._cam_ema.seeded:
+            # The camera is bolted down, so its anchor is a static property of
+            # the session, not a per-frame measurement: coast on the smoothed
+            # value rather than letting the sponge or the arm covering the
+            # table tag stale every arm marker at once. table_age() is how long
+            # we have been coasting.
+            T_base_cam = self._cam_ema.value()
+        else:
+            return pos, rot, detected   # never anchored this session
         for i, tag in enumerate(self.slot_tags):
             if tag in poses:
                 # Un-rotate the glue offset so marker_rot matches the sim convention.
