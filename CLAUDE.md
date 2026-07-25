@@ -28,7 +28,7 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
   probes; the fit is baked into `so101.xml`
 - `panel/` — web control panel (`python -m panel`, port 8800)
 - `tests/{env,training,control,sysid,panel,real}` — pytest
-- `scripts/` — diagnostics + curriculum wrapper
+- `scripts/` — diagnostics + marker sheet generation
 
 ## Contracts and gotchas
 
