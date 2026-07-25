@@ -31,7 +31,6 @@ DEFAULT_OBS_NOISE = {
     "tag_depth_factor": 2.0,
     "live_sigma": 0.003,
     "precise_sigma": 0.003,
-    "sqrtm_rot_sigma": 0.08,
 }
 
 # Behavioral tests use distinct values per knob so the per-channel oracles
@@ -43,7 +42,6 @@ SIGMAS = {
     "tag_depth_factor": 2.0,
     "live_sigma": 0.004,
     "precise_sigma": 0.002,
-    "sqrtm_rot_sigma": 0.1,
 }
 
 # Actor-block layout (marker_include_rot=True, prev_actions_n=2):
@@ -227,23 +225,20 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
     np.testing.assert_allclose(qvel_diffs.std(axis=0).mean(), qvel_sigma, rtol=0.1)
 
 
-def test_sqrtm_rot_noise_preserves_eigenvalues(cfg):
-    """sqrtm_rot_sigma perturbs the box AXES only (a random rotation applied to
-    R before building √M): the served √M differs from the clean one but its
-    eigenvalues — the episode's half extents / √3 — are exactly preserved."""
+def test_shape_carries_no_per_refresh_noise(cfg):
+    """There is deliberately no per-refresh √M noise knob. On the rig a
+    stationary sponge produced a bit-identical hull across 129 refreshes, so
+    the estimator's shape error is a per-episode bias
+    (obs_bias.sqrtm_depth_sigma, tests/env/test_obs_bias.py), not jitter —
+    obs_noise must leave the served shape untouched."""
     env_clean = _pickplace(cfg, obs_noise=None)
     env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
-    perturbed = 0
-    for i in range(20):
+    for i in range(10):
         env_clean.reset(seed=i)
         env_noisy.reset(seed=i)
         oc, *_ = env_clean.step(_zero_action())
         on, *_ = env_noisy.step(_zero_action())
-        w_clean = np.linalg.eigvalsh(sqrtm_from_upper(oc[SQRTM]))
-        w_noisy = np.linalg.eigvalsh(sqrtm_from_upper(on[SQRTM]))
-        np.testing.assert_allclose(w_noisy, w_clean, atol=1e-9)
-        perturbed += not np.allclose(oc[SQRTM], on[SQRTM])
-    assert perturbed == 20, "sqrtm_rot_sigma > 0 must actually rotate the axes"
+        np.testing.assert_allclose(on[SQRTM], oc[SQRTM], atol=1e-12)
 
 
 def test_depth_noise_dominates_lateral(cfg):

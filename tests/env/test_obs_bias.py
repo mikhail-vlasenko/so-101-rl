@@ -18,7 +18,11 @@ from hydra import compose, initialize
 
 from src.base_env import RuntimeEnvConfig
 from src.pickplace_env import SO101PickPlaceEnv
-from src.shape_obs import sqrtm_from_upper
+from src.shape_obs import (
+    camera_depth_axis,
+    depth_spread_excess,
+    sqrtm_from_upper,
+)
 
 
 SIGMAS = {
@@ -27,7 +31,7 @@ SIGMAS = {
     "marker_rot_sigma": 0.05,
     "live_sigma": 0.008,           # independent, live centroid
     "precise_sigma": 0.006,        # independent, precise center
-    "precise_rot_sigma": 0.05,     # constant rotation of the estimated axes
+    "sqrtm_depth_sigma": 0.008,    # hull spread along the shared camera axis
     "marker_common_sigma": 0.004,  # shared shift on all camera positions
 }
 
@@ -38,7 +42,6 @@ NOISE_SIGMAS = {
     "tag_depth_factor": 2.0,
     "live_sigma": 0.003,
     "precise_sigma": 0.003,
-    "sqrtm_rot_sigma": 0.08,
 }
 
 # Actor-block layout (marker_include_rot=True, prev_actions_n=2): see
@@ -180,22 +183,34 @@ def test_bias_magnitude_matches_sigmas(cfg):
     np.testing.assert_allclose(center_diffs.std(axis=0).mean(), center_std, rtol=0.15)
 
 
-def test_precise_rot_bias_rotates_sqrtm_axes(cfg):
-    """precise_rot_sigma turns the served √M's axes without touching its
-    eigenvalues — a constant estimator-orientation error, not a resize."""
+def test_hull_depth_bias_inflates_only_along_the_shared_camera_axis(cfg):
+    """sqrtm_depth_sigma models the visual hull's error as spread added along
+    the axis the two views share — world-fixed, NOT a rotation of the sponge's
+    own axes. So the served √M must grow in exactly that direction and nowhere
+    else, which is what makes one scalar reproduce the size inflation and the
+    pose-dependent principal-axis error together."""
     env_clean = _pickplace(cfg, obs_bias=None, marker_always_visible=True)
     env_biased = _pickplace(cfg, obs_bias=SIGMAS, marker_always_visible=True)
-    rotated = 0
-    for i in range(20):
+    inflated = 0
+    for i in range(10):
         env_clean.reset(seed=i)
         env_biased.reset(seed=i)
         obs_c, *_ = env_clean.step(_zero_action())
         obs_b, *_ = env_biased.step(_zero_action())
-        w_clean = np.linalg.eigvalsh(sqrtm_from_upper(obs_c[SQRTM]))
-        w_biased = np.linalg.eigvalsh(sqrtm_from_upper(obs_b[SQRTM]))
-        np.testing.assert_allclose(w_biased, w_clean, atol=1e-9)
-        rotated += not np.allclose(obs_c[SQRTM], obs_b[SQRTM])
-    assert rotated == 20
+        S_c = sqrtm_from_upper(obs_c[SQRTM])
+        S_b = sqrtm_from_upper(obs_b[SQRTM])
+        axis = camera_depth_axis([cam.pos for cam in env_biased.cube_cams],
+                                 env_biased._get_cube_pos())
+        M_c, M_b = S_c @ S_c, S_b @ S_b
+        # Tolerances are float32-scale: the obs round-trips through float32.
+        assert depth_spread_excess(M_b, M_c, axis) == pytest.approx(
+            env_biased._sqrtm_depth_spread, abs=1e-6)
+        # Nothing added perpendicular to it, in either perpendicular direction.
+        for perp in np.linalg.svd(axis.reshape(1, 3))[2][1:]:
+            assert depth_spread_excess(M_b, M_c, perp) \
+                < 0.01 * env_biased._sqrtm_depth_spread
+        inflated += env_biased._sqrtm_depth_spread > 0.0
+    assert inflated == 10, "sqrtm_depth_sigma > 0 must actually inflate"
 
 
 def test_qvel_unbiased(cfg):

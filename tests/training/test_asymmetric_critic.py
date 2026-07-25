@@ -37,10 +37,10 @@ QPOS_BIAS = slice(20, 26)
 MARKER_POS_BIAS = slice(26, 32)
 LIVE_BIAS = slice(32, 35)
 PRECISE_BIAS = slice(35, 38)
-PRECISE_ROT_BIAS = slice(38, 41)
-COMMON_BIAS = slice(41, 44)
-CAM_DELAY = 44
-HALF_EXTENTS = slice(45, 48)
+SQRTM_DEPTH = 38
+COMMON_BIAS = slice(39, 42)
+CAM_DELAY = 42
+HALF_EXTENTS = slice(43, 46)
 
 
 @pytest.fixture(scope="module")
@@ -96,7 +96,7 @@ def test_priv_tail_carries_truth_and_latents(lift_cfg):
                                env._marker_pos_bias.flatten(), atol=1e-7)
     np.testing.assert_allclose(tail[LIVE_BIAS], env._live_bias, atol=1e-7)
     np.testing.assert_allclose(tail[PRECISE_BIAS], env._precise_bias, atol=1e-7)
-    np.testing.assert_allclose(tail[PRECISE_ROT_BIAS], env._precise_rot_bias, atol=1e-6)
+    np.testing.assert_allclose(tail[SQRTM_DEPTH], env._sqrtm_depth_spread, atol=1e-6)
     np.testing.assert_allclose(tail[COMMON_BIAS], env._common_pos_bias, atol=1e-7)
     assert tail[CAM_DELAY] == pytest.approx(env._camera.pipeline_delay_s, abs=1e-6)
     assert 0.042 <= tail[CAM_DELAY] <= 0.052  # dr=full delay range

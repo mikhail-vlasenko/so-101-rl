@@ -83,6 +83,36 @@ def sqrtm_from_upper(u):
                      [xz, yz, zz]])
 
 
+def camera_depth_axis(cam_positions, point):
+    """Unit world direction a two-view visual hull cannot resolve at `point`:
+    the bisector of the directions from that point to each camera.
+
+    The hull is the intersection of the cameras' silhouette cones, so it is a
+    superset of the object, elongated along the depth direction the views
+    share — the more so as the cameras close in angle (roughly
+    1/sin(separation)). Measured on the rig, the estimator's error tensor
+    stays within 8 degrees of this axis across every sponge yaw, i.e. the
+    error is world-fixed rather than attached to the object's own axes.
+
+    Shared by the sim DR shape-error model (src/base_env._hull_sqrtm) and the
+    offline acceptance eval (real/tracking/eval_estimator.py), so both judge
+    the same quantity.
+    """
+    dirs = np.asarray(cam_positions, dtype=np.float64) - np.asarray(point, dtype=np.float64)
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    bisector = dirs.sum(axis=0)
+    return bisector / np.linalg.norm(bisector)
+
+
+def depth_spread_excess(M_est, M_true, axis):
+    """The spread (m) an estimate adds along `axis` over the truth: the
+    quantity `obs_bias.sqrtm_depth_sigma` parameterizes. Zero when the
+    estimate is tighter than the truth along that axis."""
+    axis = np.asarray(axis, dtype=np.float64)
+    excess = axis @ (np.asarray(M_est) - np.asarray(M_true)) @ axis
+    return float(np.sqrt(max(excess, 0.0)))
+
+
 def is_static(times, centroids):
     """True when the live-centroid track proves the object static: the samples
     span at least STATIC_DWELL_S and every consecutive-sample speed inside the

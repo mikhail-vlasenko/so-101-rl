@@ -23,6 +23,8 @@ from src.shape_obs import (
     ObjectChannelDriver,
     ObjectObsState,
     box_sqrtm,
+    camera_depth_axis,
+    sqrtm_from_cov,
     sqrtm_upper,
 )
 from src.units import action_to_target
@@ -67,13 +69,13 @@ def priv_dim_for(marker_include_rot: bool = False) -> int:
     + cube velocity (6, free-joint qvel) + jaw contact flags (2) + the
     episode's sampled DR latents: qpos bias (6), per-tag marker pos bias
     (2*3), marker rot bias (2*3, only when the rot obs it perturbs is in the
-    actor block), live centroid bias (3), precise center bias (3), precise
-    rot-perturb (3, axis-angle), common-mode pos bias (3), camera pipeline
-    delay (1), sponge half extents (3). Contents built by
+    actor block), live centroid bias (3), precise center bias (3), hull depth
+    inflation (1), common-mode pos bias (3), camera pipeline delay (1),
+    sponge half extents (3). Contents built by
     SO101BaseEnv._priv_tail; normalization constants in src/obs_norm.py."""
-    # 3+3+6+6+2 cube pose/sqrtM/vel + jaws; 6 qpos bias; 3+3+3 live/precise/
-    # precise-rot bias; 3 common bias; 1 cam delay; 3 half extents
-    dim = 20 + 6 + N_MARKERS * 3 + 9 + 3 + 1 + 3
+    # 3+3+6+6+2 cube pose/sqrtM/vel + jaws; 6 qpos bias; 3+3+1 live/precise
+    # bias + hull depth inflation; 3 common bias; 1 cam delay; 3 half extents
+    dim = 20 + 6 + N_MARKERS * 3 + 7 + 3 + 1 + 3
     if marker_include_rot:
         dim += N_MARKERS * 3
     return dim
@@ -601,14 +603,16 @@ class SO101BaseEnv(SO101ArmEnv):
                          xml_path=xml_path, prev_actions_n=cfg.prev_actions_n,
                          env_cfg=env_cfg)
         # dict with keys qpos_sigma, marker_rot_sigma, tag_px_noise,
-        # tag_depth_factor, live_sigma, precise_sigma, sqrtm_rot_sigma; or
+        # tag_depth_factor, live_sigma, precise_sigma; or
         # None. Marker position noise is anisotropic in the camera frame
         # (src/marker_noise.py): tag_px_noise with tag_depth_factor derive the
         # depth-vs-lateral split. The cube channels use isotropic sigmas —
         # live_sigma per frame on the triangulated centroid (two-view
-        # triangulation has no solvePnP depth pathology), precise_sigma per
-        # refresh on the estimated center, sqrtm_rot_sigma a per-refresh small
-        # random rotation of the box axes before building √M. The camera
+        # triangulation has no solvePnP depth pathology) and precise_sigma per
+        # refresh on the estimated center. There is deliberately no per-refresh
+        # √M noise: on the rig a stationary sponge gave a bit-identical shape
+        # across 129 refreshes, so the estimator's shape error is pure bias
+        # (obs_bias.sqrtm_depth_sigma), not jitter. The camera
         # re-anchor's common-mode error is per-episode only
         # (obs_bias.marker_common_sigma): the real pipeline EMAs the static
         # camera pose (real/rollout/marker_obs.py), leaving no meaningful per-frame
@@ -632,13 +636,13 @@ class SO101BaseEnv(SO101ArmEnv):
         # once the control period is known.
         self.cam_latency = cfg.cam_latency
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
-        # live_sigma, precise_sigma, precise_rot_sigma, marker_common_sigma; or
+        # live_sigma, precise_sigma, sqrtm_depth_sigma, marker_common_sigma; or
         # None. The per-tag marker biases are sampled independently (each tag's
         # own glue/pose-estimate error). The cube channels get per-episode
         # biases of their own: live_sigma the systematic visible-surface/
         # segmentation offset, precise_sigma the estimator's center offset,
-        # precise_rot_sigma a constant small rotation (axis-angle) of the box
-        # axes the estimator reports. marker_common_sigma adds a separate
+        # sqrtm_depth_sigma the spread the visual hull adds along the axis the
+        # two views cannot resolve (_hull_sqrtm). marker_common_sigma adds a separate
         # shared shift applied to every camera-derived position (the camera
         # re-anchor / table calibration offset, correlated across tags and the
         # cube channels alike) — see _common_pos_bias.
@@ -648,7 +652,9 @@ class SO101BaseEnv(SO101ArmEnv):
         self._marker_rot_bias = np.zeros((N_MARKERS, 3))
         self._live_bias = np.zeros(3)
         self._precise_bias = np.zeros(3)
-        self._precise_rot_bias = np.zeros(3)
+        # Per-episode magnitude (m) of the spread the hull estimator adds along
+        # the unresolved depth axis — see _hull_sqrtm.
+        self._sqrtm_depth_spread = 0.0
         # Common-mode shift shared by every tag (arm markers + cube) for the whole
         # episode: the real pipeline re-anchors the camera from one table tag
         # (real/rollout/marker_obs.py), so its calibration/detection error moves all tags
@@ -817,16 +823,27 @@ class SO101BaseEnv(SO101ArmEnv):
                         cube_vis_frac=vis_frac, cube_vis_centroid=vis_centroid,
                         cube_seen=seen)
 
-    def _rotvec_mat(self, rotvec):
-        """(3,3) rotation matrix of a small axis-angle vector (DR rot perturb)."""
-        angle = float(np.linalg.norm(rotvec))
-        if angle == 0.0:
-            return np.eye(3)
-        quat = np.empty(4)
-        mujoco.mju_axisAngle2Quat(quat, np.asarray(rotvec) / angle, angle)
-        mat = np.empty(9)
-        mujoco.mju_quat2Mat(mat, quat)
-        return mat.reshape(3, 3)
+    def _hull_sqrtm(self, R, center):
+        """√M as the two-view hull estimator reports it: the box's true second
+        moment plus the spread the estimator adds along the depth axis it
+        cannot resolve (`camera_depth_axis`), scaled by this episode's
+        `obs_bias.sqrtm_depth_sigma` draw.
+
+        The error is modelled as added mass along a WORLD-fixed direction, not
+        as a rotation of the box's own axes, because that is what a silhouette
+        intersection does: measured on the rig, the estimator's error tensor
+        stays within 8 degrees of the camera bisector across every sponge yaw
+        while the box turns underneath it. One scalar therefore reproduces the
+        size inflation, the compressed anisotropy AND the pose-dependent
+        principal-axis error together — M_true rotates with the sponge while
+        the added term does not, so a box lying along the depth axis inflates
+        in length while one lying across it has its *other* axis inflated.
+        """
+        M = (R * (self.cube_half_extents ** 2 / 3.0)) @ R.T
+        if self._sqrtm_depth_spread > 0.0:
+            d = camera_depth_axis([cam.pos for cam in self.cube_cams], center)
+            M = M + self._sqrtm_depth_spread ** 2 * np.outer(d, d)
+        return sqrtm_from_cov(M)
 
     def _process_frame(self, state: CamState) -> CamFrame:
         """One simulated detection of a captured world state: roll the per-frame
@@ -881,7 +898,6 @@ class SO101BaseEnv(SO101ArmEnv):
             marker_rot = marker_rot + self._marker_rot_bias
             live_err = live_err + self._live_bias + self._common_pos_bias
             precise_center = precise_center + self._precise_bias + self._common_pos_bias
-            R = R @ self._rotvec_mat(self._precise_rot_bias)
         if self.obs_noise is not None:
             rng = self.np_random
             px = self.obs_noise["tag_px_noise"]
@@ -899,9 +915,6 @@ class SO101BaseEnv(SO101ArmEnv):
             live_err = live_err + rng.normal(0, self.obs_noise["live_sigma"], size=3)
             precise_center = precise_center + rng.normal(
                 0, self.obs_noise["precise_sigma"], size=3)
-            sqrtm_rot_sigma = self.obs_noise["sqrtm_rot_sigma"]
-            if sqrtm_rot_sigma > 0.0:
-                R = R @ self._rotvec_mat(rng.normal(0, sqrtm_rot_sigma, size=3))
         if self.marker_always_visible:
             # Easy-mode crutch: the live channel reads the (noisy) true center,
             # sidestepping the visible-surface bias and any occlusion.
@@ -919,7 +932,7 @@ class SO101BaseEnv(SO101ArmEnv):
                         live_detected=live_detected,
                         vis_frac=state.cube_vis_frac.copy(),
                         precise_center=precise_center,
-                        precise_sqrtm=box_sqrtm(R, self.cube_half_extents))
+                        precise_sqrtm=self._hull_sqrtm(R, state.cube_center))
 
     def _ingest_frame(self, capture_t, frame: CamFrame):
         """Consume one camera frame: it becomes the current frame (render tint,
@@ -1043,8 +1056,8 @@ class SO101BaseEnv(SO101ArmEnv):
                  self._qpos_bias, self._marker_pos_bias.flatten()]
         if self.marker_include_rot:
             parts.append(self._marker_rot_bias.flatten())
-        parts.extend([self._live_bias, self._precise_bias, self._precise_rot_bias,
-                      self._common_pos_bias,
+        parts.extend([self._live_bias, self._precise_bias,
+                      [self._sqrtm_depth_spread], self._common_pos_bias,
                       [self._camera.pipeline_delay_s], self.cube_half_extents])
         return np.concatenate(parts)
 
@@ -1355,8 +1368,10 @@ class SO101BaseEnv(SO101ArmEnv):
                                                size=(N_MARKERS, 3))
             self._live_bias = rng.normal(0, self.obs_bias["live_sigma"], size=3)
             self._precise_bias = rng.normal(0, self.obs_bias["precise_sigma"], size=3)
-            self._precise_rot_bias = rng.normal(0, self.obs_bias["precise_rot_sigma"],
-                                                size=3)
+            # One-signed: a silhouette intersection can only ever ADD volume,
+            # so the hull's depth spread is a magnitude, not a signed offset.
+            self._sqrtm_depth_spread = abs(
+                rng.normal(0, self.obs_bias["sqrtm_depth_sigma"]))
             # Shared across all camera-derived positions (see _common_pos_bias
             # init): one draw the whole episode, added to every marker and both
             # cube channels in _process_frame.

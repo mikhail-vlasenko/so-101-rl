@@ -18,7 +18,6 @@ obs_noise:
   tag_depth_factor: 2.0
   live_sigma: 0.003
   precise_sigma: 0.003
-  sqrtm_rot_sigma: 0.08
 
 obs_bias:
   qpos_sigma: 0.01
@@ -26,7 +25,7 @@ obs_bias:
   marker_rot_sigma: 0.02
   live_sigma: 0.003
   precise_sigma: 0.003
-  precise_rot_sigma: 0.05
+  sqrtm_depth_sigma: 0.008
   marker_common_sigma: 0.0015
 
 # Same as dr=full: latency is measured hardware timing, not a difficulty knob.

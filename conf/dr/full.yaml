@@ -30,7 +30,6 @@ obs_noise:
   # these values also define the estimator acceptance envelope (2σ).
   live_sigma: 0.003        # m,    per-frame triangulated visible-centroid jitter
   precise_sigma: 0.003     # m,    per-refresh hull-center error
-  sqrtm_rot_sigma: 0.08    # rad,  per-refresh random rotation of the box axes before √M (~5°)
 
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
@@ -49,7 +48,9 @@ obs_bias:
   marker_rot_sigma: 0.02     # rad,  tag alignment error (~3°)
   live_sigma: 0.003          # m,    systematic visible-surface/segmentation offset
   precise_sigma: 0.003       # m,    systematic hull-center offset
-  precise_rot_sigma: 0.05    # rad,  constant rotation of the estimated box axes (~3°)
+  sqrtm_depth_sigma: 0.008   # m,    spread the visual hull adds along the axis the two
+                             #       views cannot resolve (src/base_env._hull_sqrtm); a
+                             #       half-normal, since a hull only ever adds volume
   marker_common_sigma: 0.0015 # m,   shared shift on all tags (table calib; ~extrinsics.yaml spread_mm 2.28)
 
 # Observation latency (sim2real): only camera-derived obs (markers, cube) lag.

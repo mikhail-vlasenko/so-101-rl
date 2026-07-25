@@ -18,19 +18,15 @@ Open, roughly in order:
   (`marker_spec` cube_eval ids), `tag_body_calib`, `record_shapes`, then
   `eval_estimator --estimator hull` — ship on green, escalate per plan
   decision 3 on the occlusion/component slices. Re-seed the placeholder
-  `live_sigma`/`precise_sigma`/`sqrtm_rot_sigma` (+ bias keys) in `conf/dr/*`
+  `live_sigma`/`precise_sigma`/`sqrtm_depth_sigma` (+ bias keys) in `conf/dr/*`
   from the measured numbers.
-- **Hull's residual vertical bias, and the wrong shape of DR knob.** Widening
-  the cameras fixed the in-plane axes (real rig long axis 1.40× → 1.02×) but
-  the vertical half extent still reads ~1.45×: neither camera sees the top
-  face, so the hull's ceiling is set by where the two silhouettes cross —
-  azimuth can't fix it, and raising a camera doesn't either. Either add a
-  third, higher view or model it. Note `sqrtm_rot_sigma` models the error as
-  a random rotation of the box axes, which is the wrong shape: the hull adds
-  mass along a *fixed world direction* (the cameras' common depth axis,
-  world-stationary to within 8° across sponge yaws), which reproduces the
-  inflation, the compressed anisotropy and the yaw-dependent principal-axis
-  confusion from one parameter.
+- **Hull's residual vertical bias.** Widening the cameras fixed the in-plane
+  axes (real rig long axis 1.40x -> 1.02x) but the vertical half extent still
+  reads ~1.45x: neither camera sees the top face, so the hull's ceiling is set
+  by where the two silhouettes cross — azimuth can't fix it and raising a
+  camera doesn't either. Sim now models it (`obs_bias.sqrtm_depth_sigma`,
+  `src/base_env._hull_sqrtm`) at a placeholder magnitude; a third, higher view
+  is the alternative if the trained policy proves sensitive to it.
 - **Mono live fallback.** The live channel requires BOTH views; one lost view
   stales it even though a single mask still gives a ray. Measure the dataset's
   both-view availability first — only build the fallback if the number says

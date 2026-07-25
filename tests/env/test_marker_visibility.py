@@ -192,10 +192,10 @@ def test_hidden_marker_holds_last_measurement():
     channel grows; a freshly detected tag reads age 0 (synchronous camera)."""
     noise = {"qpos_sigma": 0.01, "marker_rot_sigma": 0.02,
              "tag_px_noise": 0.4, "tag_depth_factor": 2.0,
-             "live_sigma": 0.003, "precise_sigma": 0.003, "sqrtm_rot_sigma": 0.08}
+             "live_sigma": 0.003, "precise_sigma": 0.003}
     bias = {"qpos_sigma": 0.01, "marker_pos_sigma": 0.005,
             "marker_rot_sigma": 0.02, "live_sigma": 0.005, "precise_sigma": 0.005,
-            "precise_rot_sigma": 0.05, "marker_common_sigma": 0.003}
+            "sqrtm_depth_sigma": 0.008, "marker_common_sigma": 0.003}
     env = SO101LiftEnv(env_cfg=_cfg(),
                        cfg=RuntimeEnvConfig(obs_noise=noise, obs_bias=bias,
                                             marker_include_rot=True))

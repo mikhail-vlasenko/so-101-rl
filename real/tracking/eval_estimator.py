@@ -15,7 +15,8 @@ dr=full noise envelope — 2 sigma of the corresponding knobs, read from
 conf/dr/full.yaml at eval time (no duplicated numbers):
 
 - precise center per-component error   vs  2*sqrt(noise.precise_sigma^2 + bias.precise_sigma^2)
-- principal-axis angle error           vs  2*sqrt(noise.sqrtm_rot_sigma^2 + bias.precise_rot_sigma^2)
+- hull depth spread (added along the    vs  2*bias.sqrtm_depth_sigma
+  cameras' shared axis)
 - sqrtM eigenvalue error               vs  cube_size_jitter/2 / sqrt(3)  (the size-DR envelope)
 - live jitter (std in a static window) vs  2*noise.live_sigma, per occlusion slice
 - live window-mean spread              vs  2*bias.live_sigma
@@ -37,7 +38,12 @@ from scipy.spatial.transform import Rotation
 
 from real.calib.extrinsics import pos_quat_to_mat
 from real.vision.stereo import pixel_rays, triangulate_rays
-from src.shape_obs import box_sqrtm, sqrtm_from_cov
+from src.shape_obs import (
+    box_sqrtm,
+    camera_depth_axis,
+    depth_spread_excess,
+    sqrtm_from_cov,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DR_FULL_YAML = REPO_ROOT / "conf" / "dr" / "full.yaml"
@@ -177,8 +183,7 @@ def load_envelope():
     noise, bias = dr["obs_noise"], dr["obs_bias"]
     return {
         "center_m": 2.0 * float(np.hypot(noise["precise_sigma"], bias["precise_sigma"])),
-        "axis_deg": float(np.degrees(
-            2.0 * np.hypot(noise["sqrtm_rot_sigma"], bias["precise_rot_sigma"]))),
+        "depth_spread_m": 2.0 * bias["sqrtm_depth_sigma"],
         "eig_m": dr["cube_size_jitter"] / 2.0 / np.sqrt(3.0),
         "live_jitter_m": 2.0 * noise["live_sigma"],
         "live_bias_m": 2.0 * bias["live_sigma"],
@@ -210,6 +215,7 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
     assert windows, "no usable static windows — record more settle segments"
 
     center_err, axis_err, eig_err, frob_err = [], [], [], []
+    depth_excess = []
     live_jitter_by_occ = {i: [] for i in range(len(OCCLUSION_BINS) - 1)}
     live_window_means = []
     for win in windows:
@@ -244,6 +250,14 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
                              half_extents)
         center_err.append(est_center - gt_center)
         axis_err.append(principal_axis_angle_deg(est_sqrtm, gt_sqrtm))
+        # The DR model says the hull's shape error is spread added along the
+        # axis the two views share (src/base_env._hull_sqrtm), so measure that
+        # directly rather than an axis angle — the angle is a pose-dependent
+        # consequence of this one number, not an independent error mode.
+        depth_axis = camera_depth_axis(
+            [geometry[name][2][:3, 3] for name in cameras], gt_center)
+        depth_excess.append(depth_spread_excess(
+            np.mean(Ms, axis=0), gt_sqrtm @ gt_sqrtm, depth_axis))
         eig_err.append(np.abs(np.sort(np.linalg.eigvalsh(est_sqrtm))
                               - np.sort(np.linalg.eigvalsh(gt_sqrtm))))
         frob_err.append(float(np.linalg.norm(est_sqrtm - gt_sqrtm)))
@@ -275,8 +289,8 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
     check("precise center |err| p95 (m)",
           float(np.percentile(np.abs(center_err).max(axis=1), 95)),
           envelope["center_m"])
-    check("principal-axis angle p95 (deg)",
-          float(np.percentile(axis_err, 95)), envelope["axis_deg"])
+    check("hull depth spread p95 (m)",
+          float(np.percentile(depth_excess, 95)), envelope["depth_spread_m"])
     check("sqrtM eigenvalue |err| p95 (m)",
           float(np.percentile(eig_err.max(axis=1), 95)), envelope["eig_m"])
     check("live window-mean spread p95 (m)",
@@ -288,8 +302,13 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
                   float(np.percentile(np.concatenate(samples), 95)),
                   envelope["live_jitter_m"])
 
+    # Reported, not gated: the principal-axis angle is a pose-dependent
+    # consequence of the depth spread above (a box lying along the shared
+    # camera axis inflates in length, one lying across it has a different axis
+    # inflated), so it diagnoses rather than judges.
     print(f"\nestimator '{estimator_name}' on {len(center_err)} static windows "
-          f"(sqrtM Frobenius err mean {np.mean(frob_err) * 1e3:.2f} mm):")
+          f"(sqrtM Frobenius err mean {np.mean(frob_err) * 1e3:.2f} mm, "
+          f"principal-axis angle mean {np.mean(axis_err):.1f} deg):")
     ok = True
     for label, value, bound, passed in checks:
         ok &= passed

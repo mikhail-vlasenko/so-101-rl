@@ -12,7 +12,6 @@ obs_noise:
   tag_depth_factor: 2.0    # unused at px_noise=0; kept so the key set matches dr=full/light
   live_sigma: 0.0
   precise_sigma: 0.0
-  sqrtm_rot_sigma: 0.0
 
 obs_bias:
   qpos_sigma: 0.0
@@ -20,7 +19,7 @@ obs_bias:
   marker_rot_sigma: 0.0
   live_sigma: 0.0
   precise_sigma: 0.0
-  precise_rot_sigma: 0.0
+  sqrtm_depth_sigma: 0.0
   marker_common_sigma: 0.0
 
 # Synchronous zero-latency camera: marker/cube obs are the current state.

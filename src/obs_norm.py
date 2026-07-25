@@ -71,7 +71,10 @@ MARKER_POS_BIAS_SCALE = 0.01    # m;   2x full's obs_bias.marker_pos_sigma
 MARKER_ROT_BIAS_SCALE = 0.1     # rad; 2x full's obs_bias.marker_rot_sigma
 LIVE_BIAS_SCALE = 0.006         # m;   2x full's obs_bias.live_sigma
 PRECISE_BIAS_SCALE = 0.006      # m;   2x full's obs_bias.precise_sigma
-PRECISE_ROT_BIAS_SCALE = 0.1    # rad; 2x full's obs_bias.precise_rot_sigma
+# m; 2x full's obs_bias.sqrtm_depth_sigma. One-signed (a hull only ever adds
+# volume), so the centre sits at the mean of the half-normal it is drawn from.
+SQRTM_DEPTH_BIAS_CENTER = 0.006
+SQRTM_DEPTH_BIAS_SCALE = 0.016
 COMMON_BIAS_SCALE = 0.005       # m;   2x full's obs_bias.marker_common_sigma
 # Camera pipeline delay: [0, 0.05] s maps to [-1, 1], covering both the
 # measured 42-52 ms range and the synchronous camera's 0.
@@ -177,8 +180,8 @@ def build_obs_norm(prev_actions_n: int, marker_include_rot: bool,
     scale.append(np.full(3, LIVE_BIAS_SCALE))
     center.append(np.zeros(3))  # precise center bias
     scale.append(np.full(3, PRECISE_BIAS_SCALE))
-    center.append(np.zeros(3))  # precise rot-perturb (axis-angle)
-    scale.append(np.full(3, PRECISE_ROT_BIAS_SCALE))
+    center.append(np.full(1, SQRTM_DEPTH_BIAS_CENTER))  # hull depth inflation
+    scale.append(np.full(1, SQRTM_DEPTH_BIAS_SCALE))
     center.append(np.zeros(3))  # common-mode pos bias
     scale.append(np.full(3, COMMON_BIAS_SCALE))
     center.append(np.full(1, CAM_DELAY_CENTER))  # camera pipeline delay
