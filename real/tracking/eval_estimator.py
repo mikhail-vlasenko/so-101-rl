@@ -71,8 +71,12 @@ def compute_masks(dataset_dir: Path, records, meta, prompt, sam2_model,
     """Run the SAM stack over every recorded frame per camera; cache each mask
     as a PNG under <dataset>/masks/<sam2_model>/. Mirrors the online pipeline:
     one SAM3 text prompt seeds a streaming SAM2 tracker per camera, and a run
-    of `reprompt_after` empty masks triggers re-acquisition via SAM3."""
-    from real.tracking.sam_seg import MaskTracker, load_sam3, text_to_mask
+    of `reprompt_after` empty masks triggers re-acquisition via SAM3.
+
+    A recording can outlast the object (the sponge gets carried out of view at
+    the end of a session), so a prompt that finds nothing yields an empty mask
+    and a retry `reprompt_after` frames later rather than an error."""
+    from real.tracking.sam_seg import MaskTracker, find_text_mask, load_sam3
 
     mask_dir = dataset_dir / "masks" / sam2_model
     todo = [(rec, name) for rec in records for name in meta["cameras"]
@@ -81,25 +85,35 @@ def compute_masks(dataset_dir: Path, records, meta, prompt, sam2_model,
         return mask_dir
     print(f"computing {len(todo)} masks into {mask_dir} ...", flush=True)
     sam3 = load_sam3()
+    tracker = MaskTracker(sam2_model)
     for name in meta["cameras"]:
         (mask_dir / "frames").mkdir(parents=True, exist_ok=True)
-        tracker = None
+        primed = False
         empty_run = 0
+        retry_in = 0
         for rec in records:
             out_path = (mask_dir / rec["frame"][name]).with_suffix(".png")
             if out_path.exists():
                 continue
             frame = cv2.imread(str(dataset_dir / rec["frame"][name]))
             assert frame is not None, rec["frame"][name]
-            if tracker is None or empty_run >= reprompt_after:
-                mask, score = text_to_mask(sam3, frame, prompt)
-                tracker = MaskTracker(sam2_model)
-                tracker.prime(frame, mask)
-                empty_run = 0
-                print(f"  {name}: (re)prompted at k={rec['k']}, score {score:.2f}",
-                      flush=True)
-            else:
+            if primed and empty_run < reprompt_after:
                 mask = tracker.track(frame)
+            elif retry_in > 0:
+                retry_in -= 1
+                mask = np.zeros(frame.shape[:2], dtype=bool)
+            else:
+                found = find_text_mask(sam3, frame, prompt)
+                if found is None:
+                    primed = False
+                    retry_in = reprompt_after
+                    mask = np.zeros(frame.shape[:2], dtype=bool)
+                else:
+                    mask, score = found
+                    tracker.prime(frame, mask)
+                    primed = True
+                    print(f"  {name}: (re)prompted at k={rec['k']}, "
+                          f"score {score:.2f}", flush=True)
             empty_run = 0 if mask.any() else empty_run + 1
             cv2.imwrite(str(out_path), mask.astype(np.uint8) * 255)
     return mask_dir
@@ -220,7 +234,7 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
     live_window_means = []
     for win in windows:
         centers, Ms, lives, occ = [], [], [], []
-        gt_centers, gt_Rs = [], []
+        gt_centers, gt_Rs, cam_positions = [], [], []
         for rec in win:
             geometry = frame_geometry(rec, meta)
             gt = gt_pose(rec)
@@ -239,6 +253,7 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
             occ.append(min(masks[name].sum() for name in cameras))
             gt_centers.append(gt[0])
             gt_Rs.append(gt[1])
+            cam_positions.append([geometry[name][2][:3, 3] for name in cameras])
         if len(centers) < MIN_WINDOW_FRAMES:
             continue
         # Window aggregation: centers averaged, M averaged in the linear
@@ -254,8 +269,7 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
         # axis the two views share (src/base_env._hull_sqrtm), so measure that
         # directly rather than an axis angle — the angle is a pose-dependent
         # consequence of this one number, not an independent error mode.
-        depth_axis = camera_depth_axis(
-            [geometry[name][2][:3, 3] for name in cameras], gt_center)
+        depth_axis = camera_depth_axis(np.mean(cam_positions, axis=0), gt_center)
         depth_excess.append(depth_spread_excess(
             np.mean(Ms, axis=0), gt_sqrtm @ gt_sqrtm, depth_axis))
         eig_err.append(np.abs(np.sort(np.linalg.eigvalsh(est_sqrtm))

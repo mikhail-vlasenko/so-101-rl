@@ -25,6 +25,14 @@ SAM2_MODELS = {
     "base+": "facebook/sam2.1-hiera-base-plus",
 }
 
+# A streaming session keeps every frame's memory features, on the inference
+# device, for as long as it lives — 3600 frames of that exhausted a 24 GB GPU
+# while masking the shape dataset. SAM 2 only reads the most recent few plus
+# the conditioning frame, so the rest is dead weight. Roll the session at this
+# many frames, re-seeding it from the mask just produced so tracking carries
+# on unbroken. Bounds a rollout of any length, not just the offline pass.
+SESSION_MAX_FRAMES = 200
+
 
 def load_sam3():
     """Load the SAM 3 model + processor for one-shot text prompting.
@@ -38,11 +46,13 @@ def load_sam3():
     return model, processor
 
 
-def text_to_mask(sam3, frame_bgr, prompt):
-    """Highest-scoring mask for `prompt`: (HxW bool at frame resolution, score).
+def find_text_mask(sam3, frame_bgr, prompt):
+    """Highest-scoring mask for `prompt`: (HxW bool at frame resolution, score),
+    or None when the frame contains no match.
 
-    Raises when nothing matches — bad framing must fail loud at startup, not
-    silently track an empty mask.
+    None is a real answer offline, where a recording may run on after the
+    object left the view; callers that need the object present should use
+    `text_to_mask`.
     """
     model, processor = sam3
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -54,27 +64,40 @@ def text_to_mask(sam3, frame_bgr, prompt):
         target_sizes=inputs.get("original_sizes").tolist())[0]
     scores = results["scores"]
     if len(scores) == 0:
-        raise RuntimeError(f"SAM3 found no match for {prompt!r}")
+        return None
     top = int(scores.argmax())
     return results["masks"][top].cpu().numpy().astype(bool), float(scores[top])
+
+
+def text_to_mask(sam3, frame_bgr, prompt):
+    """`find_text_mask`, but refusing to proceed without a match — bad framing
+    must fail loud at rollout startup, not silently track an empty mask."""
+    found = find_text_mask(sam3, frame_bgr, prompt)
+    if found is None:
+        raise RuntimeError(f"SAM3 found no match for {prompt!r}")
+    return found
 
 
 class MaskTracker:
     """Streaming SAM 2 mask tracker bound to one camera stream."""
 
-    def __init__(self, model):
+    def __init__(self, model, session_max_frames=SESSION_MAX_FRAMES):
         from transformers import Sam2VideoModel, Sam2VideoProcessor
         repo = SAM2_MODELS[model]
         self._model = Sam2VideoModel.from_pretrained(
             repo, dtype=torch.bfloat16).to("cuda").eval()
         self._processor = Sam2VideoProcessor.from_pretrained(repo)
         self._session = None
+        self._session_max_frames = session_max_frames
+        self._frames = 0
 
     def prime(self, frame_bgr, mask):
         """Seed a fresh streaming session with an initial mask (from
-        text_to_mask) and condition it on this frame."""
+        text_to_mask) and condition it on this frame. Also how a session is
+        rolled over — cheap, since the model itself is not reloaded."""
         self._session = self._processor.init_video_session(
             inference_device="cuda", dtype=torch.bfloat16)
+        self._frames = 0
         inputs = self._preprocess(frame_bgr)
         self._processor.add_inputs_to_inference_session(
             inference_session=self._session, frame_idx=0, obj_ids=1,
@@ -87,7 +110,12 @@ class MaskTracker:
         An all-False mask means the tracker lost the object this frame — the
         caller's held-pose/age convention deals with it, same as a hidden tag.
         """
-        return self._forward(self._preprocess(frame_bgr))
+        mask = self._forward(self._preprocess(frame_bgr))
+        self._frames += 1
+        # Roll only on a good mask: an empty one cannot re-seed a session.
+        if self._frames >= self._session_max_frames and mask.any():
+            self.prime(frame_bgr, mask)
+        return mask
 
     def _preprocess(self, frame_bgr):
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
