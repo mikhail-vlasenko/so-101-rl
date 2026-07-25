@@ -10,19 +10,36 @@ The dual-channel pipeline is implemented end to end (plan:
 `real/tracking/{tag_body_calib,record_shapes,eval_estimator,hull_shape}.py`).
 Open, roughly in order:
 
-- **Record the dataset and run the acceptance eval.** Glue the eval tags
-  (`marker_spec` cube_eval ids), `tag_body_calib`, `record_shapes`, then
-  `eval_estimator --estimator hull` — ship on green, escalate per plan
-  decision 3 on the occlusion/component slices. Re-seed the placeholder
-  `live_sigma`/`precise_sigma`/`sqrtm_depth_sigma` (+ bias keys) in `conf/dr/*`
-  from the measured numbers.
+- **Record the full dataset.** Done so far: tags 1/3/4 glued and solved
+  (`real/tracking/sponge_tags.yaml`, 2.97 mm / 1.29 deg RMS), plus a 2-minute
+  smoke recording (`datasets/sponge_20260725_213859`, 19 static windows) whose
+  "implied knobs" report re-seeded `precise_sigma`, `obs_bias.live_sigma` and
+  `sqrtm_depth_sigma` in `conf/dr/{full,light}.yaml`. Still owed: the ~10 min
+  recording with the **occlusion sweep**, which the smoke run has none of.
+- **`obs_noise.live_sigma` is still a placeholder** — the only knob the smoke
+  dataset could not measure. Its static unoccluded windows give 0.05 mm, i.e.
+  the regime where the live channel is trivially perfect; the deployment number
+  comes from partial occlusion and motion blur. Held at 0.003 deliberately
+  (under-randomizing is the dangerous direction) until the occlusion sweep
+  exists. Note the acceptance eval reads its own envelope from these same
+  knobs, so a re-seeded knob is a measurement, never a pass.
+- **The √M size signal may be below the estimator's noise floor.** Measured
+  eigenvalue error p95 is 5.0 mm against a `cube_size_jitter/2/sqrt(3)` =
+  2.9 mm envelope — i.e. larger than the *entire* half-range of eigenvalue
+  variation the size DR produces, so a policy cannot read the episode's sponge
+  size out of √M. Do NOT fix this by inflating `cube_size_jitter`; that changes
+  the physical task rather than the perception. The error is dominated by the
+  depth spread below and is world-fixed (along the camera bisector), which the
+  sim models faithfully, so orientation/aspect may still survive where size
+  does not. Check what the trained policy actually uses before escalating.
 - **Hull's residual vertical bias.** Widening the cameras fixed the in-plane
   axes (real rig long axis 1.40x -> 1.02x) but the vertical half extent still
   reads ~1.45x: neither camera sees the top face, so the hull's ceiling is set
   by where the two silhouettes cross — azimuth can't fix it and raising a
-  camera doesn't either. Sim now models it (`obs_bias.sqrtm_depth_sigma`,
-  `src/base_env._hull_sqrtm`) at a placeholder magnitude; a third, higher view
-  is the alternative if the trained policy proves sensitive to it.
+  camera doesn't either. Sim models it (`obs_bias.sqrtm_depth_sigma`,
+  `src/base_env._hull_sqrtm`), now at the measured 12.8 mm — 60% above the
+  guess it replaced, and the estimator's dominant error mode. A third, higher
+  view is the alternative if the trained policy proves sensitive to it.
 - **Mono live fallback.** The live channel requires BOTH views; one lost view
   stales it even though a single mask still gives a ray. Measure the dataset's
   both-view availability first — only build the fallback if the number says

@@ -69,12 +69,13 @@ CUBE_ANGVEL_SCALE = 10.0
 QPOS_BIAS_SCALE = 0.02          # rad; 2x full's obs_bias.qpos_sigma
 MARKER_POS_BIAS_SCALE = 0.01    # m;   2x full's obs_bias.marker_pos_sigma
 MARKER_ROT_BIAS_SCALE = 0.1     # rad; 2x full's obs_bias.marker_rot_sigma
-LIVE_BIAS_SCALE = 0.006         # m;   2x full's obs_bias.live_sigma
-PRECISE_BIAS_SCALE = 0.006      # m;   2x full's obs_bias.precise_sigma
+LIVE_BIAS_SCALE = 0.008         # m;   2x full's obs_bias.live_sigma
+PRECISE_BIAS_SCALE = 0.011      # m;   2x full's obs_bias.precise_sigma
 # m; 2x full's obs_bias.sqrtm_depth_sigma. One-signed (a hull only ever adds
-# volume), so the centre sits at the mean of the half-normal it is drawn from.
-SQRTM_DEPTH_BIAS_CENTER = 0.006
-SQRTM_DEPTH_BIAS_SCALE = 0.016
+# volume), so the centre sits at the mean of the half-normal it is drawn from
+# (sigma*sqrt(2/pi)).
+SQRTM_DEPTH_BIAS_CENTER = 0.010
+SQRTM_DEPTH_BIAS_SCALE = 0.026
 COMMON_BIAS_SCALE = 0.005       # m;   2x full's obs_bias.marker_common_sigma
 # Camera pipeline delay: [0, 0.05] s maps to [-1, 1], covering both the
 # measured 42-52 ms range and the synchronous camera's 0.

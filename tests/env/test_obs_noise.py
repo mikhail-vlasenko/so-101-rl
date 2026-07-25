@@ -30,7 +30,7 @@ DEFAULT_OBS_NOISE = {
     "tag_px_noise": 0.2,
     "tag_depth_factor": 2.0,
     "live_sigma": 0.003,
-    "precise_sigma": 0.003,
+    "precise_sigma": 0.00534,
 }
 
 # Behavioral tests use distinct values per knob so the per-channel oracles

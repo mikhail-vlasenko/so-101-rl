@@ -25,11 +25,22 @@ obs_noise:
   tag_px_noise: 0.2        # px,    effective solvePnP corner error, arm marker tags
   tag_depth_factor: 2.0    #        depth-error amplification over the image-plane baseline
   # Tag-free cube channels (src/base_env.py dual-view pipeline): isotropic —
-  # two-view triangulation has no solvePnP depth pathology. PLACEHOLDERS until
-  # re-seeded from the Stage-3 dataset measurements (real/tracking/eval_estimator.py);
-  # these values also define the estimator acceptance envelope (2σ).
+  # two-view triangulation has no solvePnP depth pathology. Seeded from
+  # datasets/sponge_20260725_213859 (19 static windows, hull estimator) via the
+  # "implied knobs" report of real/tracking/eval_estimator.py; these values also
+  # define that eval's acceptance envelope (2σ), so re-seeding and re-scoring the
+  # same dataset is circular — a re-seeded knob is a measurement, not a pass.
+  # live_sigma is the exception and stays a PLACEHOLDER: that dataset's static
+  # windows measured 0.05 mm, but they are unoccluded and motionless, which is the
+  # one regime where the live channel is trivially good. Its real noise comes from
+  # partial occlusion and motion blur, so it needs the occlusion sweep the 2-minute
+  # smoke recording never had. Under-randomizing it is the dangerous direction:
+  # 0.003 is a guess held deliberately above the measurement.
   live_sigma: 0.003        # m,    per-frame triangulated visible-centroid jitter
-  precise_sigma: 0.003     # m,    per-refresh hull-center error
+  precise_sigma: 0.00534   # m,    per-refresh hull-center error; one dataset cannot
+                           #       split constant-per-episode from redrawn-per-refresh,
+                           #       so this and obs_bias.precise_sigma each carry half
+                           #       (in quadrature) of the measured 7.5 mm total
 
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
@@ -46,11 +57,18 @@ obs_bias:
   qpos_sigma: 0.01
   marker_pos_sigma: 0.002    # m,    per-tag glue placement / pose-estimate error
   marker_rot_sigma: 0.02     # rad,  tag alignment error (~3°)
-  live_sigma: 0.003          # m,    systematic visible-surface/segmentation offset
-  precise_sigma: 0.003       # m,    systematic hull-center offset
-  sqrtm_depth_sigma: 0.008   # m,    spread the visual hull adds along the axis the two
+  live_sigma: 0.00401        # m,    systematic visible-surface/segmentation offset. Only
+                             #       the *spread* of the per-window offset across sponge
+                             #       poses; its common part (measured [-2.2, 6.0, 0.1] mm,
+                             #       toward the cameras) is geometry the sim already
+                             #       reproduces by sampling the visible surface, so
+                             #       randomizing it here too would double-count it
+  precise_sigma: 0.00534     # m,    systematic hull-center offset — see the noise twin
+  sqrtm_depth_sigma: 0.01276 # m,    spread the visual hull adds along the axis the two
                              #       views cannot resolve (src/base_env._hull_sqrtm); a
-                             #       half-normal, since a hull only ever adds volume
+                             #       half-normal, since a hull only ever adds volume.
+                             #       Measured 60% above the 0.008 guess: with the rig's
+                             #       ~20 cm baseline this is the hull's dominant error
   marker_common_sigma: 0.0015 # m,   shared shift on all tags (table calib; ~extrinsics.yaml spread_mm 2.28)
 
 # Observation latency (sim2real): only camera-derived obs (markers, cube) lag.

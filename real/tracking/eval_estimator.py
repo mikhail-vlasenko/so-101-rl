@@ -204,6 +204,44 @@ def load_envelope():
     }
 
 
+def implied_knobs(live_resid, live_bias, center_err, depth_excess):
+    """The conf/dr/full.yaml knob values this dataset implies, so the sigmas
+    are measured rather than guessed.
+
+    The DR model treats every position knob as an isotropic per-component
+    Gaussian, so each is seeded from the per-component RMS of the matching
+    measurement:
+
+    - `obs_noise.live_sigma`: within-window live scatter. Each window's mean is
+      subtracted, so the degrees of freedom spent on those means are discounted.
+    - `obs_bias.live_sigma`: spread of the window-mean live offsets about their
+      common mean. The common part is visible-surface geometry, which the sim
+      reproduces on its own by sampling the visible surface — counting it here
+      would randomize a bias twice.
+    - `precise_sigma`: total center error *about zero*, i.e. including any
+      constant offset — nothing in sim reproduces a hull-center bias for free.
+      One dataset cannot say how much of that error is constant within an
+      episode (bias) versus redrawn per refresh (noise), so it splits equally
+      in quadrature; only their quadrature sum is measured.
+    - `obs_bias.sqrtm_depth_sigma`: RMS of the depth-spread excess. That knob is
+      a half-normal, whose second moment is sigma^2, so the RMS is sigma directly.
+    """
+    live_ss = sum(float(np.sum(np.square(r))) for r in live_resid)
+    live_dof = sum(3 * (len(r) - 1) for r in live_resid)
+    assert live_dof > 0, "no window has two live samples to scatter"
+    n = len(live_bias)
+    bias_centered = live_bias - live_bias.mean(axis=0)
+    precise_total = float(np.sqrt(np.mean(np.square(center_err))))
+    return {
+        "obs_noise.live_sigma": float(np.sqrt(live_ss / live_dof)),
+        "obs_bias.live_sigma": float(np.sqrt(np.sum(np.square(bias_centered))
+                                             / (3 * (n - 1)))),
+        "obs_noise.precise_sigma": precise_total / np.sqrt(2.0),
+        "obs_bias.precise_sigma": precise_total / np.sqrt(2.0),
+        "obs_bias.sqrtm_depth_sigma": float(np.sqrt(np.mean(np.square(depth_excess)))),
+    }
+
+
 def occlusion_fraction(areas):
     """Per-frame missing-area fraction relative to the window's peak mask area
     (the offline stand-in for the online area-vs-static-baseline gate)."""
@@ -231,7 +269,7 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
     center_err, axis_err, eig_err, frob_err = [], [], [], []
     depth_excess = []
     live_jitter_by_occ = {i: [] for i in range(len(OCCLUSION_BINS) - 1)}
-    live_window_means = []
+    live_window_means, live_resid = [], []
     for win in windows:
         centers, Ms, lives, occ = [], [], [], []
         gt_centers, gt_Rs, cam_positions = [], [], []
@@ -279,6 +317,7 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
         lives = np.array(lives)
         window_mean = lives.mean(axis=0)
         live_window_means.append(window_mean - gt_center)
+        live_resid.append(lives - window_mean)
         occ_frac = occlusion_fraction(occ)
         for i, (lo, hi) in enumerate(zip(OCCLUSION_BINS[:-1], OCCLUSION_BINS[1:])):
             sel = (occ_frac >= lo) & (occ_frac < hi)
@@ -328,6 +367,18 @@ def evaluate(dataset_dir: Path, estimator_name: str, prompt: str,
         ok &= passed
         print(f"  {'PASS' if passed else 'FAIL'}  {label:42s} "
               f"{value:.4f}  <= {bound:.4f}")
+    knobs = implied_knobs(live_resid, live_window_means, center_err, depth_excess)
+    print("\nconf/dr/full.yaml knobs implied by this dataset "
+          "(the envelope above is read from the CURRENT yaml — re-seeding it "
+          "from these numbers makes the corresponding check tautological, so "
+          "the question then becomes whether a policy trained at these sigmas "
+          "still succeeds):")
+    for key, value in knobs.items():
+        print(f"  {key:32s} {value:.5f}  ({value * 1e3:6.2f} mm)")
+    print(f"  [not a knob] mean live offset  "
+          f"{np.round(live_window_means.mean(axis=0) * 1e3, 2)} mm — "
+          f"visible-surface geometry, which the sim reproduces by construction")
+
     print("\nACCEPTED — ship it" if ok else
           "\nREJECTED — escalate per plan decision 3 using the slices above")
     return ok
