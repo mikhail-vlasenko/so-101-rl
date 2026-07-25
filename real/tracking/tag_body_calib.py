@@ -45,10 +45,13 @@ SPONGE_TAGS_PATH = Path(__file__).resolve().parent / "sponge_tags.yaml"
 # axis). EDIT to match the physical gluing before running; ids not glued this
 # session can simply be removed. Id 1 on a largest (+z) face matches the
 # historic cube_tag site.
+#
+# The solve chains through pairs seen together in one frame, and opposite faces
+# are never co-visible — so the glued set must be MUTUALLY ADJACENT (any two
+# share an edge), not opposite pairs. Three such tags leave every resting
+# orientation with at least one tag off the table.
 FACE_OF_TAG = {
-    1: "+z", 3: "-z",
-    4: "+y", 5: "-y",
-    6: "+x", 7: "-x",
+    1: "+z", 3: "+y", 4: "+x",
 }
 
 # Length scale (m) weighting rotational residuals against translational ones
