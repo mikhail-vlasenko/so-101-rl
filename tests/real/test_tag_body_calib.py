@@ -8,7 +8,11 @@ from scipy.spatial.transform import Rotation
 
 from real.calib.extrinsics import mat_inv
 from real.tracking.tag_body_calib import (
+    face_assignments,
     face_frame,
+    face_margins,
+    residual_rms,
+    solve_faces_and_placements,
     solve_tag_placements,
     tag_body_transform,
 )
@@ -16,6 +20,26 @@ from real.tracking.tag_body_calib import (
 HALF = np.array([0.03, 0.02, 0.0125])
 
 FACES = {1: "+z", 3: "-z", 4: "+y", 5: "-y", 6: "+x", 7: "-x"}
+
+# The box's rotation group: identity plus a half turn about each axis. These
+# relabel the face names without moving any physical face, so the face search
+# cannot (and need not) distinguish between them.
+BOX_SYMMETRIES = (np.diag([1, 1, 1]), np.diag([1, -1, -1]),
+                  np.diag([-1, 1, -1]), np.diag([-1, -1, 1]))
+
+
+def _relabel(faces, S):
+    """`faces` as named after applying box symmetry `S`."""
+    out = {}
+    for tag, face in faces.items():
+        k = "xyz".index(face[1])
+        sign = (1 if face[0] == "+" else -1) * int(S[k, k])
+        out[tag] = ("+" if sign > 0 else "-") + face[1]
+    return out
+
+
+def _symmetry_orbit(faces):
+    return {frozenset(_relabel(faces, S).items()) for S in BOX_SYMMETRIES}
 
 
 def test_face_frames_are_right_handed_outward():
@@ -38,9 +62,10 @@ def test_tag_body_transform_geometry():
     np.testing.assert_allclose(T[:3, 3], [-HALF[0], 0.0, 0.0], atol=1e-12)
 
 
-def _synthetic_pairs(rng, truth, n_pairs, noise_pos=0.0, noise_rot=0.0):
+def _synthetic_pairs(rng, truth, n_pairs, noise_pos=0.0, noise_rot=0.0,
+                     faces=FACES):
     """Random co-visibility pairs with optional measurement noise."""
-    T = {tag: tag_body_transform(FACES[tag], HALF, *params)
+    T = {tag: tag_body_transform(faces[tag], HALF, *params)
          for tag, params in truth.items()}
     ids = sorted(truth)
     pairs = []
@@ -57,9 +82,16 @@ def _synthetic_pairs(rng, truth, n_pairs, noise_pos=0.0, noise_rot=0.0):
     return pairs
 
 
-def _random_truth(rng):
-    return {tag: (rng.uniform(-0.004, 0.004), rng.uniform(-0.004, 0.004),
-                  rng.uniform(-0.3, 0.3)) for tag in FACES}
+def _random_truth(rng, faces=FACES):
+    """Physically realizable placements: a glued tag cannot overhang its face,
+    and the solver bounds placements accordingly."""
+    truth = {}
+    for tag, face in faces.items():
+        margin_u, margin_v = face_margins(tag, face, HALF)
+        truth[tag] = (rng.uniform(-0.8 * margin_u, 0.8 * margin_u),
+                      rng.uniform(-0.8 * margin_v, 0.8 * margin_v),
+                      rng.uniform(-0.3, 0.3))
+    return truth
 
 
 def test_solver_recovers_exact_placements():
@@ -102,6 +134,99 @@ def test_solver_transform_roundtrip():
         T_true = tag_body_transform(FACES[tag], HALF, *truth[tag])
         T_est = tag_body_transform(FACES[tag], HALF, *solved[tag])
         np.testing.assert_allclose(T_est @ probe, T_true @ probe, atol=2e-4)
+
+
+def test_face_assignments_search_signs_only():
+    """Axes are declared (unidentifiable from pair data); only the outward
+    directions are searched."""
+    axes = {1: "z", 3: "y", 4: "x"}
+    combos = list(face_assignments(axes))
+    assert len(combos) == 8
+    assert all({f[1] for f in faces.values()} == {"x", "y", "z"} for faces in combos)
+    assert len({frozenset(faces.items()) for faces in combos}) == 8
+
+
+def test_face_assignments_reject_two_tags_on_one_axis():
+    with pytest.raises(AssertionError):
+        list(face_assignments({1: "z", 3: "z"}))
+
+
+def test_swapping_the_narrow_axes_is_invisible_but_the_large_face_is_not():
+    """Why AXIS_OF_TAG is declared rather than fitted. Pair evidence fixes the
+    configuration only up to a global rigid transform, and three mutually
+    perpendicular faces always admit one — so a wrong axis costs no residual.
+    Only the on-face bound can object, and it objects only when the named face
+    is too small for its tag. Deterministic: tags glued a few mm off center.
+    """
+    truth_faces = {1: "+z", 3: "+y", 4: "+x"}
+    truth = {1: (0.004, -0.002, 0.2), 3: (0.001, 0.006, -0.1),
+             4: (-0.003, 0.001, 0.3)}
+    T = {tag: tag_body_transform(truth_faces[tag], HALF, *truth[tag])
+         for tag in truth}
+    ids = sorted(T)
+    pairs = [(i, j, mat_inv(T[i]) @ T[j]) for i in ids for j in ids if i < j] * 40
+
+    # The two narrow faces exchanged: fits exactly, and every tag sits well
+    # inside its face, so nothing at all flags the error.
+    solved, res = solve_tag_placements(pairs, {1: "+z", 3: "+x", 4: "-y"}, HALF)
+    assert residual_rms(res)[0] < 0.01
+    for tag, (u, v, _) in solved.items():
+        margins = face_margins(tag, {1: "+z", 3: "+x", 4: "-y"}[tag], HALF)
+        assert abs(u) < margins[0] and abs(v) < margins[1]
+
+    # The large-face tag moved onto a 40x25 face: the bound cannot absorb it.
+    _, res = solve_tag_placements(pairs, {1: "+x", 3: "+z", 4: "+y"}, HALF)
+    assert residual_rms(res)[0] > 1.0
+
+
+def test_face_margins_shrink_by_the_printed_tag():
+    """A 20 mm tag has 10 mm of slack on the 60 mm axis but only 2.5 mm on the
+    25 mm one — the narrow faces are why a wrong assignment is detectable."""
+    np.testing.assert_allclose(face_margins(1, "+z", HALF), (0.02, 0.01))
+    # +y's in-plane axes are (z, x): the tight bound lands on u, not v.
+    np.testing.assert_allclose(face_margins(1, "+y", HALF), (0.0025, 0.02))
+    np.testing.assert_allclose(face_margins(1, "+x", HALF), (0.01, 0.0025))
+
+
+def test_sign_search_recovers_the_gluing_up_to_box_symmetry():
+    """Given the axes, the sign search must land on the true gluing or one of
+    its three rotational images, and the reflected patterns must lose big."""
+    rng = np.random.default_rng(4)
+    truth_faces = {1: "+z", 3: "+y", 4: "-x"}
+    truth = _random_truth(rng, truth_faces)
+    pairs = _synthetic_pairs(rng, truth, n_pairs=200, noise_pos=0.0005,
+                             noise_rot=0.005, faces=truth_faces)
+
+    axes = {tag: face[1] for tag, face in truth_faces.items()}
+    scored = solve_faces_and_placements(pairs, axes, HALF)
+    orbit = _symmetry_orbit(truth_faces)
+    assert frozenset(scored[0][1].items()) in orbit
+    # The four rotational images fit equally well and sort to the front; the
+    # four reflections are not rigid motions and cannot fit at all.
+    assert {frozenset(faces.items()) for _, faces, _, _ in scored[:4]} == orbit
+    assert scored[4][0] > 100.0 * scored[3][0]
+
+
+def test_symmetry_images_agree_on_the_gt_body_pose_up_to_a_half_turn():
+    """Why the tie is harmless: the images differ by a 180-degree body rotation,
+    which leaves the sponge's center and its box second moment unchanged."""
+    rng = np.random.default_rng(5)
+    truth_faces = {1: "+z", 3: "+y", 4: "+x"}
+    truth = _random_truth(rng, truth_faces)
+    pairs = _synthetic_pairs(rng, truth, n_pairs=120, faces=truth_faces)
+    axes = {tag: face[1] for tag, face in truth_faces.items()}
+    scored = solve_faces_and_placements(pairs, axes, HALF)
+
+    # Each image implies a body frame; a tag's pose in it differs only by the
+    # symmetry rotation, so the box's second moment matrix is identical.
+    moments = []
+    for _, faces, solved, _ in scored[:4]:
+        T = tag_body_transform(faces[1], HALF, *solved[1])
+        R = mat_inv(T)[:3, :3]          # body axes as seen from tag 1
+        moments.append((R * HALF ** 2) @ R.T)
+    for M in moments[1:]:
+        # atol is the fit's convergence floor, four orders below the moments.
+        np.testing.assert_allclose(M, moments[0], atol=1e-7)
 
 
 def test_solver_rejects_undeclared_tag():
