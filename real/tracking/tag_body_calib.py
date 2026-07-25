@@ -89,6 +89,20 @@ ROT_WEIGHT_M = 0.02
 # Weak zero-prior on (u, v, yaw): pins gauge freedom without fighting the data
 # (the pair residuals are ~1e-3 m scale; the prior contributes ~1e-3 * offset).
 PRIOR_WEIGHT = 1e-3
+# Degrees from a pair's consensus rotation beyond which a measurement is not
+# noise but solvePnP's planar-square pose ambiguity: for a near-fronto-parallel
+# square the solver can return the pose mirrored about an in-plane axis, which
+# lands ~140 deg out. Measured on the rig, good detections sit within 3.5 deg
+# at p90 and the flips are ~2% of frames, so anything past this gap is a flip.
+# They must be removed rather than absorbed: six 140 deg outliers outweigh
+# three hundred 2 deg inliers in a squared-error fit.
+PAIR_FLIP_REJECT_DEG = 20.0
+# How far the printed square may hang past a face edge. A 20 mm tag on a 25 mm
+# face has only +-2.5 mm of play, and the tags are glued to card on soft foam,
+# so a slight overhang is ordinary — clamping it instead would bias the solved
+# placement. Kept small: the bound is what rules out a face too small to hold
+# its tag at all (see the module docstring).
+TAG_OVERHANG_ALLOWANCE_M = 0.003
 
 _AXES = {"x": 0, "y": 1, "z": 2}
 
@@ -133,11 +147,11 @@ def tag_body_transform(face, half_extents, u, v, yaw):
 
 
 def face_margins(tag, face, half_extents):
-    """How far the tag's center may sit from the face center along (u, v)
-    before its printed square overhangs an edge. Non-positive on either axis
-    means the tag is too big for that face."""
+    """How far the tag's center may sit from the face center along (u, v),
+    allowing TAG_OVERHANG_ALLOWANCE_M of the printed square past the edge.
+    Non-positive on either axis means the tag is too big for that face."""
     _, R_face = face_frame(face, half_extents)
-    half_tag = TAG_SIZE_MM[tag] / 2e3
+    half_tag = TAG_SIZE_MM[tag] / 2e3 - TAG_OVERHANG_ALLOWANCE_M
     return tuple(half_extents[int(np.argmax(np.abs(R_face[:, col])))] - half_tag
                  for col in (0, 1))
 
@@ -200,6 +214,28 @@ def solve_tag_placements(pairs, faces, half_extents):
     assert fit.success, f"tag placement solve failed: {fit.message}"
     solved = {tag: tuple(fit.x[idx[tag]:idx[tag] + 3]) for tag in ids}
     return solved, fit.fun[:-len(x0)].reshape(-1, 6)
+
+
+def reject_flipped_pairs(pairs, max_deviation_deg=PAIR_FLIP_REJECT_DEG):
+    """Drop pair measurements whose relative rotation disagrees with the rest
+    of their pair's — see PAIR_FLIP_REJECT_DEG. The tags are rigid on one box,
+    so every measurement of a given pair should report the same transform.
+    Returns (kept pairs, dropped count)."""
+    kept, dropped = [], 0
+    for key in sorted({(i, j) for i, j, _ in pairs}):
+        group = [p for p in pairs if p[:2] == key]
+        R = Rotation.from_matrix(np.stack([T[:3, :3] for _, _, T in group]))
+        keep = np.ones(len(group), dtype=bool)
+        # Two passes: the first consensus is itself pulled off by the flips.
+        for _ in range(2):
+            angles = np.degrees(np.linalg.norm(
+                (R * R[keep].mean().inv()).as_rotvec(), axis=1))
+            keep = angles <= max_deviation_deg
+        assert keep.sum() >= 2, (
+            f"pair {key}: only {keep.sum()} mutually consistent measurements")
+        kept.extend(p for p, k in zip(group, keep) if k)
+        dropped += int((~keep).sum())
+    return kept, dropped
 
 
 def residual_rms(res):
@@ -345,6 +381,8 @@ def main():
         if not pairs:
             raise RuntimeError("no frame had >= 2 co-visible sponge tags")
         save_pairs(PAIRS_PATH, pairs)
+    pairs, dropped = reject_flipped_pairs(pairs)
+    print(f"dropped {dropped} flipped measurements, {len(pairs)} pairs remain")
     observed = sorted({i for p in pairs for i in p[:2]})
     missing = set(observed) - set(AXIS_OF_TAG)
     assert not missing, f"tags {sorted(missing)} seen but not in AXIS_OF_TAG"
@@ -368,7 +406,7 @@ def main():
               f"yaw={np.degrees(yaw):+.1f} deg{pinned}")
     pos_rms, rot_rms = residual_rms(res)
     print(f"pair residuals: {pos_rms:.2f} mm RMS, {rot_rms:.2f} deg RMS")
-    print("offsets pinned at a face edge mean AXIS_OF_TAG names a face too "
+    print("a placement pinned at its bound means AXIS_OF_TAG names a face too "
           "small for its tag. Swapping the two narrow axes shows up in neither "
           "the residual nor the offsets — measure those faces.")
     save_sponge_tags(SPONGE_TAGS_PATH, half_extents, faces, solved, res)

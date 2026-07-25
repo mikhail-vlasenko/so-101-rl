@@ -7,10 +7,13 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from real.calib.extrinsics import mat_inv
+from real.marker_spec import TAG_SIZE_MM
 from real.tracking.tag_body_calib import (
+    TAG_OVERHANG_ALLOWANCE_M,
     face_assignments,
     face_frame,
     face_margins,
+    reject_flipped_pairs,
     residual_rms,
     solve_faces_and_placements,
     solve_tag_placements,
@@ -83,8 +86,8 @@ def _synthetic_pairs(rng, truth, n_pairs, noise_pos=0.0, noise_rot=0.0,
 
 
 def _random_truth(rng, faces=FACES):
-    """Physically realizable placements: a glued tag cannot overhang its face,
-    and the solver bounds placements accordingly."""
+    """Physically realizable placements: a glued tag stays within its face's
+    margins (which allow a small overhang), as the solver's bounds require."""
     truth = {}
     for tag, face in faces.items():
         margin_u, margin_v = face_margins(tag, face, HALF)
@@ -180,12 +183,16 @@ def test_swapping_the_narrow_axes_is_invisible_but_the_large_face_is_not():
 
 
 def test_face_margins_shrink_by_the_printed_tag():
-    """A 20 mm tag has 10 mm of slack on the 60 mm axis but only 2.5 mm on the
-    25 mm one — the narrow faces are why a wrong assignment is detectable."""
-    np.testing.assert_allclose(face_margins(1, "+z", HALF), (0.02, 0.01))
+    """A 20 mm tag, less the 3 mm overhang allowance, leaves 13 mm of play on
+    the 60 mm axis but only 5.5 mm on the 25 mm one."""
+    half_tag = TAG_SIZE_MM[1] / 2e3 - TAG_OVERHANG_ALLOWANCE_M
+    np.testing.assert_allclose(face_margins(1, "+z", HALF),
+                               (HALF[0] - half_tag, HALF[1] - half_tag))
     # +y's in-plane axes are (z, x): the tight bound lands on u, not v.
-    np.testing.assert_allclose(face_margins(1, "+y", HALF), (0.0025, 0.02))
-    np.testing.assert_allclose(face_margins(1, "+x", HALF), (0.01, 0.0025))
+    np.testing.assert_allclose(face_margins(1, "+y", HALF),
+                               (HALF[2] - half_tag, HALF[0] - half_tag))
+    np.testing.assert_allclose(face_margins(1, "+x", HALF),
+                               (HALF[1] - half_tag, HALF[2] - half_tag))
 
 
 def test_sign_search_recovers_the_gluing_up_to_box_symmetry():
@@ -227,6 +234,29 @@ def test_symmetry_images_agree_on_the_gt_body_pose_up_to_a_half_turn():
     for M in moments[1:]:
         # atol is the fit's convergence floor, four orders below the moments.
         np.testing.assert_allclose(M, moments[0], atol=1e-7)
+
+
+def test_reject_flipped_pairs_drops_mirrored_solvepnp_solutions():
+    """On the rig 2% of detections came back mirrored ~140 deg out, and in a
+    squared-error fit those few outweighed the hundreds of good ones."""
+    rng = np.random.default_rng(9)
+    truth_faces = {1: "+z", 3: "+y", 4: "+x"}
+    truth = _random_truth(rng, truth_faces)
+    pairs = _synthetic_pairs(rng, truth, n_pairs=90, noise_pos=0.0005,
+                             noise_rot=0.01, faces=truth_faces)
+    flip = Rotation.from_rotvec(np.radians(140.0) * np.array([1.0, 0.0, 0.0]))
+    corrupted = {5, 23, 61}
+    for k in corrupted:
+        i, j, T = pairs[k]
+        T = T.copy()
+        T[:3, :3] = T[:3, :3] @ flip.as_matrix()
+        pairs[k] = (i, j, T)
+
+    kept, dropped = reject_flipped_pairs(pairs)
+    assert dropped == len(corrupted)
+    assert len(kept) == len(pairs) - len(corrupted)
+    for k in corrupted:
+        assert not any(np.array_equal(T, pairs[k][2]) for _, _, T in kept)
 
 
 def test_solver_rejects_undeclared_tag():
