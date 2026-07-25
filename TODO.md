@@ -23,6 +23,19 @@ Open, roughly in order:
   stales it even though a single mask still gives a ray. Measure the dataset's
   both-view availability first — only build the fallback if the number says
   it matters.
+- **Static-gate noise margin during settling.** `is_static` judges consecutive
+  live-centroid speeds, which divide by the frame interval and so amplify
+  measurement noise by 1/dt. The first real dry run
+  (`rollout_lift_1784992194`) says the margin is comfortable while genuinely
+  static — 0.13 mm of net drift over 280 ticks, worst step 0.37 mm
+  (0.006 m/s) against the 0.02 m/s bound, no false trip — and that the test
+  reacts to true motion onset within one frame (it caught a 2.7 mm hand
+  nudge in the last three ticks, which a window-extent test would have
+  missed until 5 mm of travel). Unmeasured: the settling regime right after
+  motion, where blur, camera-sync skew and tracker lag all inflate the live
+  noise. Measure false-trip rate on the dataset's post-motion segments before
+  changing the statistic — a spatial-extent test trades onset latency for
+  noise robustness and this rig may not need the trade.
 - **Occlusion-gate baseline honesty.** `ObjectSource` gauges visibility as
   mask area vs the current static window's max, so an occlusion present from
   the window's first frame inflates the baseline and can let a degraded hull

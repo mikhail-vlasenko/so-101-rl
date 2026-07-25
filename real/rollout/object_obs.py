@@ -33,7 +33,12 @@ from real.tracking.hull_shape import hull_estimate
 from real.vision.detect import make_detector
 from real.vision.pose import PoseEstimator
 from real.vision.stereo import pixel_rays, triangulate_rays
-from src.shape_obs import ObjectChannelDriver, sqrtm_from_cov, sqrtm_from_upper
+from src.shape_obs import (
+    MARKER_AGE_CAP_S,
+    ObjectChannelDriver,
+    sqrtm_from_cov,
+    sqrtm_from_upper,
+)
 
 # Same table-anchor smoothing as the marker pipeline.
 CAM_EMA_ALPHA = 0.05
@@ -113,8 +118,9 @@ class ObjectSource:
     def start(self, warmup_timeout_s: float = 60.0) -> None:
         """Prompt SAM3 on both views (fails loud when the object isn't
         found), prime the per-camera SAM2 trackers, and start the tracking +
-        hull threads. Blocks until the first live measurement lands so the
-        rollout begins with a real object fix."""
+        hull threads. Blocks until BOTH channels carry a real measurement, so
+        the rollout begins on the obs distribution the policy trained against
+        (see the precise-channel wait below)."""
         from real.tracking.sam_seg import MaskTracker, load_sam3, text_to_mask
 
         for name in self.cameras:
@@ -140,13 +146,22 @@ class ObjectSource:
         while True:
             if self.error is not None:
                 raise self.error
-            live, live_age, *_ = self.object_obs()
-            if live_age < 0.5:
+            _, live_age, _, _, precise_age = self.object_obs()
+            # The precise channel is waited on too, not just the live fix: the
+            # sim twin seeds pre-episode static evidence at reset
+            # (base_env's seed_static, modelling the object settling before a
+            # rollout starts), so the policy has never seen the never-measured
+            # state — zero √M at the age cap — that the real rig otherwise
+            # serves for its first STATIC_DWELL_S plus a hull pass.
+            if live_age < 0.5 and precise_age < MARKER_AGE_CAP_S:
                 return
             if time.monotonic() > deadline:
                 raise RuntimeError(
-                    f"no live object fix within {warmup_timeout_s:.0f} s of "
-                    "ObjectSource.start(); check object placement and prompt")
+                    f"object channels not ready within {warmup_timeout_s:.0f} s "
+                    f"of ObjectSource.start() (live_age {live_age:.2f} s, "
+                    f"precise_age {precise_age:.2f} s); the precise channel "
+                    "needs the object still and unoccluded in both views for a "
+                    "settling window — check placement, lighting and prompt")
             time.sleep(0.05)
 
     def stop(self) -> None:
