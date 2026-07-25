@@ -143,6 +143,10 @@ td a { color: var(--accent); }
   min-height: 120px;
 }
 
+.stream-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 0.8rem; }
+.stream-grid figure { margin: 0; }
+.stream-grid figcaption { font-size: 0.78rem; color: var(--muted); margin-top: 0.3rem; }
+
 .rollout-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
 .rollout-grid img { width: 100%; border-radius: 6px; border: 1px solid var(--border); }
 .rollout-grid figure { margin: 0; }

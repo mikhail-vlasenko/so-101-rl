@@ -1,14 +1,17 @@
 """In-server camera capture for the panel's camera page.
 
-Owns the C922 while streaming: a capture thread reads frames, runs the marker
-detector + pose estimator, draws the same overlays as `real.vision.marker_view`
-(via `real.vision.overlay.annotate_detections`), and publishes JPEGs into a FrameBox
-that the panel serves at /camera/stream.
+Owns both C922 units while streaming: one capture thread per rig camera reads
+frames, runs the marker detector + that unit's pose estimator, draws the same
+overlays as `real.vision.marker_view` (via `real.vision.overlay.annotate_detections`),
+and publishes JPEGs into a per-camera FrameBox that the panel serves at
+/camera/stream/{name}. Each camera is opened by rig name
+(`real.vision.stereo_rig`), so the overlay poses use per-lens intrinsics at the
+focus they were calibrated at — same configuration the stereo scripts use.
 
 The service registers itself as a CAMERA holder in the Runner's resource
 accounting, so starting the stream blocks native camera tools (and vice
-versa) with a clear 409 instead of two processes fighting over /dev/video0.
-`stop()` is synchronous: when it returns, the device is released.
+versa) with a clear 409 instead of two processes fighting over the devices.
+`stop()` is synchronous: when it returns, the devices are released.
 """
 
 from __future__ import annotations
@@ -17,12 +20,12 @@ import threading
 
 import cv2
 
-from real.calib.calibrate_camera import FOCUS_ABSOLUTE
-from real.vision.camera import open_camera, set_exposure, v4l2_set
+from real.vision.camera import set_exposure, v4l2_set
 from real.vision.detect import make_detector
 from real.marker_spec import MARKER_EXPOSURE, MARKER_GAIN
 from real.vision.overlay import annotate_detections
-from real.vision.pose import PoseEstimator, load_intrinsics
+from real.vision.pose import PoseEstimator
+from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera, rig_device_index
 
 from panel.registry import Resource
 from panel.runner import ResourceBusyError, Runner
@@ -36,81 +39,103 @@ class CameraService:
     def __init__(self, runner: Runner) -> None:
         self._runner = runner
         self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
+        self._threads: dict[str, threading.Thread] = {}
         self._stop_flag = threading.Event()
-        self._cap = None
-        self.box = FrameBox()
+        self._caps: dict[str, object] = {}
+        self._devices: dict[str, int] = {}
+        self.boxes = {name: FrameBox() for name in CAMERA_NAMES}
         self.family: str | None = None
         self.exposure: int | None = None
         self.gain: int | None = None
 
     def is_running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        return any(t.is_alive() for t in self._threads.values())
 
     def start(self, family: str, exposure: int, gain: int) -> None:
-        """Claim the camera and start the capture thread. Raises
+        """Claim both cameras and start one capture thread each. Raises
         ResourceBusyError if anything (including a panel-launched native tool)
-        holds the camera, and ValueError on a bad family."""
+        holds the cameras, ValueError on a bad family, and RuntimeError if a
+        camera isn't connected."""
         with self._lock:
             if self.is_running():
-                raise ResourceBusyError(f"camera is in use by {HOLDER_NAME}")
-            detector = make_detector(family)  # validates family before claiming
+                raise ResourceBusyError(f"cameras are in use by {HOLDER_NAME}")
+            # One detector per thread: the AprilTag backend wraps a C detector
+            # with internal worker state, so the two loops must not share one.
+            detectors = {name: make_detector(family) for name in CAMERA_NAMES}
             self._runner.claim_external(HOLDER_NAME, {Resource.CAMERA})
-            opened = False
+            estimators = {}
             try:
-                self._cap = open_camera(focus=FOCUS_ABSOLUTE,
-                                        exposure=exposure, gain=gain)
-                opened = True
-            finally:
-                if not opened:
-                    self._runner.release_external(HOLDER_NAME)
+                for name in CAMERA_NAMES:
+                    cap, camera_matrix, dist_coeffs = open_rig_camera(
+                        name, exposure=exposure, gain=gain)
+                    self._caps[name] = cap
+                    self._devices[name] = rig_device_index(name)
+                    estimators[name] = PoseEstimator(camera_matrix, dist_coeffs)
+            except BaseException:
+                # A missing/busy second camera must not leave the first one open.
+                self._release_devices()
+                self._runner.release_external(HOLDER_NAME)
+                raise
             self.family = family
             self.exposure = exposure
             self.gain = gain
-            estimator = PoseEstimator(*load_intrinsics())
             self._stop_flag.clear()
-            self._thread = threading.Thread(
-                target=self._capture_loop, args=(detector, estimator),
-                name="panel-camera", daemon=True)
-            self._thread.start()
+            self._threads = {
+                name: threading.Thread(
+                    target=self._capture_loop,
+                    args=(name, detectors[name], estimators[name]),
+                    name=f"panel-camera-{name}", daemon=True)
+                for name in CAMERA_NAMES}
+            for thread in self._threads.values():
+                thread.start()
 
-    def _capture_loop(self, detector, estimator) -> None:
+    def _capture_loop(self, name: str, detector, estimator) -> None:
+        cap = self._caps[name]
+        box = self.boxes[name]
         while not self._stop_flag.is_set():
-            ok, frame = self._cap.read()
+            ok, frame = cap.read()
             if not ok:
-                raise RuntimeError("camera read failed")
+                raise RuntimeError(f"camera read failed ({name})")
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             dets = detector.detect(gray)
             annotate_detections(frame, dets, estimator)
             seen = sorted(d.id for d in dets)
-            cv2.putText(frame, f"{self.family}  detected {len(seen)}: {seen}", (12, 32),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(frame, f"{name}  {self.family}  detected {len(seen)}: {seen}",
+                        (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.putText(frame, f"exposure {self.exposure}   gain {self.gain}", (12, 64),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             if not ok:
-                raise RuntimeError("JPEG encoding of camera frame failed")
-            self.box.publish(jpeg.tobytes())
+                raise RuntimeError(f"JPEG encoding of camera frame failed ({name})")
+            box.publish(jpeg.tobytes())
+
+    def _release_devices(self) -> None:
+        for cap in self._caps.values():
+            cap.release()
+        self._caps.clear()
+        self._devices.clear()
 
     def stop(self) -> None:
-        """Synchronously stop the thread and release the device + claim."""
+        """Synchronously stop the threads and release the devices + claim."""
         with self._lock:
-            if self._thread is None:
+            if not self._threads:
                 return
             self._stop_flag.set()
-            self._thread.join(timeout=10.0)
-            assert not self._thread.is_alive(), "camera thread refused to stop"
-            self._thread = None
-            self._cap.release()
-            self._cap = None
+            for name, thread in self._threads.items():
+                thread.join(timeout=10.0)
+                assert not thread.is_alive(), f"camera thread {name} refused to stop"
+            self._threads = {}
+            self._release_devices()
             self._runner.release_external(HOLDER_NAME)
 
     def set_exposure(self, value: int) -> None:
-        set_exposure(value)
+        for device in self._devices.values():
+            set_exposure(value, device)
         self.exposure = value
 
     def set_gain(self, value: int) -> None:
-        v4l2_set("gain", value)
+        for device in self._devices.values():
+            v4l2_set("gain", value, device)
         self.gain = value
 
 

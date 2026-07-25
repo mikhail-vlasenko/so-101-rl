@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}SO-101 panel{% endblock %}</title>
-  <link rel="stylesheet" href="/static/panel.css">
+  <link rel="stylesheet" href="/static/panel.css?v={{ static_v }}">
 </head>
 <body>
 <nav>
@@ -21,6 +21,6 @@
 <main>
 {% block content %}{% endblock %}
 </main>
-<script src="/static/panel.js"></script>
+<script src="/static/panel.js?v={{ static_v }}"></script>
 </body>
 </html>

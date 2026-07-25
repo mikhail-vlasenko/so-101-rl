@@ -236,13 +236,16 @@ function initCameraPage() {
   const view = document.getElementById("camera-view");
   if (!view) return;
   const wrap = document.getElementById("camera-stream-wrap");
-  const img = document.getElementById("camera-stream");
+  const imgs = wrap.querySelectorAll("img.camera-stream");
   const startBtn = document.getElementById("camera-start");
   const stopBtn = document.getElementById("camera-stop");
 
   function showStream(on) {
     wrap.classList.toggle("hidden", !on);
-    img.src = on ? `/camera/stream?t=${Date.now()}` : "";
+    const t = Date.now();
+    for (const img of imgs) {
+      img.src = on ? `/camera/stream/${img.dataset.camera}?t=${t}` : "";
+    }
     startBtn.disabled = on;
     stopBtn.disabled = !on;
   }

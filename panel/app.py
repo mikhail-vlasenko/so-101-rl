@@ -16,6 +16,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from real.vision.stereo_rig import CAMERA_NAMES
+
 from panel.camera_service import CameraService, default_settings
 from panel.registry import (
     PAGES,
@@ -46,6 +48,16 @@ FILE_ROOTS = {
 }
 
 SSE_KEEPALIVE_S = 15.0
+
+
+def static_version() -> str:
+    """Cache-buster for the /static URLs: newest mtime under panel/static.
+
+    Templates are re-read from disk on every render but the browser happily
+    keeps a cached panel.js, so without this a new template can run old JS —
+    which fails silently (missing element ids) instead of loudly.
+    """
+    return str(max(int(p.stat().st_mtime) for p in (PANEL_DIR / "static").iterdir()))
 
 
 def run_summary(run: Run) -> dict:
@@ -80,6 +92,7 @@ def create_app(runner: Runner | None = None) -> FastAPI:
     app.state.settings = SettingsStore()
 
     templates = Jinja2Templates(directory=str(PANEL_DIR / "templates"))
+    templates.env.globals["static_v"] = static_version()
     app.mount("/static", StaticFiles(directory=str(PANEL_DIR / "static")), name="static")
 
     @app.exception_handler(ResourceBusyError)
@@ -112,6 +125,7 @@ def create_app(runner: Runner | None = None) -> FastAPI:
             request, "camera.html",
             {**page_ctx("camera"), "specs": specs,
              "camera_streaming": app.state.camera.is_running(),
+             "camera_names": CAMERA_NAMES,
              "camera_defaults": default_settings()})
 
     @app.get("/artifacts")
@@ -277,6 +291,8 @@ def create_app(runner: Runner | None = None) -> FastAPI:
             app.state.camera.start(family, exposure, gain)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except RuntimeError as e:   # a rig camera isn't connected
+            raise HTTPException(503, str(e))
         return {"streaming": True, "family": family, "exposure": exposure, "gain": gain}
 
     @app.post("/api/camera/stop")
@@ -300,16 +316,19 @@ def create_app(runner: Runner | None = None) -> FastAPI:
         app.state.camera.set_gain(int(body["value"]))
         return {"gain": app.state.camera.gain}
 
-    @app.get("/camera/stream")
-    def camera_stream():
+    @app.get("/camera/stream/{name}")
+    def camera_stream(name: str):
         camera = app.state.camera
+        if name not in CAMERA_NAMES:
+            raise HTTPException(404, f"unknown camera {name!r}")
         if not camera.is_running():
             raise HTTPException(503, "camera stream is not running")
+        box = camera.boxes[name]
 
         def mjpeg():
             seq = 0
             while camera.is_running():
-                frame = camera.box.wait_newer(seq, timeout=1.0)
+                frame = box.wait_newer(seq, timeout=1.0)
                 if frame is None:
                     continue
                 jpeg, seq = frame

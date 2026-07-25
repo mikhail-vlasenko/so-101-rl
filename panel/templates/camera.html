@@ -9,9 +9,10 @@
     <h2>Live marker view</h2>
     <span class="badge resource">camera</span>
   </header>
-  <p class="description">C922 feed with ArUco/AprilTag detections, IDs, and camera-frame
-     pose overlays — the in-browser equivalent of <code>real.marker_view</code>.
-     Holds the camera while streaming: stop it before launching the native tools below.</p>
+  <p class="description">Both C922 feeds with ArUco/AprilTag detections, IDs, and camera-frame
+     pose overlays (per-lens intrinsics at their calibrated focus) — the in-browser
+     equivalent of <code>real.marker_view</code>.
+     Holds both cameras while streaming: stop it before launching the native tools below.</p>
   <div class="launch-row camera-controls" data-persist="camera">
     <label>family
       <select id="camera-family" name="family">
@@ -26,8 +27,13 @@
     <button id="camera-start">Start stream</button>
     <button id="camera-stop" class="danger">Stop stream</button>
   </div>
-  <div class="stream-wrap hidden" id="camera-stream-wrap">
-    <img id="camera-stream" alt="camera stream">
+  <div class="stream-wrap stream-grid hidden" id="camera-stream-wrap">
+    {% for name in camera_names %}
+    <figure>
+      <img class="camera-stream" data-camera="{{ name }}" alt="{{ name }} camera stream">
+      <figcaption>{{ name }}</figcaption>
+    </figure>
+    {% endfor %}
   </div>
 </section>
 
