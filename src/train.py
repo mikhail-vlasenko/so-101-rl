@@ -13,9 +13,9 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 from src.base_env import RuntimeEnvConfig, obs_dim_for
 from src.callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EpisodeLengthCallback,
-    EvalStatsCallback, EvalStatsTracker, FloorContactCallback, LiftSuccessCallback,
-    MarkerHiddenCallback, MaxCubeHeightCallback, MeanReturnCallback, ReachStatsCallback,
-    RingContactCallback, TimeLimitCallback, XYProgressCallback,
+    EvalStatsCallback, EvalStatsTracker, FloorContactCallback, GraspCallback,
+    LiftSuccessCallback, MarkerHiddenCallback, MaxCubeHeightCallback, MeanReturnCallback,
+    ReachStatsCallback, RingContactCallback, TimeLimitCallback, XYProgressCallback,
 )
 from src.networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from src.obs_norm import build_obs_norm, build_reach_obs_norm
@@ -285,6 +285,7 @@ def train(cfg: DictConfig):
     callbacks.append(EpisodeLengthCallback())
     callbacks.append(LiftSuccessCallback())
     callbacks.append(MaxCubeHeightCallback())
+    callbacks.append(GraspCallback())
     callbacks.append(FloorContactCallback())
     callbacks.append(RingContactCallback())
     callbacks.append(CubeDragCallback())

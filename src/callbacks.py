@@ -38,6 +38,25 @@ class MaxCubeHeightCallback(BaseCallback):
         return True
 
 
+class GraspCallback(BaseCallback):
+    """Log how often the jaws actually held the cube: the fraction of episodes
+    with at least one grasped step, and the mean fraction of steps grasped.
+
+    Reads ahead of success_rate — a policy that grasps but never lifts scores
+    zero on success while ever_grasped moves, which is what distinguishes "not
+    learning" from "learning the wrong half of the task"."""
+
+    def _on_step(self) -> bool:
+        for done, info in zip(self.locals["dones"], self.locals["infos"]):
+            if not done:
+                continue
+            for key in ("ever_grasped", "grasp_ratio"):
+                val = info[key]
+                self.logger.record_mean(f"rollout/{key}", val)
+                self.logger.record_mean(f"rollout/{info['task_name']}/{key}", val)
+        return True
+
+
 class FloorContactCallback(BaseCallback):
     """Log mean per-episode floor contact ratio across episodes in each log window."""
 

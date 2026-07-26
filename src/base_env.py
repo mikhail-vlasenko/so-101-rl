@@ -1351,6 +1351,7 @@ class SO101BaseEnv(SO101ArmEnv):
         self._ctrl_target = joint_pos.copy()
         self.step_count = 0
         self._max_cube_height = cube_pos[2]
+        self._grasp_steps = 0
         self._floor_contact_steps = 0
         self._cube_drag_steps = 0
         self._markers_hidden_total = 0
@@ -1415,6 +1416,8 @@ class SO101BaseEnv(SO101ArmEnv):
         cube_pos = self._get_cube_pos()
         ee_cube_dist = np.linalg.norm(ee_pos - cube_pos)
         grasped = self._detect_grasp()
+        if grasped:
+            self._grasp_steps += 1
         floor_contact = self._has_floor_contact() if self.floor_contact_penalty else False
         if floor_contact:
             self._floor_contact_steps += 1
@@ -1445,6 +1448,11 @@ class SO101BaseEnv(SO101ArmEnv):
         truncated = self.step_count >= self.max_steps
         if terminated or truncated:
             info["max_cube_height"] = self._max_cube_height
+            # Grasp is the rung between "approached the cube" and "lifted it":
+            # while success_rate is still zero it is the only signal that says
+            # whether the policy is on the path at all.
+            info["ever_grasped"] = float(self._grasp_steps > 0)
+            info["grasp_ratio"] = self._grasp_steps / self.step_count
             if self.floor_contact_penalty:
                 info["floor_contact_ratio"] = self._floor_contact_steps / self.step_count
             info["cube_drag_ratio"] = self._cube_drag_steps / self.step_count
