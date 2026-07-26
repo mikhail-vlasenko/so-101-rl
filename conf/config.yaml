@@ -87,7 +87,13 @@ history_taps: [0]
 
 train:
   time_limit_minutes: 20
-  n_envs: 16
+  # Deliberately oversubscribed (the box has 16 cores): at one worker per core
+  # the learner has none, so every vec-step waits on a descheduled straggler.
+  # 32 measured +16% throughput over 16 at an unchanged rollout size. Costs
+  # ~0.8 GB resident per worker (~28 GB here) — raising this further is a
+  # memory decision before it is a speed one, and overshooting OOMs the box.
+  # Keep n_envs * ppo.n_steps == 32768 so the PPO update size stays put.
+  n_envs: 32
   # Policy input is normalized by a fixed physically-derived affine
   # (src/obs_norm.py) baked into the network — not configurable, and changing
   # its constants invalidates checkpoints like an obs-dim change would.
@@ -111,7 +117,7 @@ sac:
   tau: 0.005
 
 ppo:
-  n_steps: 2048
+  n_steps: 1024          # * train.n_envs = 32768 samples per update
   n_epochs: 5
   clip_range: 0.2
   ent_coef: 0.001
