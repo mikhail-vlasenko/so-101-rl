@@ -50,7 +50,15 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
   (`so101.xml` `tag_cam_mount` / `tag_cam_aux_mount`) are snapshots of that
   anchoring, so **re-run `real.diagnostics.snapshot_cam_mount --camera <main|aux>`
   after any remount** — otherwise sim visibility, spawn rejection and the fk twin
-  model a camera that isn't there.
+  model a camera that isn't there. **Geom group 1 is reserved** for the cameras'
+  visible stand-ins: the cube-visibility raycasts start inside those geoms and
+  mask the group out (`src/base_env._OCCLUDER_GEOMGROUP`), so anything else put
+  there silently stops occluding.
+- **Camera snapshot rate**: the env only snapshots a substep when
+  `CameraSim.needs_state` claims it for a scheduled capture — the snapshot
+  resolves occlusion against both cameras and dominates the cost of a step.
+  Anything that consumes world state per *frame* must go through the schedule,
+  not the substep loop.
 - **Sim/real twins**: some behavior is implemented twice and must stay identical —
   marker hold-last-pose/age (`src/base_env.py` ↔ `real/rollout/marker_obs.py`),
   `ObsHistory` feeding, `action_to_target`. Change one side, change the other;

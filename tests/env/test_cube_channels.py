@@ -13,6 +13,7 @@ import pytest
 
 from src.base_env import (
     MARKER_AGE_CAP_S,
+    _OCCLUDER_GEOMGROUP,
     RuntimeEnvConfig,
     cube_surface_points_world,
     cube_visible_surface,
@@ -207,6 +208,82 @@ def test_partial_occlusion_blocks_refresh_but_not_live(env):
     assert live_age == 0.0
     np.testing.assert_array_equal(live, frame.live)
     assert precise_age > 0.0
+
+
+def _visible_surface_per_ray(model, data, cam, cube_body_id, points, normals):
+    """Per-point reference for cube_visible_surface: one mj_ray from each
+    candidate point *toward* the camera — the direction mj_multiRay cannot
+    batch, since it needs one shared origin. Occlusion is membership of the
+    segment between the two ends, so both directions must agree."""
+    to_cam = cam.pos - points
+    facing = np.einsum("ij,ij->i", normals, to_cam) > 0.0
+    n_facing = int(facing.sum())
+    if n_facing == 0:
+        return 0.0, None
+    candidates = facing & cam.in_view(points)
+    geomid = np.zeros(1, dtype=np.int32)
+    visible_pts = []
+    for pt, vec in zip(points[candidates], to_cam[candidates]):
+        dist = float(np.linalg.norm(vec))
+        hit = mujoco.mj_ray(model, data, pt.astype(np.float64), vec / dist,
+                            _OCCLUDER_GEOMGROUP, 1, cube_body_id, geomid)
+        if not (0.0 <= hit < dist):
+            visible_pts.append(pt)
+    if not visible_pts:
+        return 0.0, None
+    return len(visible_pts) / n_facing, np.mean(visible_pts, axis=0)
+
+
+def test_batched_occlusion_matches_per_ray_casts(env):
+    """cube_visible_surface batches its occlusion test into one mj_multiRay per
+    camera, cast outward from the camera instead of inward from each point.
+    That must give the per-point answer for every pose — including the ones
+    where the arm shadows part of the cube, which is the whole point of the
+    test."""
+    env.reset(seed=11)
+    rng = np.random.default_rng(11)
+    occluded_seen = 0
+    for _ in range(400):
+        env.data.qpos[env.joint_qposadr] = rng.uniform(env.joint_low, env.joint_high)
+        mujoco.mj_forward(env.model, env.data)
+        points, normals = cube_surface_points_world(env.data, env.cube_geom_id,
+                                                    env.cube_half_extents)
+        for cam in env.cube_cams:
+            frac, centroid = cube_visible_surface(env.model, env.data, cam,
+                                                  env.cube_body_id, points, normals)
+            ref_frac, ref_centroid = _visible_surface_per_ray(
+                env.model, env.data, cam, env.cube_body_id, points, normals)
+            assert frac == ref_frac, (frac, ref_frac)
+            if centroid is None:
+                assert ref_centroid is None
+            else:
+                np.testing.assert_array_equal(centroid, ref_centroid)
+            if 0.0 < ref_frac < 1.0:
+                occluded_seen += 1
+    assert occluded_seen > 20, \
+        f"only {occluded_seen} partially-occluded views sampled — test is vacuous"
+
+
+def test_camera_stand_ins_never_occlude(env):
+    """The cameras' own stand-in geoms sit around each camera position, so every
+    occlusion ray starts inside one. They live alone in geom group 1 and the
+    raycasts mask that group out — nothing else may join it, or it would stop
+    blocking the view it really blocks."""
+    group1 = [i for i in range(env.model.ngeom) if env.model.geom_group[i] == 1]
+    names = {mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, i) for i in group1}
+    assert names == {"tag_cam_body", "tag_cam_lens",
+                     "tag_cam_aux_body", "tag_cam_aux_lens"}, names
+    assert _OCCLUDER_GEOMGROUP[1] == 0
+    assert all(_OCCLUDER_GEOMGROUP[g] == 1 for g in (0, 2, 3, 4, 5))
+    # Were group 1 blocking, every ray would stop on the housing it starts
+    # inside and no view could ever read better than fully occluded.
+    env.reset(seed=0)
+    points, normals = cube_surface_points_world(env.data, env.cube_geom_id,
+                                                env.cube_half_extents)
+    for cam in env.cube_cams:
+        frac, _ = cube_visible_surface(env.model, env.data, cam,
+                                       env.cube_body_id, points, normals)
+        assert frac == 1.0, frac
 
 
 def test_full_dropout_never_seen_reads_zero_with_capped_age():

@@ -242,11 +242,12 @@ def marker_dropout_prob(pos, normals, cam, p_near, p_far):
     return prob
 
 
-# The cameras' visible stand-in geoms (tag_cam[_aux]_body/lens in so101.xml)
-# sit within ~4 cm of each camera position, so the occlusion ray stops this
-# far short of the camera to keep them from self-occluding every point.
-# Nothing else in the scene lives that close to the cameras.
-_CAM_GEOM_CLEARANCE_M = 0.06
+# Geom groups the occlusion raycasts consider. Group 1 holds nothing but the
+# cameras' visible stand-in geoms (tag_cam[_aux]_body/lens in so101.xml), which
+# every ray starts inside — a camera does not occlude its own view. Everything
+# else (floor 0, arm visual meshes 2, arm/gripper collision geoms 3 and 4)
+# blocks the real view and must block here.
+_OCCLUDER_GEOMGROUP = np.array([1, 0, 1, 1, 1, 1], dtype=np.uint8)
 
 # Body-frame sample grid on the sponge box's surface for the per-camera
 # visible-surface test (cube_visible_surface): a 3x3 grid per face at these
@@ -294,14 +295,21 @@ def cube_visible_surface(model, data, cam, cube_body_id, points, normals):
     A sample point is *facing* when its outward normal points toward the
     camera (self-occlusion of the convex box, no ray needed); a facing point
     is *visible* when it also projects inside the camera frame (cam.in_view)
-    and an mj_ray toward the camera clears every other geom (arm meshes, ring
-    walls, floor — the shapes that block the real view; the cube's own body is
-    excluded, the facing test already handles it). visible_fraction is
-    visible/facing — 1.0 for an unoccluded fully-framed box regardless of its
-    orientation, mirroring the real pipeline's mask-area-vs-baseline occlusion
-    measure. centroid is the mean of the visible points (the visible-surface
-    point a segmentation-mask centroid's ray aims at), or None when nothing is
-    visible.
+    and the segment between it and the camera clears every other geom (arm
+    meshes, ring walls, floor — the shapes that block the real view; the
+    cube's own body is excluded, the facing test already handles it).
+    visible_fraction is visible/facing — 1.0 for an unoccluded fully-framed
+    box regardless of its orientation, mirroring the real pipeline's
+    mask-area-vs-baseline occlusion measure. centroid is the mean of the
+    visible points (the visible-surface point a segmentation-mask centroid's
+    ray aims at), or None when nothing is visible.
+
+    The occlusion test casts *outward from the camera*, which mj_multiRay does
+    for every candidate in one call — the per-point direction is what varies,
+    and the camera is the shared origin. A ray reports only its nearest hit,
+    so casting from this end needs the camera's own stand-in geoms masked out
+    (_OCCLUDER_GEOMGROUP); past that the question is symmetric — whether any
+    geom lies on the segment between camera and sample point.
     """
     to_cam = cam.pos - points
     facing = np.einsum("ij,ij->i", normals, to_cam) > 0.0
@@ -309,17 +317,26 @@ def cube_visible_surface(model, data, cam, cube_body_id, points, normals):
     if n_facing == 0:
         return 0.0, None
     candidates = facing & cam.in_view(points)
-    geomid = np.zeros(1, dtype=np.int32)
-    visible_pts = []
-    for pt, vec in zip(points[candidates], to_cam[candidates]):
-        dist = float(np.linalg.norm(vec))
-        hit = mujoco.mj_ray(model, data, pt.astype(np.float64), vec / dist,
-                            None, 1, cube_body_id, geomid)
-        if not (0.0 <= hit < dist - _CAM_GEOM_CLEARANCE_M):
-            visible_pts.append(pt)
-    if not visible_pts:
+    n_rays = int(candidates.sum())
+    if n_rays == 0:
         return 0.0, None
-    return len(visible_pts) / n_facing, np.mean(visible_pts, axis=0)
+    cand_pts = points[candidates]
+    rays = -to_cam[candidates]
+    dists = np.linalg.norm(rays, axis=1)
+    geomid = np.empty(n_rays, dtype=np.int32)
+    hit = np.empty(n_rays, dtype=np.float64)
+    mujoco.mj_multiRay(model, data, cam.pos,
+                       np.ascontiguousarray(rays / dists[:, None]).ravel(),
+                       _OCCLUDER_GEOMGROUP, 1, cube_body_id, geomid, hit, None,
+                       n_rays, float(dists.max()))
+    # hit is the camera's distance to the first blocking geom, or -1 when the
+    # ray is clear; a hit at or past the sample point is behind it, not on the
+    # segment. Rays beyond the farthest sample are cut off, so no hit can land
+    # past dists.max() to begin with.
+    visible_pts = cand_pts[(hit < 0.0) | (hit >= dists)]
+    if not len(visible_pts):
+        return 0.0, None
+    return len(visible_pts) / n_facing, visible_pts.mean(axis=0)
 
 
 class CamState(NamedTuple):
@@ -750,14 +767,15 @@ class SO101BaseEnv(SO101ArmEnv):
         # qpos/qvel are encoder-path and stay fresh. _cam_frame is the frame the
         # policy currently sees; _prev_qpos_obs feeds the differenced qvel obs.
         if self.cam_latency is None:
-            self._camera = CameraSim.synchronous(self._step_dt)
+            self._camera = CameraSim.synchronous(self._step_dt,
+                                                 self.model.opt.timestep)
         else:
             self._camera = CameraSim(
                 frame_s=float(self.cam_latency["frame_ms"]) * 1e-3,
                 delay_range_s=(float(self.cam_latency["delay_ms"][0]) * 1e-3,
                                float(self.cam_latency["delay_ms"][1]) * 1e-3),
                 jitter_s=float(self.cam_latency["jitter_ms"]) * 1e-3,
-                control_dt=self._step_dt)
+                control_dt=self._step_dt, substep_s=self.model.opt.timestep)
         self._cam_frame: CamFrame | None = None
         # Hold-last-pose marker state: the obs serves each tag's most recent
         # detection plus its age; a last-capture time of -inf means never seen
@@ -1406,7 +1424,11 @@ class SO101BaseEnv(SO101ArmEnv):
         """Hook to add task-specific info at episode end. Mutate info dict."""
 
     def _on_substep(self):
-        self._camera.record(self.data.time, self._capture_camera_state())
+        # Snapshotting resolves occlusion against both cameras (raycasts, the
+        # dominant cost of a substep), so only do it for the substeps the frame
+        # schedule will actually capture from.
+        if self._camera.needs_state(self.data.time, self.np_random):
+            self._camera.record(self.data.time, self._capture_camera_state())
 
     def step(self, action):
         self.step_count += 1
@@ -1438,7 +1460,7 @@ class SO101BaseEnv(SO101ArmEnv):
         # time): each detection — arm markers and cube tag alike — refreshes
         # its held pose. Losing a tag freezes its pose while its age channel
         # grows — there is deliberately no reward term for it.
-        for capture_t, frame in self._camera.observe(self.data.time, self.np_random,
+        for capture_t, frame in self._camera.observe(self.data.time,
                                                      self._process_frame):
             self._ingest_frame(capture_t, frame)
         self._markers_hidden_total += N_MARKERS - int(self._cam_frame.detected.sum())

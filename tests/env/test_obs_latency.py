@@ -51,17 +51,18 @@ def _move_action():
 # ---------------------------------------------------------------- CameraSim
 
 def _run_camera(cam, rng, n_ticks=30):
-    """Drive a CameraSim like the env does — state = its own timestamp — and
-    return the newest consumed frame (== its captured state's time) at each
-    control tick."""
+    """Drive a CameraSim like the env does — state = its own timestamp, only
+    the substeps needs_state claims get snapshotted — and return the newest
+    consumed frame (== its captured state's time) at each control tick."""
     _, frame = cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
     consumed = []
     t = 0.0
     for _ in range(n_ticks):
         for _ in range(10):
             t += SUBSTEP
-            cam.record(t, t)
-        for _, new_frame in cam.observe(t, rng, capture_fn=lambda s: s):
+            if cam.needs_state(t, rng):
+                cam.record(t, t)
+        for _, new_frame in cam.observe(t, capture_fn=lambda s: s):
             frame = new_frame
         consumed.append(frame)
     return np.array(consumed)
@@ -69,7 +70,7 @@ def _run_camera(cam, rng, n_ticks=30):
 
 def test_camera_sim_synchronous_is_fresh():
     """Synchronous mode must return the state recorded at each obs instant."""
-    cam = CameraSim.synchronous(CONTROL_DT)
+    cam = CameraSim.synchronous(CONTROL_DT, SUBSTEP)
     rng = np.random.default_rng(0)
     capture_ts = _run_camera(cam, rng)
     obs_ts = CONTROL_DT * np.arange(1, len(capture_ts) + 1)
@@ -83,7 +84,7 @@ def test_camera_sim_age_matches_schedule():
     frame_s = CAM["frame_ms"] * 1e-3
     delay_s = CAM["delay_ms"][0] * 1e-3
     cam = CameraSim(frame_s=frame_s, delay_range_s=(delay_s, delay_s),
-                    jitter_s=0.0, control_dt=CONTROL_DT)
+                    jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
     rng = np.random.default_rng(1)
     capture_ts = _run_camera(cam, rng)
     obs_ts = CONTROL_DT * np.arange(1, len(capture_ts) + 1)
@@ -100,7 +101,7 @@ def test_camera_sim_jitter_makes_age_drift():
     frame_s = CAM["frame_ms"] * 1e-3
     delay_s = 0.045
     cam = CameraSim(frame_s=frame_s, delay_range_s=(delay_s, delay_s),
-                    jitter_s=0.0015, control_dt=CONTROL_DT)
+                    jitter_s=0.0015, control_dt=CONTROL_DT, substep_s=SUBSTEP)
     rng = np.random.default_rng(2)
     capture_ts = _run_camera(cam, rng, n_ticks=300)
     ages = CONTROL_DT * np.arange(1, len(capture_ts) + 1) - capture_ts
@@ -109,10 +110,57 @@ def test_camera_sim_jitter_makes_age_drift():
     assert np.all(ages < delay_s + 2 * frame_s)
 
 
+def test_snapshots_are_taken_per_capture_not_per_substep():
+    """needs_state must claim one substep per scheduled capture, not one per
+    substep. The caller's snapshot resolves occlusion against every camera and
+    dominates the cost of a step (src/base_env._capture_camera_state), while
+    the schedule only ever consumes one state per frame."""
+    frame_s = CAM["frame_ms"] * 1e-3
+    cam = CameraSim(frame_s=frame_s, delay_range_s=(0.045, 0.045),
+                    jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    rng = np.random.default_rng(7)
+    cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
+    n_ticks, claimed, substeps = 60, 0, 0
+    t = 0.0
+    for _ in range(n_ticks):
+        for _ in range(10):
+            t += SUBSTEP
+            substeps += 1
+            if cam.needs_state(t, rng):
+                claimed += 1
+                cam.record(t, t)
+        cam.observe(t, capture_fn=lambda s: s)
+    # One per frame interval over the elapsed time, give or take the phase.
+    assert abs(claimed - n_ticks * CONTROL_DT / frame_s) <= 1, claimed
+    assert claimed < substeps / 4
+
+
+def test_consumed_frames_come_from_the_nearest_snapshot():
+    """Sparse snapshotting must not degrade which state a frame is built from:
+    every consumed capture still resolves to the recorded substep nearest its
+    instant, i.e. within half a substep."""
+    frame_s = CAM["frame_ms"] * 1e-3
+    cam = CameraSim(frame_s=frame_s, delay_range_s=(0.045, 0.045),
+                    jitter_s=0.0015, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    rng = np.random.default_rng(8)
+    cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
+    t = 0.0
+    for _ in range(120):
+        for _ in range(10):
+            t += SUBSTEP
+            if cam.needs_state(t, rng):
+                cam.record(t, t)
+        for capture_t, frame in cam.observe(t, capture_fn=lambda s: s):
+            if capture_t <= 0.0:
+                continue  # in flight at reset: built from the static reset state
+            # frame is the timestamp of the snapshot it was built from.
+            assert abs(frame - capture_t) <= SUBSTEP / 2 + 1e-9, (frame, capture_t)
+
+
 def test_camera_sim_delay_sampled_per_episode():
     """delay_ms is a per-episode range: different resets draw different delays."""
     cam = CameraSim(frame_s=0.0333, delay_range_s=(0.030, 0.060),
-                    jitter_s=0.0, control_dt=CONTROL_DT)
+                    jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
     rng = np.random.default_rng(3)
     delays = []
     for _ in range(20):
@@ -130,7 +178,7 @@ def test_camera_sim_reset_frame_ages_like_midstream():
     frame_s = CAM["frame_ms"] * 1e-3
     delay_s = CAM["delay_ms"][0] * 1e-3
     cam = CameraSim(frame_s=frame_s, delay_range_s=(delay_s, delay_s),
-                    jitter_s=0.0, control_dt=CONTROL_DT)
+                    jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
     rng = np.random.default_rng(4)
     t0 = 5.0
     for _ in range(50):
