@@ -60,16 +60,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # Same table-anchor smoothing as the rollout pipeline (real/rollout/marker_obs.py).
 CAM_EMA_ALPHA = 0.05
 
-# Coverage bins: workspace xy box (the cube spawn region, conf/env/lift.yaml)
-# split 2x2, body yaw in 4 bins, resting face from the most vertical body axis.
-WORKSPACE_LOW = np.array([0.15, -0.15])
-WORKSPACE_HIGH = np.array([0.30, 0.15])
+LIFT_CONFIG_PATH = REPO_ROOT / "conf" / "env" / "lift.yaml"
+
+
+def load_workspace_bounds():
+    """Cube spawn xy bounds used to bin dataset coverage."""
+    with LIFT_CONFIG_PATH.open() as stream:
+        task = yaml.safe_load(stream)["lift_env"]
+    return (np.asarray(task["cube_low"], dtype=np.float64),
+            np.asarray(task["cube_high"], dtype=np.float64))
 
 
 class Coverage:
     """Live tallies of what the dataset has covered so far."""
 
-    def __init__(self):
+    def __init__(self, workspace_low, workspace_high):
+        self.workspace_low = np.asarray(workspace_low, dtype=np.float64)
+        self.workspace_high = np.asarray(workspace_high, dtype=np.float64)
         self.counts = {}          # (face, yaw_bin, region) -> frames
         self.static_frames = 0
         self.moving_frames = 0
@@ -93,7 +100,8 @@ class Coverage:
         axis = R[:, 0] if face != "x" else R[:, 1]
         yaw_bin = int(((np.arctan2(axis[1], axis[0]) + np.pi) / (np.pi / 2))) % 4
         xy = T_base_body[:2, 3]
-        cell = np.clip(((xy - WORKSPACE_LOW) / (WORKSPACE_HIGH - WORKSPACE_LOW) * 2)
+        cell = np.clip(((xy - self.workspace_low)
+                        / (self.workspace_high - self.workspace_low) * 2)
                        .astype(int), 0, 1)
         key = (face, yaw_bin, f"{cell[0]}{cell[1]}")
         self.counts[key] = self.counts.get(key, 0) + 1
@@ -165,7 +173,7 @@ def main():
           "add moving segments (hand-carried + in-gripper) and let it settle\n"
           "between placements. Ctrl-C or --minutes ends the session.")
 
-    coverage = Coverage()
+    coverage = Coverage(*load_workspace_bounds())
     body_hist_t: list[float] = []
     body_hist_p: list[np.ndarray] = []
     started = time.monotonic()

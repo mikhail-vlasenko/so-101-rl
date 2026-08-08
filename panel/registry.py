@@ -297,6 +297,22 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         native_gui=True,
     ),
     ScriptSpec(
+        id="align_stereo_rig", title="Align stereo camera mount", page="camera",
+        module="real.calib.align_stereo_rig", arg_style="argparse",
+        description="Measure baseline/orientation and configured-workspace margins "
+                    "from the table tag; optional native viewer guides mechanical "
+                    "alignment before checkerboard stereo calibration.",
+        args=(
+            ArgSpec("--frames", "int", "Capture loops (0 with viewer runs until q)"),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+            ArgSpec("--gui", "flag", "Live alignment overlay (native cv2)"),
+            ArgSpec("--save-frames", "str", "Directory for final annotated frame pair"),
+        ),
+        resources=(Resource.CAMERA,),
+        native_gui=True,
+    ),
+    ScriptSpec(
         id="stereo_check", title="Stereo triangulation check", page="camera",
         module="real.tracking.stereo_check", arg_style="argparse",
         description="Triangulate the sponge tag from both table-anchored cameras "

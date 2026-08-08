@@ -107,6 +107,16 @@ def test_spawn_is_stable_and_at_rest_height(env):
         assert env._get_cube_pos()[2] == pytest.approx(env.cube_rest_half_z, abs=0.002)
 
 
+def test_configured_workspace_extends_baseward_and_narrows_lateral(env):
+    np.testing.assert_allclose(env.cube_low, (0.10, -0.10))
+    np.testing.assert_allclose(env.cube_high, (0.30, 0.10))
+    for seed in range(10):
+        env.reset(seed=seed)
+        xy = env._get_cube_pos()[:2]
+        assert np.all(xy >= env.cube_low)
+        assert np.all(xy <= env.cube_high)
+
+
 def test_spawn_flat_faces_occur(env):
     """The env-level spawn (rejection-sampled on visibility) must still
     produce flat largest-face poses — they can't all be rejected."""

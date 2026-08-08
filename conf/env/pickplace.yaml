@@ -6,8 +6,8 @@ pickplace_env:
   use_servo_profile: ${use_servo_profile}   # defined in config.yaml
   max_steps: 450          # 450 steps / 15 Hz = 30 s episode
   n_substeps: 10          # 10 * (1/150 s timestep in so101.xml) = exactly 15 Hz
-  cube_low: [0.15, -0.15]    # xy only; spawn z + orientation come from sample_cube_orientation
-  cube_high: [0.30, 0.15]
+  cube_low: [0.10, -0.10]    # xy only; spawn z + orientation come from sample_cube_orientation
+  cube_high: [0.30, 0.10]
   cube_smallest_face_only: ${cube_smallest_face_only}   # defined in config.yaml
   cube_no_flat_spawns: ${cube_no_flat_spawns}           # defined in config.yaml
   place_target: [0.18, 0.0, 0.02]

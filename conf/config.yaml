@@ -64,6 +64,26 @@ cube_smallest_face_only: false
 # smallest_face_only -> no_flat_spawns -> none).
 cube_no_flat_spawns: false
 
+# Mechanical gates for `python -m real.calib.align_stereo_rig`. The checker
+# projects the union of the lift/pickplace `cube_low`/`cube_high` boxes from the
+# env configs through each live table-anchored camera pose. These are raw-image
+# margins: stereo rectification consumes some border area later, so merely
+# keeping the workspace inside the unrectified frame is insufficient.
+stereo_alignment:
+  capture_frames: 100
+  sample_window: 30
+  min_samples: 20
+  baseline_min_m: 0.10
+  baseline_max_m: 0.12
+  max_height_delta_m: 0.005
+  max_relative_axis_deg: 2.0
+  min_workspace_margin_px: 50.0
+  workspace_z_low_m: 0.0
+  workspace_z_high_m: 0.15
+  min_pair_detection_fraction: 0.80
+  max_translation_spread_mean_mm: 0.50
+  max_rotation_spread_mean_deg: 0.10
+
 # Number of past actions appended to the observation. 0 = disabled; N=2 lets the
 # policy infer velocity / action smoothness from its own recent commands.
 prev_actions_n: 1

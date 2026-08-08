@@ -33,9 +33,20 @@ class TagStyle:
 
 
 @dataclass(frozen=True)
-class OverlayLine:
+class OverlaySpan:
     text: str
     color: tuple[int, int, int] = WHITE
+
+
+@dataclass(frozen=True)
+class OverlayLine:
+    text: str = ""
+    color: tuple[int, int, int] = WHITE
+    spans: tuple[OverlaySpan, ...] = ()
+
+    def __post_init__(self):
+        assert bool(self.text) != bool(self.spans), \
+            "OverlayLine requires either text or colored spans"
 
 
 def annotate_tags(frame, dets, styles=None):
@@ -80,8 +91,18 @@ def annotate_detections(frame, dets, estimator):
 
 def _draw_lines(frame, lines, y0=30):
     for index, line in enumerate(lines):
-        cv2.putText(frame, line.text, (12, y0 + 28 * index),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, line.color, 2)
+        y = y0 + 28 * index
+        if line.spans:
+            x = 12
+            for span in line.spans:
+                cv2.putText(frame, span.text, (x, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, span.color, 2)
+                size, _ = cv2.getTextSize(
+                    span.text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                x += size[0]
+        else:
+            cv2.putText(frame, line.text, (12, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, line.color, 2)
 
 
 def compose_stereo_view(frames, camera_lines=None, header_lines=(),
@@ -111,21 +132,34 @@ def compose_stereo_view(frames, camera_lines=None, header_lines=(),
 
 
 class StereoViewer:
-    """Native OpenCV window for a configurable standard stereo canvas."""
+    """Native OpenCV window whose compositor geometry remains user-controlled.
+
+    ``cv2.imshow`` otherwise creates an autosize XWayland window and sends a new
+    size request whenever the canvas dimensions change. Hyprland honors that
+    request even after the user moves/resizes the floating window. Create a
+    normal window explicitly and size it only once, so later status-layout
+    changes scale inside the existing window instead of resetting its geometry.
+    """
 
     def __init__(self, title, camera_names=CAMERA_NAMES):
         self.title = str(title)
         self.camera_names = tuple(camera_names)
         self._shown = False
+        self._initial_canvas_size = None
 
     def show(self, frames, camera_lines=None, header_lines=(), delay_ms=1):
         canvas = compose_stereo_view(
             frames, camera_lines, header_lines, self.camera_names)
+        if not self._shown:
+            cv2.namedWindow(self.title, cv2.WINDOW_NORMAL)
+            self._initial_canvas_size = (canvas.shape[1], canvas.shape[0])
+            cv2.resizeWindow(self.title, *self._initial_canvas_size)
+            self._shown = True
         cv2.imshow(self.title, canvas)
-        self._shown = True
         return cv2.waitKey(delay_ms) & 0xFF
 
     def close(self):
         if self._shown:
             cv2.destroyWindow(self.title)
             self._shown = False
+            self._initial_canvas_size = None
