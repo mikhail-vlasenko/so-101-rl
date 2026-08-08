@@ -1,83 +1,52 @@
 # TODO
 
-Long-term tasks and ideas. Not a changelog.
+Unresolved, actionable work only. Not a changelog or project-status document.
 
 ## Tag-free object tracking (dual C922 + SAM), follow-ups
-
-The v1 dual-channel visual-hull pipeline is implemented end to end (plan:
-`.claude/plans/shape_tensor_tracking.md`; sim `src/shape_obs.py` +
-`src/base_env.py`, real `real/rollout/{frame_bus,object_obs}.py`, dataset/eval
-`real/tracking/{tag_body_calib,record_shapes,eval_estimator,hull_shape}.py`).
-Open, roughly in order:
 
 - **Replace the precise object channel with dense stereo and a pretrained
   point-cloud encoder.** First move the cameras to a common rigid 10–12 cm
   stereo mount, run shared checkerboard calibration, and capture a short tagged
   dense-depth validation set. Re-snapshot both sim camera mounts after moving
   them.
-- **`obs_noise.live_sigma` is still a placeholder.** The full dataset measured
-  only 0.31 mm per-component static scatter and produced only the 0–25%
-  occlusion slice: held occlusion inflates each static window's own area
-  baseline, while moving segments are not scored. Keep 0.003 deliberately above
-  that trivial static measurement until dense-stereo work also fixes the
-  occlusion reference and measures motion/settling. Note the acceptance eval
-  reads its own envelope from these same knobs, so a re-seeded knob is a
-  measurement, never a pass.
-- **Mono live fallback.** The live channel requires BOTH views; one lost view
-  stales it even though a single mask still gives a ray. Measure the dataset's
-  both-view availability first — only build the fallback if the number says
-  it matters.
-- **Static-gate noise margin during settling.** `is_static` judges consecutive
-  live-centroid speeds, so measurement noise is amplified by 1/dt. Measured
-  margin while genuinely static is comfortable (worst step 0.006 m/s against
-  the 0.02 bound) and the speed test catches motion onset within one frame —
-  a spatial-extent test would trade that away. Unmeasured: the settling
-  regime right after motion, where blur, sync skew and tracker lag inflate
-  the live noise. Measure the false-trip rate on the dataset's post-motion
-  segments before swapping the statistic.
 - **Pickplace `ObjectSource` rollout.** `rollout_lift` consumes the dual
-  channels; pickplace needs the equivalent (place-target definition on the
-  real table, ring pose, phase-aware termination) on `ArmLoop` + the same
-  frame bus/`ObjectSource`.
+  channels; after the dense-stereo observation interface lands, add the
+  equivalent pickplace source with a real-table target, ring pose, and
+  phase-aware termination on `ArmLoop`.
 - **Delete the legacy tag remnants when the legacy teacher retires.** The
   `cube_tag` site in the scene XMLs and the GT tag-pose helper survive only
   for `distill.teacher_obs=legacy_tag` (migrating the last tag-obs
   checkpoint); delete both, plus the mode, once no tag-obs teacher matters.
-- **EdgeTAM** (`transformers` ships it) is an efficiency-focused SAM2-style
-  tracker — candidate if GPU budget tightens once two SAM streams and dense
-  stereo share the GPU.
-
-Footnote — camera sync: free-running cameras are up to ~half a frame apart
-(~3 mm at 0.2 m/s, irrelevant static). The two-regime obs design absorbs
-this: the precise channel refreshes only on static windows, and the live
-channel's error budget (`live_sigma`) covers the in-motion skew. Revisit only
-if the dataset's moving-segment live error blows the envelope.
 
 ## Sim-to-real fidelity (reach env)
 
-Current symptom: with sim/real kp aligned at 64, real arm has trouble holding/lifting itself even though sim trains fine. Also worth noting: experiments so far have been on the **leader** arm, not the follower the policy will ultimately deploy on. Leader has different mechanical load (no payload, no gripper jaws engaged, possibly different calibration), so some of this gap may collapse once we move to the follower. Independently though, sim has several optimistic assumptions:
-
-- **Link masses / inertias.** Menagerie's `so101.xml` derives inertials from STL meshes at an assumed density (likely plastic). Real arm is metal servos + steel screws. Sum body masses in the XML, compare against the weighed arm. If sim is lighter, real torque demand exceeds what the policy learned.
-
-- **Compliance during contact.** The linear gravity-compliance model (`q_true = q_enc − b − c·τ_grav` for lift/elbow/wrist_flex) is solved and deployed (`real/calib/compliance.py`, `ArmLoop`). Open follow-up: deployment reads τ from the arm's gravity `qfrc_bias` only, which is wrong once the gripper loads up during contact — modeling the compliance in sim (springy `*_play` joints) is the principled alternative if contact-regime marker accuracy ever matters.
-
-- **Elbow (and general) command tracking: real under-executes vs the refit sim.** Diagnosed via `sysid/replay_rollout.py` on the 2026-07-05 floor-pressing lift rollouts (run246, seeds 0/2): replaying the recorded actions open-loop in sim never touches the floor (min ee_z +0.8/+2.0 cm, zero contact force) while the real arm pressed to −0.4/−0.8 cm, and the closed-loop policy from the same start lifts cleanly in sim — so the press is a *plant* gap, not an obs gap (counterfactual FK-marker re-predictions match the recorded actions almost exactly; camera markers didn't change the policy's mind). Per-tick tracking regression (realized qpos delta on commanded delta, two taps): real gains run 10–25 % below sim on every arm joint, worst at elbow_flex (0.34 vs 0.45; per-joint qpos divergence mean 0.16–0.36 rad across the two rollouts). Candidates: the forcerange/continuous-torque and mass items above, per-joint kp mismatch, elbow load in these poses. Fix ideas: refit elbow damping/armature against closed-loop policy-style trajectories (current sysid trajectories may under-weight the loaded elbow regime), or lower sim tracking to match real. Related: the measured qpos reads ~0.5–1 cm below the true pose *while pressing* (contact reverses the compliance load — the known contact-regime compliance gap above), which keeps re-commanded hold targets below the floor and sustains the push.
-
-- **Marker noise anisotropy — remaining pieces.** Position noise is now anisotropic in the camera frame (`src/marker_noise.py`: small lateral, large depth along each tag's ray, sigmas derived from the calibrated intrinsics + per-tag distance/size), plus a per-episode common-mode bias (`obs_bias.marker_common_sigma`) — the table re-anchor, whose real-side jitter `real/rollout/marker_obs.py` damps by EMAing the static camera (`CAM_EMA_ALPHA`); a per-frame common-mode residual knob existed briefly and was removed as negligible post-EMA. Open: (1) rotation noise is still isotropic (`marker_rot_sigma`) — the angle-dependent orientation wobble isn't modeled (no rot channel is in the default obs; matters only if `marker_include_rot` ever lands); (2) the new DR knobs (`tag_px_noise`, `tag_depth_factor`, `marker_common_sigma`) and `CAM_EMA_ALPHA` are seeded from geometry/back-of-envelope, not yet tuned against measured real solvePnP logs — ties into the dropout-rate tuning item below.
-
-- **Pose-locked (semi-static) tag noise — arm markers only now.** Sim's per-tag noise is i.i.d. per frame, but a static tag under static lighting feeds the detector nearly the same pixels every frame, so the real error is mostly a *repeatable, pose-dependent bias* plus a small temporal jitter — it neither re-draws every frame the way `_process_frame` samples it, nor averages away on the real rig. The cube half of this item is largely superseded by the two-regime object obs: the precise channel *is* pose-locked by construction (refreshed only on static windows, held in between, with per-episode biases as the pose-locked error), and the live channel's error budget is measured, not modeled from px noise. Remaining scope: the finger/wrist tags — constantly moving, they decorrelate over ~1 px of image motion, so i.i.d. is a fair approximation; only revisit (split `tag_px_noise` into a pose-locked + jitter component, measured via a ~30 s static log with `real.marker_view`) if a policy shows filtering artifacts near static arm poses.
-
-- **Bursty marker dropout.** Sim dropout is i.i.d. per frame (conditioned on the grazing-angle band), but real detector misses cluster in bursts (a grazing view or partial occlusion persists across frames). Since undetected tags now *hold* their last pose while the age channel grows, burst length directly shapes the held-pose error distribution the policy trains against — consider a two-state Markov dropout (p_enter, p_exit) in `base_env._process_frame`, tuned against measured real dropout runs.
-
-- **Arm-tag occlusion not raycast.** The cube channels' sim detection raycasts every surface sample point (`base_env.cube_visible_surface`), but the arm markers still use the plane-angle + FOV check only — sim is optimistic when the arm self-shadows a tag from the camera. Extend the ray test to the marker sites (exclude the site's own body like the cube surface test does).
-
-- **Marker observations: tune sim dropout against measured real rates; site rotations still eyeballed.** Position calibration and the camera marker source are done (`real/rollout/marker_obs.py`, `real/calib/calibrate_qpos.py`). Two open remainders: (1) the site *rotations* are an eyeballed estimate plus the `quarter_turns` in-plane snap — fine while the obs uses positions, revisit if `marker_rot` ever matters; (2) the sim visibility model (plane-angle cutoff + the `dr` group's `marker_dropout`, higher in the grazing 65–70° band) has never been checked against measured real-camera dropout rates. There is deliberately no reward term for a hidden tag: losing its pose is penalty enough.
+- **Re-test the plant gap on the follower arm.** Repeat the holding and lift
+  probes on the deployment arm before changing the simulator, because the
+  existing measurements came from the mechanically different leader arm.
+- **Correct link masses and inertias.** Weigh the real arm or its separable
+  links, compare them with `so101.xml`, and update the model where the assumed
+  mesh density is wrong.
+- **Measure and model contact compliance.** Record tag-versus-encoder residuals
+  while the gripper is loaded; if the contact error is material, add compliant
+  `*_play` joints in sim and cover the sim/real behavior with twin tests.
+- **Match loaded command tracking.** Capture policy-style trajectories that
+  load the elbow, refit damping/armature and per-joint tracking, then verify the
+  floor-contact replay no longer diverges between sim and real.
+- **Calibrate arm-marker noise and dropout from logs.** Record solvePnP error,
+  table-anchor jitter, grazing-angle misses, and dropout burst lengths; tune
+  `tag_px_noise`, `tag_depth_factor`, `marker_common_sigma`, `CAM_EMA_ALPHA`, and
+  the visibility/dropout model. Add a two-state dropout model only if the logs
+  show that burst duration matters.
+- **Raycast arm-marker occlusion.** Extend the marker visibility test beyond
+  plane angle and FOV so arm links can occlude their marker sites, excluding
+  each site's own body from its ray test.
 
 ## Asymmetric critic: follow-ups
 
-The `[actor block | privileged tail]` layout is live (see CLAUDE.md, `base_env.priv_dim_for`), with `logs/ppo_lift/asym_critic_run264.zip` the first fine-tuned artifact (0.96 lift success, dr=light). Open:
-
-- **Tail utilization is shallow after a short warm fine-tune.** After 10M steps from the migrated run262, the critic's privileged input columns carry ~14x less weight than the actor columns (top consumers: true cube velocity, jaw contact flags, cube-tag bias). The feature should pay most where value noise actually dominates — from-scratch curriculum stages and dr=full refines — not a near-converged dr=light polish; measure there before judging its value.
+- **Evaluate the privileged tail where it can affect learning.** Compare value
+  quality and policy success with and without the tail during from-scratch
+  curriculum training and `dr=full` refinement, then decide whether to retain
+  it.
 
 ## Train a policy in PWM / torque-ish mode
 
