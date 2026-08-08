@@ -95,6 +95,19 @@ stereo_alignment:
   max_translation_spread_mean_mm: 0.50
   max_rotation_spread_mean_deg: 0.10
 
+# Snapshot calibration for independently mounted stereo cameras. Both cameras
+# observe one stationary checkerboard; fixed intrinsics make a single planar
+# pose sufficient to recover their current relative transform. Re-run after a
+# stand moves. The solve is written only when both image-space quality gates
+# pass, so a weak snapshot cannot replace the last usable artifact.
+stereo_calibration:
+  capture_frames: 60
+  min_detected_pairs: 30
+  max_reprojection_rmse_px: 1.0
+  max_rectified_vertical_p95_px: 1.0
+  camera_movement_warning_translation_mm: 1.0
+  camera_movement_warning_rotation_deg: 0.1
+
 # Number of past actions appended to the observation. 0 = disabled; N=2 lets the
 # policy infer velocity / action smoothness from its own recent commands.
 prev_actions_n: 1

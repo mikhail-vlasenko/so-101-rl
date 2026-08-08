@@ -43,6 +43,11 @@ from real.calib.extrinsics import (
     mat_inv,
     transform_spread,
 )
+from real.calib.calibrate_stereo import (
+    load_limits as load_stereo_calibration_limits,
+    load_stereo_rectification,
+    save_anchor_reference,
+)
 from real.calib.table_anchor import TableAnchorTracker, load_table_anchor_limits
 from real.marker_spec import TABLE_TAG_IDS
 from real.vision.detect import make_detector
@@ -190,6 +195,58 @@ def project_workspace(points_base: np.ndarray, T_base_cam: np.ndarray,
         height - 1 - pixels[:, 1].max(),
     ])
     return CameraCoverage(pixels, margins, bool(np.all(points_cam[:, 2] > 0.0)))
+
+
+def project_rectified_workspace(
+        points_base: np.ndarray, T_base_cam: np.ndarray,
+        rectification_rotation: np.ndarray, projection_matrix: np.ndarray,
+        valid_roi: tuple[int, int, int, int]) -> CameraCoverage:
+    """Project base points into a rectified image and measure valid-ROI margins."""
+    T_cam_base = mat_inv(T_base_cam)
+    points_cam = (
+        np.asarray(points_base, dtype=np.float64) @ T_cam_base[:3, :3].T
+        + T_cam_base[:3, 3]
+    )
+    points_rectified = points_cam @ rectification_rotation.T
+    normalized = points_rectified[:, :2] / points_rectified[:, 2, None]
+    K_rectified = projection_matrix[:, :3]
+    pixels = np.column_stack([
+        K_rectified[0, 0] * normalized[:, 0] + K_rectified[0, 2],
+        K_rectified[1, 1] * normalized[:, 1] + K_rectified[1, 2],
+    ])
+    x, y, width, height = valid_roi
+    margins = np.array([
+        pixels[:, 0].min() - x,
+        x + width - 1 - pixels[:, 0].max(),
+        pixels[:, 1].min() - y,
+        y + height - 1 - pixels[:, 1].max(),
+    ])
+    return CameraCoverage(
+        pixels, margins, bool(np.all(points_rectified[:, 2] > 0.0)))
+
+
+def relative_pose_change(T_current: np.ndarray,
+                         T_reference: np.ndarray) -> tuple[float, float]:
+    """Return translation-mm and rotation-deg change from a known-good pose."""
+    delta = T_current @ mat_inv(T_reference)
+    translation_mm = float(np.linalg.norm(delta[:3, 3]) * 1000.0)
+    rotation_deg = float(np.linalg.norm(
+        Rotation.from_matrix(delta[:3, :3]).as_rotvec()) * 180.0 / np.pi)
+    return translation_mm, rotation_deg
+
+
+def camera_movement_warning(
+        movement_mm: float, movement_deg: float,
+        translation_limit_mm: float, rotation_limit_deg: float) -> str | None:
+    """Return the operator instruction when tag poses show calibration drift."""
+    if movement_mm <= translation_limit_mm and movement_deg <= rotation_limit_deg:
+        return None
+    return (
+        "WARNING: cameras moved relative to their stereo calibration "
+        f"({movement_mm:.2f} mm / {movement_deg:.3f} deg). Lay the "
+        "checkerboard flat in both views and rerun "
+        "`python -m real.calib.calibrate_stereo` before dense stereo."
+    )
 
 
 def evaluate_alignment(
@@ -432,6 +489,12 @@ def main() -> None:
                         help="live alignment overlay; q/Esc evaluates and exits")
     parser.add_argument("--save-frames", default=None,
                         help="directory for the final annotated frame pair")
+    parser.add_argument(
+        "--stereo-calibration", type=Path, default=None,
+        help="also validate rectified workspace coverage against this YAML")
+    parser.add_argument(
+        "--record-stereo-anchor-reference", action="store_true",
+        help="record the current two-tag relative pose as known-good after calibration")
     args = parser.parse_args()
 
     frame_limit = args.frames
@@ -439,6 +502,8 @@ def main() -> None:
         frame_limit = 0 if args.gui else limits.capture_frames
     if frame_limit < 0 or (frame_limit == 0 and not args.gui):
         parser.error("--frames must be positive, or 0 only with --gui")
+    if args.record_stereo_anchor_reference and args.stereo_calibration is None:
+        parser.error("--record-stereo-anchor-reference requires --stereo-calibration")
 
     workspace = load_workspace_corners(limits)
     detector = make_detector(args.family)
@@ -535,6 +600,59 @@ def main() -> None:
     print(f"\n{summary}", flush=True)
     if not report.passed:
         raise RuntimeError("stereo rig alignment failed; see required adjustments above")
+
+    if args.stereo_calibration is None:
+        return
+    rectification = load_stereo_rectification(args.stereo_calibration)
+    transforms = measurement[0]
+    rectified_coverage = {
+        camera: project_rectified_workspace(
+            workspace, transforms[camera], rectification.rotations[camera],
+            rectification.projections[camera], rectification.valid_rois[camera])
+        for camera in CAMERA_NAMES
+    }
+    print("\nRECTIFIED WORKSPACE:")
+    failures = []
+    for camera in CAMERA_NAMES:
+        coverage = rectified_coverage[camera]
+        margins = "/".join(f"{value:.0f}" for value in coverage.margins_px)
+        print(f"  {camera}: valid-ROI margins L/R/T/B {margins} px")
+        if not coverage.all_in_front:
+            failures.append(f"{camera}: workspace extends behind rectified camera")
+        for margin_name, value in zip(MARGIN_NAMES, coverage.margins_px):
+            if value < 0.0:
+                failures.append(
+                    f"{camera}: rectified {margin_name} workspace margin "
+                    f"{value:.0f} px is outside the valid ROI")
+    T_aux_main_live = mat_inv(transforms["aux"]) @ transforms["main"]
+    delta_translation_mm, delta_rotation_deg = relative_pose_change(
+        T_aux_main_live, rectification.T_aux_main)
+    print(f"  live anchor vs checkerboard relative pose: "
+          f"{delta_translation_mm:.2f} mm / {delta_rotation_deg:.3f} deg")
+    if args.record_stereo_anchor_reference:
+        save_anchor_reference(args.stereo_calibration, T_aux_main_live)
+        rectification = load_stereo_rectification(args.stereo_calibration)
+        print(f"  recorded current table-anchor pose in {args.stereo_calibration}")
+    reference = rectification.anchor_reference_T_aux_main
+    if reference is None:
+        print(
+            "WARNING: stereo calibration has no table-anchor movement reference. "
+            "Remove the checkerboard, expose both table tags, and rerun this check "
+            "with --record-stereo-anchor-reference.")
+    else:
+        movement_mm, movement_deg = relative_pose_change(T_aux_main_live, reference)
+        print(f"  camera movement since calibration: "
+              f"{movement_mm:.2f} mm / {movement_deg:.3f} deg")
+        stereo_limits = load_stereo_calibration_limits()
+        warning = camera_movement_warning(
+            movement_mm, movement_deg,
+            stereo_limits.camera_movement_warning_translation_mm,
+            stereo_limits.camera_movement_warning_rotation_deg)
+        if warning is not None:
+            print(warning)
+    if failures:
+        raise RuntimeError(
+            "rectified workspace coverage failed:\n  - " + "\n  - ".join(failures))
 
 
 if __name__ == "__main__":

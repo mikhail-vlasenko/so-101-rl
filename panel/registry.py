@@ -308,9 +308,25 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
                     choices=("apriltag", "aruco")),
             ArgSpec("--gui", "flag", "Live alignment overlay (native cv2)"),
             ArgSpec("--save-frames", "str", "Directory for final annotated frame pair"),
+            ArgSpec("--stereo-calibration", "str",
+                    "Also validate rectified coverage against this YAML"),
+            ArgSpec("--record-stereo-anchor-reference", "flag",
+                    "Save current tag-derived placement as calibrated reference"),
         ),
         resources=(Resource.CAMERA,),
         native_gui=True,
+    ),
+    ScriptSpec(
+        id="calibrate_stereo", title="Calibrate stereo placement", page="camera",
+        module="real.calib.calibrate_stereo", arg_style="argparse",
+        description="Snapshot the independently mounted cameras' relative pose from "
+                    "one stationary checkerboard and save gated rectification data.",
+        args=(
+            ArgSpec("--frames", "int", "Stationary checkerboard frames to average", default="60"),
+            ArgSpec("--output", "str", "Stereo calibration YAML"),
+            ArgSpec("--save-frames", "str", "Directory for final corner overlays"),
+        ),
+        resources=(Resource.CAMERA,),
     ),
     ScriptSpec(
         id="stereo_check", title="Stereo triangulation check", page="camera",

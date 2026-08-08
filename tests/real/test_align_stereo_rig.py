@@ -9,11 +9,14 @@ from real.calib.align_stereo_rig import (
     CameraCoverage,
     _current_measurement,
     _viewer_lines,
+    camera_movement_warning,
     coverage_guidance,
     evaluate_alignment,
     load_alignment_limits,
     load_workspace_corners,
+    project_rectified_workspace,
     project_workspace,
+    relative_pose_change,
 )
 from real.vision.overlay import GREEN, RED
 
@@ -103,6 +106,47 @@ def test_workspace_projection_returns_ordered_pixel_margins():
     np.testing.assert_allclose(result.pixels.max(axis=0), (330.0, 250.0))
     np.testing.assert_allclose(result.margins_px, (310.0, 309.0, 230.0, 229.0))
     assert result.all_in_front
+
+
+def test_rectified_workspace_projection_uses_valid_roi():
+    points = np.array([
+        [-0.1, -0.1, 1.0], [-0.1, 0.1, 1.0],
+        [0.1, -0.1, 1.0], [0.1, 0.1, 1.0],
+    ])
+    projection = np.array([
+        [100.0, 0.0, 320.0, -11.0],
+        [0.0, 100.0, 240.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ])
+    result = project_rectified_workspace(
+        points, np.eye(4), np.eye(3), projection, (20, 10, 600, 450))
+
+    np.testing.assert_allclose(result.pixels.min(axis=0), (310.0, 230.0))
+    np.testing.assert_allclose(result.pixels.max(axis=0), (330.0, 250.0))
+    np.testing.assert_allclose(result.margins_px, (290.0, 289.0, 220.0, 209.0))
+    assert result.all_in_front
+
+
+def test_relative_pose_change_reports_translation_and_rotation():
+    reference = np.eye(4)
+    current = np.eye(4)
+    current[:3, :3] = Rotation.from_euler("z", 0.2, degrees=True).as_matrix()
+    current[0, 3] = 0.0015
+
+    translation_mm, rotation_deg = relative_pose_change(current, reference)
+
+    assert np.isclose(translation_mm, 1.5)
+    assert np.isclose(rotation_deg, 0.2)
+
+
+def test_camera_movement_warning_instructs_recalibration():
+    assert camera_movement_warning(0.5, 0.05, 1.0, 0.1) is None
+
+    warning = camera_movement_warning(1.2, 0.05, 1.0, 0.1)
+
+    assert "WARNING: cameras moved" in warning
+    assert "Lay the checkerboard flat" in warning
+    assert "python -m real.calib.calibrate_stereo" in warning
 
 
 def test_margin_guidance_maps_image_edges_to_physical_aiming():

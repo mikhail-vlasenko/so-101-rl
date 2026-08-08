@@ -34,25 +34,16 @@ dense stereo model, PointNet nor deployed policy may depend on them.
    is occluded. Free-running C922 skew is therefore charged to the live error
    budget and does not corrupt the precise cloud.
 
-2. **Move the cameras onto one rigid, close-baseline stereo mount.** Target a
-   10–12 cm horizontal baseline, matched height/roll/pitch, approximately
-   parallel optical axes and full common coverage of the workspace. At a 40 cm
-   working distance this gives roughly 15–20° geometric view separation. The
-   aligned rig now measures about 10.9 cm with sub-2° relative axes and passes
-   the raw workspace-coverage gates.
+2. **Calibrate the independently mounted cameras at their current placement.**
+   Individual intrinsics stay fixed, but either stand moving invalidates
+   `T_aux_main` and its rectification maps. A stationary shared checkerboard
+   snapshots that relative geometry. During episodes, AprilTags 10 and 11 keep
+   one EMA'd base pose per camera; only simultaneous valid board pairs may
+   update relative geometry, and an incomplete/rejected observation holds it.
+   Rectification updates happen only while static and must pass the vertical
+   correspondence gate before dense inference resumes.
 
-3. **Use a fixed stereo calibration for relative geometry.** Rectification
-   must never be driven by two independently jittering per-frame table-tag
-   poses. A shared checkerboard calibration owns `T_aux_main` and the OpenCV
-   rectification matrices/maps. AprilTags 10 and 11 are solved together as one
-   leveled table board; only a valid two-tag observation updates the EMA'd rigid
-   rig pose in the arm base. A missing/rejected tag pair holds the last rig pose.
-   The fixed stereo transform then places the other camera and never changes in
-   response to anchor noise. Until that checkerboard transform exists, the live
-   code keeps one identical two-tag EMA per camera; the stereo-calibration stage
-   replaces those two outputs with the single rigid-rig pose.
-
-4. **Select the simplest stereo matcher that passes geometric gates.** Start
+3. **Select the simplest stereo matcher that passes geometric gates.** Start
    with OpenCV StereoSGBM as the classical baseline and Fast-FoundationStereo
    as the primary neural candidate. Run original FoundationStereo only when
    neither primary candidate passes or a targeted accuracy-ceiling diagnosis
@@ -63,38 +54,38 @@ dense stereo model, PointNet nor deployed policy may depend on them.
    never part of PPO. Run matching on the full rectified frames and apply SAM
    masks afterward rather than blacking out correspondence context.
 
-5. **The precise measurement is the visible surface, not a fabricated full
+4. **The precise measurement is the visible surface, not a fabricated full
    object.** Dense disparity is converted to metric XYZ, filtered by both SAM
    masks and stereo consistency, transformed into the base frame, then reduced
    to a fixed 256-point sample. Hidden surfaces remain unknown. Training sees
    the same partial-surface convention and learns what is task-relevant for the
    one physical sponge family.
 
-6. **Do not feed thousands of pixels or a flat point vector to PPO.** A small
+5. **Do not feed thousands of pixels or a flat point vector to PPO.** A small
    PointNet-style encoder maps the unordered 256-point set to a 32-dimensional
    feature. The encoder is pretrained with supervised synthetic geometry and
    fine-tuned against tag GT before RL; it is frozen for distillation and the
    first PPO stage. PPO learns control from stable geometric features, not
    correspondence or permutation invariance from sparse reward.
 
-7. **Do not use a PointNet spatial transformer.** Point coordinates are in the
+6. **Do not use a PointNet spatial transformer.** Point coordinates are in the
    arm base frame and their orientation is task information. Learned
    canonicalization would erase exactly the signal the policy needs.
 
-8. **The cloud is not repeated through history taps.** Redesign the policy
+7. **The cloud is not repeated through history taps.** Redesign the policy
    input as structured branches: the existing low-dimensional state history,
    one current/held cloud, and cloud metadata. The cloud branch is encoded once
    per policy tick, then concatenated with the vector branch. The asymmetric
    critic still receives privileged true object state.
 
-9. **Try explicit known-sponge fitting before committing the policy to a
+8. **Try explicit known-sponge fitting before committing the policy to a
    latent-only interface.** Dense visible points plus both silhouettes may fit
    the known 6×4×2.5 cm cuboid accurately enough to retain a compact explicit
    center/symmetry observation. This is a cheap branch of the same feasibility
    work. If it passes held-out tag GT, prefer its inspectability; otherwise use
    the PointNet latent described here.
 
-10. **Evaluation must remove the tags' visual shortcut.** The 20 mm black/white
+9. **Evaluation must remove the tags' visual shortcut.** The 20 mm black/white
     tags add excellent stereo texture and would make a quantitative tagged run
     over-optimistic relative to a tag-free sponge. Report raw and digitally
     tag-inpainted stereo results separately; acceptance uses the inpainted
@@ -106,7 +97,7 @@ dense stereo model, PointNet nor deployed policy may depend on them.
 For each scheduled static capture:
 
 1. Read the newest main/aux C922 frames.
-2. Undistort and rectify both frames with the fixed stereo calibration.
+2. Undistort and rectify both frames with the current accepted stereo calibration.
 3. Rectify each SAM mask with nearest-neighbor interpolation.
 4. Run the selected StereoSGBM/Fast-FoundationStereo backend on the **full
    rectified pair**, producing left-image disparity.
@@ -179,53 +170,21 @@ center, orientation/symmetry, velocity, contact state and physical dimensions
 through the privileged tail. Exact final dimensions are computed from the
 structured observation specification, never duplicated as literals.
 
-## Stage 0 — preserve the v1 evidence
-
-- Keep `datasets/sponge_20260808_145110`, its tiny-SAM masks and evaluator
-  output as the immutable visual-hull baseline.
-- Update `TODO.md` when implementation begins: record that the full dataset
-  completed and v1 was rejected for 10.3 mm eigenvalue p95 / 51° mean axis
-  disagreement.
-- Retain `real/tracking/hull_shape.py` and its viewer until dense stereo passes
-  held-out evaluation; delete or label legacy only after the replacement ships.
-
-## Stage 1 — mechanical rig and calibration
-
-### Mount
-
-- Put both C922s on a common rigid bar at 10–12 cm baseline.
-- Match roll, height and pitch mechanically; keep optical axes approximately
-  parallel rather than strongly toeing in.
-- Confirm both full-resolution images contain the whole spawn/grasp workspace
-  with margin for rectification crop.
-- Keep focus fixed at the calibrated value and manual exposure/gain identical.
-  Pin white balance too if the two units show a material color mismatch.
-- Check that the closer pair still has useful visibility around the arm; dense
-  stereo deliberately trades wide-angle occlusion diversity for shared surface.
+## Stage 1 — stereo calibration
 
 ### Calibration tooling
 
-- Add a synchronized dual-camera checkerboard capture tool using the existing
-  `open_rig_camera` source of camera identity/settings.
-- Solve `cv2.stereoCalibrate(..., CALIB_FIX_INTRINSIC)` from shared pairs, then
-  `cv2.stereoRectify` and `initUndistortRectifyMap`.
-- Store the relative rotation/translation, rectified projection matrices,
-  `Q`, image size, valid ROIs, source intrinsics fingerprints, focus and
-  calibration residual in one versioned stereo YAML. Rectification maps are
-  deterministically reconstructed from that file.
 - Add an annotated rectification viewer with horizontal guide lines and
   measured vertical correspondence residual. Refuse dense inference when the
   calibration image size/focus does not match.
-- Re-run `real.diagnostics.snapshot_cam_mount --camera main` and `--camera aux`
-  after the remount so sim visibility uses the real geometry.
-
-The calibrated tag-to-sponge transforms remain valid because the tags did not
-move. The current real pipeline's per-frame base anchoring remains useful, but
-it now anchors one rigid rig instead of defining its stereo baseline.
+- Extend the two-tag camera EMAs to regenerate relative rectification after a
+  stand moves, accepting updates only from synchronized complete-board poses
+  that pass the same vertical-residual gate. Until then, re-run the stationary
+  checkerboard snapshot after moving either camera.
 
 ### Calibration acceptance
 
-- Shared checkerboard reprojection RMS below 0.5 px per camera.
+- Shared checkerboard reprojection RMS below 1 px per camera.
 - Rectified vertical correspondence p95 below 1 px throughout the workspace.
 - The two-tag board's per-camera rig-pose estimates agree within calibrated
   gates; log disagreement rather than letting it perturb rectification.
@@ -429,6 +388,9 @@ Tests:
   held/age state machine.
 - Track inference time, cloud age, valid count, rejected fractions and stereo
   calibration fingerprint in rollout logs.
+- Compare complete two-tag camera poses with the calibration's known-good
+  anchor reference at startup. If either movement threshold is exceeded, print
+  the checkerboard recalibration instruction and withhold dense measurements.
 - Replace the orange √M overlay with actual colored 3D points in MuJoCo and
   projected depth/confidence in the camera viewer. Keep the tag-derived green
   box only in explicit evaluation mode.
@@ -476,8 +438,8 @@ Training acceptance:
 
 ## Rollback and alternatives
 
-- If rectification is unstable, improve the rigid mount/shared stereo
-  calibration before changing models.
+- If rectification is unstable, fix the shared stereo calibration before
+  changing models.
 - If correspondence fails on the textureless/tag-inpainted sponge, test
   lighting and non-semantic removable texture first; permanent texture is only
   acceptable if it is part of the deployed object specification.
@@ -493,7 +455,8 @@ Training acceptance:
 
 ## Definition of done
 
-- Cameras share a rigid close-baseline mount and pass stereo calibration gates.
+- The shared stereo calibration passes its reprojection, rectification and
+  workspace-coverage gates.
 - A tag-inpainted StereoSGBM or Fast-FoundationStereo cloud passes every
   held-out offline geometry gate and pose/coverage slice.
 - The selected frozen backend meets the static refresh budget; any optimized
