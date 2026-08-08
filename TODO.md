@@ -4,11 +4,18 @@ Unresolved, actionable work only. Not a changelog or project-status document.
 
 ## Tag-free object tracking (dual C922 + SAM), follow-ups
 
+- **Build a rigid shared stereo-camera mount.** Design a stiff ribbed printed
+  crossbar or printed camera adapters on an aluminium extrusion that preserve
+  the current ~109 mm baseline and overlapping views, provide repeatable camera
+  location and cable access, and preferably use one central stand rather than
+  over-constraining two stands. After installation, re-run stereo alignment,
+  checkerboard calibration, the table-anchor reference capture, and both
+  `real.diagnostics.snapshot_cam_mount` camera snapshots.
 - **Replace the precise object channel with dense stereo and a pretrained
-  point-cloud encoder.** First move the cameras to a common rigid 10–12 cm
-  stereo mount, run shared checkerboard calibration, and capture a short tagged
-  dense-depth validation set. Re-snapshot both sim camera mounts after moving
-  them.
+  point-cloud encoder.** Use the accepted stereo calibration to capture a short
+  tagged dense-depth validation set, gate StereoSGBM before trying
+  Fast-FoundationStereo, then build the explicit-fit/PointNet observation only
+  from a matcher that passes the held-out geometry checks.
 - **Pickplace `ObjectSource` rollout.** `rollout_lift` consumes the dual
   channels; after the dense-stereo observation interface lands, add the
   equivalent pickplace source with a real-table target, ring pose, and
