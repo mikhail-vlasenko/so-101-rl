@@ -62,7 +62,10 @@ def test_backend_corner_order_is_canonical(family):
     img = aruco.generateImageMarker(dictionary, 0, 300)
     img = cv2.copyMakeBorder(img, 100, 100, 100, 100, cv2.BORDER_CONSTANT, value=255)
 
-    dets = make_detector(family).detect(img)
+    detector = make_detector(family)
+    dets = detector.detect(img)
+    detector.close()
+    detector.close()
     assert len(dets) == 1
     c = dets[0].corners
     mid = 250.0  # image center (300 + 2*100) / 2

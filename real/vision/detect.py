@@ -41,14 +41,46 @@ class ArucoBackend:
         return [Detection(int(i), c.reshape(4, 2).astype(np.float32))
                 for c, i in zip(corners, ids.flatten())]
 
+    def close(self):
+        pass
+
+
+class _SafeAprilTagDetector(AprilTagDetector):
+    """pupil-apriltags detector with the native objects destroyed in dependency order.
+
+    pupil-apriltags 1.0.4.post11 destroys the tag family before the detector.
+    The detector's destructor then clears its family pointers, dereferencing the
+    already-freed family; after a long capture this has produced a repeatable
+    segfault in ``quick_decode_uninit``. The AprilTag C API requires the detector
+    to go first, followed by the family.
+    """
+
+    def close(self):
+        if self.tag_detector_ptr is None:
+            return
+        detector_destroy = self.libc.apriltag_detector_destroy
+        detector_destroy.restype = None
+        detector_destroy(self.tag_detector_ptr)
+        family_destroy = self.libc.tag36h11_destroy
+        family_destroy.restype = None
+        family_destroy(self.tag_families[APRILTAG_FAMILY])
+        self.tag_detector_ptr = None
+        self.tag_families.clear()
+
+    def __del__(self):
+        self.close()
+
 
 class AprilTagBackend:
     def __init__(self):
-        self._det = AprilTagDetector(families=APRILTAG_FAMILY)
+        self._det = _SafeAprilTagDetector(families=APRILTAG_FAMILY)
 
     def detect(self, gray):
         return [Detection(d.tag_id, d.corners[_APRILTAG_TO_CANONICAL].astype(np.float32))
                 for d in self._det.detect(gray)]
+
+    def close(self):
+        self._det.close()
 
 
 def make_detector(family):

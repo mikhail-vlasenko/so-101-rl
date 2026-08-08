@@ -38,21 +38,34 @@ it is the error that matters, since it pairs each axis with the wrong half
 extent and corrupts every GT shape tensor. Measure those two faces; do not
 infer them from the fit.
 
-The solve consumes frames where >= 2 sponge tags are co-visible in one camera:
-each such pair gives a measured tag_i -> tag_j relative transform that the
-per-tag placements must reproduce through the box. A weak prior toward the
-face centers (tags are glued roughly centered) pins any gauge freedom left
-when the observed pairs span too few distinct faces. GT body pose then follows
-from any single visible tag: T_cam_body = T_cam_tag @ inv(T_body_tag).
+Capture is placement-based. Move the sponge, release it, and hold still: the
+tool waits for stable image corners, rejects tags seen past 60 degrees, then
+aggregates a stationary burst from both cameras into one placement. Two
+distinct tags must be visible somewhere across the stereo rig, not necessarily
+in one camera. Move the sponge again to re-arm capture. The native preview shows
+both cameras, accepted/rejected tags, settling progress, pair coverage and each
+capture event.
 
-Measured pairs are cached to `tag_pairs.npz` so the fit can be re-run offline
-(`--from-cache`) without the rig or another capture session.
+The solver first uses rigid tag-pair transforms to choose the box-face signs,
+then jointly minimizes raw corner reprojection error over all cameras,
+placements and tags. Each placement gets one sponge pose; tag transforms are
+shared globally. A robust first fit rejects corner-level outliers before the
+final fit. Captures are cached in `tag_placements.npz` so `--from-cache` can
+re-solve without the rig. Every accepted placement is saved atomically; stopping
+early and running the normal command again resumes toward the requested total.
+Use `--new-session` to archive that cache and start over.
 
-Run (tags glued, sponge held so several faces are visible; keep turning it
-through the capture for view diversity):
-    conda run -n mujoco_env python -m real.tracking.tag_body_calib --frames 300
+`--validate` captures a separate held-out set in
+`tag_validation_placements.npz` and reports how far independently inferred
+sponge centers disagree. It never refits or overwrites `sponge_tags.yaml`.
+
+Run:
+    conda run -n mujoco_env python -m real.tracking.tag_body_calib --placements 30
+    conda run -n mujoco_env python -m real.tracking.tag_body_calib --validate --placements 15
 """
 import argparse
+from collections import deque
+from dataclasses import dataclass
 import itertools
 import time
 from pathlib import Path
@@ -64,16 +77,26 @@ import yaml
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
-from real.calib.extrinsics import mat_inv, mat_to_pos_quat, pos_quat_to_mat, rt_to_mat
-from real.marker_spec import SPONGE_TAG_IDS, TAG_SIZE_MM
-from real.vision.detect import make_detector
-from real.vision.pose import PoseEstimator
+from real.calib.extrinsics import (
+    average_transforms,
+    base_cam_from_table,
+    load_extrinsics,
+    mat_inv,
+    mat_to_pos_quat,
+    pos_quat_to_mat,
+    rt_to_mat,
+)
+from real.marker_spec import TABLE_TAG_ID, TAG_SIZE_MM
+from real.vision.camera import HEIGHT, WIDTH
+from real.vision.detect import Detection, make_detector
+from real.vision.pose import PoseEstimator, tag_object_points
 from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCENE_XML = REPO_ROOT / "so101" / "scene_lift.xml"
 SPONGE_TAGS_PATH = Path(__file__).resolve().parent / "sponge_tags.yaml"
-PAIRS_PATH = Path(__file__).resolve().parent / "tag_pairs.npz"
+PLACEMENTS_PATH = Path(__file__).resolve().parent / "tag_placements.npz"
+VALIDATION_PLACEMENTS_PATH = Path(__file__).resolve().parent / "tag_validation_placements.npz"
 
 FACES = ("+x", "-x", "+y", "-y", "+z", "-z")
 
@@ -104,7 +127,136 @@ PAIR_FLIP_REJECT_DEG = 20.0
 # its tag at all (see the module docstring).
 TAG_OVERHANG_ALLOWANCE_M = 0.003
 
+# Calibration capture quality. Unlike the deployment visibility gate, these
+# thresholds deliberately favor a smaller, cleaner subset of measurements.
+MAX_INCIDENCE_DEG = 60.0
+STATIONARY_DWELL_S = 0.75
+# The smoke dataset's genuinely-static frame-max is 0.22 px at p95 / 0.82 px
+# worst, while moving frames reach 13 px at p90. 2.5 px leaves room for a hand-
+# held sponge and detector flicker without admitting ordinary repositioning.
+STATIONARY_CORNER_SHIFT_PX = 2.5
+REARM_CORNER_SHIFT_PX = 25.0
+CAPTURE_FRAMES = 12
+MIN_PAIR_PLACEMENTS = 4
+
+# Robust joint-reprojection rejection. Intrinsic calibration itself sits near
+# 0.2-0.3 px RMS; a 1 px floor leaves ordinary detector jitter alone while
+# still removing a blurred or mirrored observation.
+REPROJECTION_OUTLIER_FLOOR_PX = 1.0
+REPROJECTION_OUTLIER_MAD_K = 3.5
+REPROJECTION_MAX_DROP_FRAC = 0.2
+
 _AXES = {"x": 0, "y": 1, "z": 2}
+
+
+@dataclass
+class StereoPlacement:
+    """One settled sponge pose: camera anchors plus median image corners."""
+
+    anchors: dict[str, np.ndarray]
+    corners: dict[tuple[str, int], np.ndarray]
+
+
+@dataclass(frozen=True)
+class GateResult:
+    state: str
+    dwell_s: float
+    motion_px: float
+    reset_window: bool
+    capture: bool
+
+
+class StationaryPlacementGate:
+    """Image-space settle/re-arm state machine for automatic placement capture.
+
+    Input keys are ``(camera_name, tag_id)`` and values are canonical four-corner
+    arrays. Exact key continuity is intentional: a detection appearing/disappearing
+    restarts the dwell instead of mixing different evidence in one placement.
+    """
+
+    def __init__(self, dwell_s=STATIONARY_DWELL_S,
+                 still_px=STATIONARY_CORNER_SHIFT_PX,
+                 rearm_px=REARM_CORNER_SHIFT_PX,
+                 capture_frames=CAPTURE_FRAMES):
+        self.dwell_s = float(dwell_s)
+        self.still_px = float(still_px)
+        self.rearm_px = float(rearm_px)
+        self.capture_frames = int(capture_frames)
+        self._previous = None
+        self._stable_since = None
+        self._stable_frames = 0
+        self._captured = None
+        self._armed = True
+
+    @staticmethod
+    def _distinct_tags(corners):
+        return {tag for _, tag in corners}
+
+    @staticmethod
+    def _motion_px(a, b):
+        common = set(a) & set(b)
+        if len({tag for _, tag in common}) < 2:
+            return np.inf
+        # A third view/tag may flicker at the incidence boundary. The median
+        # preserves the two-tag rigid-motion signal without letting that one
+        # detector toggle reset an otherwise-settled placement.
+        return float(np.median([
+            np.linalg.norm(a[key] - b[key], axis=1).mean() for key in common
+        ]))
+
+    def update(self, now, corners):
+        corners = {key: np.asarray(value, dtype=np.float64).copy()
+                   for key, value in corners.items()}
+        valid = len(self._distinct_tags(corners)) >= 2
+
+        if not self._armed:
+            common = set(corners) & set(self._captured)
+            moved = any(float(np.linalg.norm(
+                corners[key] - self._captured[key], axis=1).mean()) >= self.rearm_px
+                        for key in common)
+            changed_view = valid and not common
+            if moved or changed_view:
+                self._armed = True
+                self._previous = None
+                self._stable_since = None
+                self._stable_frames = 0
+                return GateResult("settling", 0.0, np.inf, True, False)
+            return GateResult("move sponge", 0.0, 0.0, False, False)
+
+        if not valid:
+            self._previous = corners
+            self._stable_since = None
+            self._stable_frames = 0
+            return GateResult("need 2 tags", 0.0, np.inf, True, False)
+
+        motion = (np.inf if self._previous is None
+                  else self._motion_px(self._previous, corners))
+        self._previous = corners
+        if motion > self.still_px:
+            self._stable_since = float(now)
+            self._stable_frames = 1
+            return GateResult("hold still", 0.0, motion, True, False)
+
+        if self._stable_since is None:
+            self._stable_since = float(now)
+            self._stable_frames = 1
+        else:
+            self._stable_frames += 1
+        dwell = float(now) - self._stable_since
+        capture = dwell >= self.dwell_s and self._stable_frames >= self.capture_frames
+        if capture:
+            self._armed = False
+            self._captured = corners
+            return GateResult("captured", dwell, motion, False, True)
+        return GateResult("settling", dwell, motion, False, False)
+
+
+def incidence_angle_deg(rvec, tvec):
+    """Angle between a tag's outward normal and its ray toward the camera."""
+    R = Rotation.from_rotvec(np.asarray(rvec, dtype=np.float64)).as_matrix()
+    tvec = np.asarray(tvec, dtype=np.float64)
+    toward_camera = -tvec / np.linalg.norm(tvec)
+    return float(np.degrees(np.arccos(np.clip(R[:, 2] @ toward_camera, -1.0, 1.0))))
 
 
 def load_box_half_extents():
@@ -272,19 +424,335 @@ def solve_faces_and_placements(pairs, axis_of_tag, half_extents):
     return scored
 
 
-def save_pairs(path, pairs):
-    np.savez(path,
-             ids=np.array([[i, j] for i, j, _ in pairs], dtype=np.int64),
-             transforms=np.array([T for _, _, T in pairs]))
+def save_placements(path, placements, camera_matrices, dist_coeffs):
+    """Atomically persist settled placements without pickle/object arrays."""
+    path = Path(path)
+    cameras = tuple(CAMERA_NAMES)
+    placement_idx, camera_idx, tag_ids, corners = [], [], [], []
+    for p_idx, placement in enumerate(placements):
+        for (camera, tag), value in sorted(placement.corners.items()):
+            placement_idx.append(p_idx)
+            camera_idx.append(cameras.index(camera))
+            tag_ids.append(tag)
+            corners.append(value)
+    anchors = np.stack([
+        np.stack([placement.anchors[camera] for camera in cameras])
+        for placement in placements
+    ])
+    temp = path.with_name(f".{path.name}.tmp")
+    with open(temp, "wb") as f:
+        np.savez(
+            f,
+            version=np.array(1, dtype=np.int64),
+            cameras=np.array(cameras),
+            anchors=anchors,
+            placement_idx=np.asarray(placement_idx, dtype=np.int64),
+            camera_idx=np.asarray(camera_idx, dtype=np.int64),
+            tag_ids=np.asarray(tag_ids, dtype=np.int64),
+            corners=np.asarray(corners, dtype=np.float64),
+            camera_matrices=np.stack([camera_matrices[camera] for camera in cameras]),
+            dist_coeffs=np.stack([dist_coeffs[camera] for camera in cameras]),
+        )
+    temp.replace(path)
 
 
-def load_pairs(path):
-    data = np.load(path)
-    return [(int(i), int(j), T)
-            for (i, j), T in zip(data["ids"], data["transforms"])]
+def load_placements(path):
+    """Return ``(placements, camera_matrices, dist_coeffs)`` from the cache."""
+    data = np.load(path, allow_pickle=False)
+    assert int(data["version"]) == 1, f"unsupported placement cache version {data['version']}"
+    cameras = tuple(str(name) for name in data["cameras"])
+    assert cameras == tuple(CAMERA_NAMES), (cameras, CAMERA_NAMES)
+    placements = [StereoPlacement(
+        anchors={camera: data["anchors"][p_idx, c_idx].copy()
+                 for c_idx, camera in enumerate(cameras)},
+        corners={})
+        for p_idx in range(len(data["anchors"]))]
+    for p_idx, c_idx, tag, value in zip(
+            data["placement_idx"], data["camera_idx"], data["tag_ids"], data["corners"]):
+        placements[int(p_idx)].corners[(cameras[int(c_idx)], int(tag))] = value.copy()
+    mats = {camera: data["camera_matrices"][c_idx].copy()
+            for c_idx, camera in enumerate(cameras)}
+    dists = {camera: data["dist_coeffs"][c_idx].copy()
+             for c_idx, camera in enumerate(cameras)}
+    return placements, mats, dists
 
 
-def save_sponge_tags(path, half_extents, faces, solved, res):
+def aggregate_placement(samples, estimators):
+    """Median a stationary frame burst into one stereo placement."""
+    assert len(samples) >= CAPTURE_FRAMES, len(samples)
+    anchors = {
+        camera: average_transforms([sample["anchors"][camera] for sample in samples])
+        for camera in CAMERA_NAMES
+    }
+    all_keys = sorted({key for sample in samples for key in sample["corners"]})
+    corners = {}
+    for key in all_keys:
+        values = [sample["corners"][key] for sample in samples if key in sample["corners"]]
+        if len(values) < CAPTURE_FRAMES // 2:
+            continue
+        median = np.median(np.stack(values), axis=0)
+        camera, tag = key
+        rvec, tvec = estimators[camera].estimate(Detection(tag, median.astype(np.float32)))
+        if incidence_angle_deg(rvec, tvec) <= MAX_INCIDENCE_DEG:
+            corners[key] = median
+    distinct = {tag for _, tag in corners}
+    assert len(distinct) >= 2, f"settled burst retained only tags {sorted(distinct)}"
+    return StereoPlacement(anchors, corners)
+
+
+def placement_tag_poses(placement, estimators):
+    """Per ``(camera, tag)`` tag transforms in camera and base frames."""
+    cam, base = {}, {}
+    for (camera, tag), corners in placement.corners.items():
+        detection = Detection(tag, corners.astype(np.float32))
+        T_cam_tag = rt_to_mat(*estimators[camera].estimate(detection))
+        cam[(camera, tag)] = T_cam_tag
+        base[(camera, tag)] = placement.anchors[camera] @ T_cam_tag
+    return cam, base
+
+
+def pairs_from_placements(placements, estimators):
+    """One rigid pair measurement per tag pair and settled placement.
+
+    Same-camera evidence is preferred because the camera anchor cancels. When
+    no camera sees both tags, their base-frame poses connect the two views.
+    """
+    pairs = []
+    for placement in placements:
+        cam_poses, base_poses = placement_tag_poses(placement, estimators)
+        tags = sorted({tag for _, tag in placement.corners})
+        for i, j in itertools.combinations(tags, 2):
+            same_camera = [mat_inv(cam_poses[(camera, i)]) @ cam_poses[(camera, j)]
+                           for camera in CAMERA_NAMES
+                           if (camera, i) in cam_poses and (camera, j) in cam_poses]
+            if same_camera:
+                measured = average_transforms(same_camera)
+            else:
+                world_i = average_transforms([
+                    pose for (camera, tag), pose in base_poses.items() if tag == i])
+                world_j = average_transforms([
+                    pose for (camera, tag), pose in base_poses.items() if tag == j])
+                measured = mat_inv(world_i) @ world_j
+            pairs.append((i, j, measured))
+    return pairs
+
+
+def _pose_disagreement(a, b):
+    center_mm = np.linalg.norm(a[:3, 3] - b[:3, 3]) * 1e3
+    angle_deg = np.degrees(Rotation.from_matrix(a[:3, :3].T @ b[:3, :3]).magnitude())
+    return np.array([center_mm, angle_deg])
+
+
+def validation_errors(placements, camera_matrices, dist_coeffs, tag_transforms):
+    """Held-out body-pose disagreement by tag pair and by camera.
+
+    Each observation independently infers ``T_base_body`` through the saved
+    ``T_body_tag``. Camera views of one tag are averaged before cross-tag
+    comparison, so tag-pair residuals do not overweight a placement merely
+    because both cameras saw the same face. Values are ``(center_mm, angle_deg)``.
+    """
+    estimators = {camera: PoseEstimator(camera_matrices[camera], dist_coeffs[camera])
+                  for camera in CAMERA_NAMES}
+    cross_tag = {}
+    cross_camera = {}
+    for placement in placements:
+        _, base_poses = placement_tag_poses(placement, estimators)
+        observed = {tag for _, tag in base_poses}
+        missing = observed - set(tag_transforms)
+        assert not missing, f"validation saw unsolved sponge tags {sorted(missing)}"
+        body_poses = {
+            key: T_base_tag @ mat_inv(tag_transforms[key[1]])
+            for key, T_base_tag in base_poses.items()
+        }
+        per_tag = {
+            tag: average_transforms([
+                pose for (_, observed_tag), pose in body_poses.items()
+                if observed_tag == tag
+            ])
+            for tag in sorted(observed)
+        }
+        for i, j in itertools.combinations(sorted(per_tag), 2):
+            cross_tag.setdefault((i, j), []).append(
+                _pose_disagreement(per_tag[i], per_tag[j]))
+        for tag in sorted(observed):
+            camera_poses = [body_poses[(camera, tag)] for camera in CAMERA_NAMES
+                            if (camera, tag) in body_poses]
+            if len(camera_poses) == 2:
+                cross_camera.setdefault(tag, []).append(
+                    _pose_disagreement(camera_poses[0], camera_poses[1]))
+    return ({key: np.asarray(values) for key, values in cross_tag.items()},
+            {key: np.asarray(values) for key, values in cross_camera.items()})
+
+
+def print_validation_report(cross_tag, cross_camera, tags):
+    """Print held-out RMS/p95 consistency and require every tag pair."""
+    required = set(itertools.combinations(sorted(tags), 2))
+    missing = {pair: len(cross_tag.get(pair, ())) for pair in required
+               if len(cross_tag.get(pair, ())) < MIN_PAIR_PLACEMENTS}
+    if missing:
+        raise RuntimeError(
+            f"need at least {MIN_PAIR_PLACEMENTS} held-out placements per tag pair; "
+            f"insufficient {missing}")
+
+    def line(label, values):
+        center = values[:, 0]
+        angle = values[:, 1]
+        return (f"  {label}: n={len(values):2d}  center "
+                f"{np.sqrt(np.mean(center ** 2)):.2f} mm RMS / "
+                f"{np.percentile(center, 95):.2f} mm p95; rotation "
+                f"{np.sqrt(np.mean(angle ** 2)):.2f} deg RMS")
+
+    print("\nheld-out cross-tag body-center disagreement:")
+    for pair in sorted(cross_tag):
+        print(line(f"tags {pair[0]}-{pair[1]}", cross_tag[pair]))
+    combined = np.concatenate([cross_tag[pair] for pair in sorted(required)])
+    print(line("all tag pairs", combined))
+    print("cross-camera disagreement for the same tag:")
+    if cross_camera:
+        for tag in sorted(cross_camera):
+            print(line(f"tag {tag}", cross_camera[tag]))
+    else:
+        print("  no tag was accepted by both cameras in the same placement")
+    print("These are internal-consistency errors, not absolute error against an "
+          "external metrology reference.")
+
+
+def pair_counts(pairs):
+    return {pair: sum((i, j) == pair for i, j, _ in pairs)
+            for pair in sorted({(i, j) for i, j, _ in pairs})}
+
+
+def require_pair_coverage(pairs, tags):
+    counts = pair_counts(pairs)
+    required = set(itertools.combinations(sorted(tags), 2))
+    missing = {pair: counts.get(pair, 0) for pair in required
+               if counts.get(pair, 0) < MIN_PAIR_PLACEMENTS}
+    assert not missing, (
+        f"need at least {MIN_PAIR_PLACEMENTS} stationary placements per tag pair; "
+        f"insufficient {missing}, all counts {counts}")
+
+
+def _transforms_from_solution(faces, half_extents, solved):
+    return {tag: tag_body_transform(faces[tag], half_extents, *solved[tag])
+            for tag in sorted(faces)}
+
+
+def pair_residuals(pairs, faces, half_extents, solved):
+    transforms = _transforms_from_solution(faces, half_extents, solved)
+    residuals = []
+    for i, j, measured in pairs:
+        model = mat_inv(transforms[i]) @ transforms[j]
+        err = mat_inv(model) @ measured
+        residuals.append(np.concatenate([
+            err[:3, 3],
+            ROT_WEIGHT_M * Rotation.from_matrix(err[:3, :3]).as_rotvec(),
+        ]))
+    return np.asarray(residuals)
+
+
+def _initial_body_poses(placements, estimators, tag_transforms):
+    poses = []
+    for placement in placements:
+        _, base_poses = placement_tag_poses(placement, estimators)
+        candidates = [T_base_tag @ mat_inv(tag_transforms[tag])
+                      for (_, tag), T_base_tag in base_poses.items()]
+        poses.append(average_transforms(candidates))
+    return poses
+
+
+def fit_joint_reprojection(placements, faces, half_extents, initial_solved,
+                           camera_matrices, dist_coeffs):
+    """Fit shared tag placements and one body pose per settled placement."""
+    estimators = {camera: PoseEstimator(camera_matrices[camera], dist_coeffs[camera])
+                  for camera in CAMERA_NAMES}
+    tags = sorted(faces)
+    tag_idx = {tag: 3 * index for index, tag in enumerate(tags)}
+    initial_tags = _transforms_from_solution(faces, half_extents, initial_solved)
+    initial_body = _initial_body_poses(placements, estimators, initial_tags)
+    tag_x = np.concatenate([np.asarray(initial_solved[tag]) for tag in tags])
+    body_x = np.concatenate([
+        np.concatenate([Rotation.from_matrix(T[:3, :3]).as_rotvec(), T[:3, 3]])
+        for T in initial_body
+    ])
+    x0 = np.concatenate([tag_x, body_x])
+    tag_lo, tag_hi = placement_bounds(faces, half_extents)
+    bounds = (np.concatenate([tag_lo, np.full(len(body_x), -np.inf)]),
+              np.concatenate([tag_hi, np.full(len(body_x), np.inf)]))
+    observations = [(p_idx, camera, tag, corners)
+                    for p_idx, placement in enumerate(placements)
+                    for (camera, tag), corners in sorted(placement.corners.items())]
+
+    def unpack(x):
+        tag_transforms = {
+            tag: tag_body_transform(faces[tag], half_extents,
+                                    *x[tag_idx[tag]:tag_idx[tag] + 3])
+            for tag in tags
+        }
+        offset = 3 * len(tags)
+        bodies = []
+        for p_idx in range(len(placements)):
+            values = x[offset + 6 * p_idx:offset + 6 * (p_idx + 1)]
+            T = np.eye(4)
+            T[:3, :3] = Rotation.from_rotvec(values[:3]).as_matrix()
+            T[:3, 3] = values[3:]
+            bodies.append(T)
+        return tag_transforms, bodies
+
+    def observation_residuals(x):
+        tag_transforms, bodies = unpack(x)
+        blocks = []
+        for p_idx, camera, tag, observed in observations:
+            points_tag = tag_object_points(tag)
+            points_body = (tag_transforms[tag][:3, :3] @ points_tag.T).T \
+                + tag_transforms[tag][:3, 3]
+            points_base = (bodies[p_idx][:3, :3] @ points_body.T).T + bodies[p_idx][:3, 3]
+            T_cam_base = mat_inv(placements[p_idx].anchors[camera])
+            points_cam = (T_cam_base[:3, :3] @ points_base.T).T + T_cam_base[:3, 3]
+            projected, _ = cv2.projectPoints(
+                points_cam, np.zeros(3), np.zeros(3),
+                camera_matrices[camera], dist_coeffs[camera])
+            blocks.append((projected.reshape(4, 2) - observed).ravel())
+        return np.concatenate(blocks)
+
+    fit = least_squares(observation_residuals, x0, bounds=bounds,
+                        loss="soft_l1", f_scale=0.75, x_scale="jac")
+    assert fit.success, f"joint stereo reprojection fit failed: {fit.message}"
+    tag_transforms, body_poses = unpack(fit.x)
+    solved = {}
+    for tag in tags:
+        start = tag_idx[tag]
+        solved[tag] = tuple(fit.x[start:start + 3])
+    flat = observation_residuals(fit.x).reshape(len(observations), 4, 2)
+    errors = np.sqrt(np.mean(np.sum(np.square(flat), axis=2), axis=1))
+    return solved, body_poses, observations, errors
+
+
+def reject_reprojection_outliers(placements, observations, errors):
+    """Drop bad camera/tag observations; discard placements left underconstrained."""
+    median = float(np.median(errors))
+    mad = float(np.median(np.abs(errors - median)))
+    cutoff = max(REPROJECTION_OUTLIER_FLOOR_PX,
+                 median + REPROJECTION_OUTLIER_MAD_K * 1.4826 * mad)
+    bad = {(p_idx, camera, tag)
+           for (p_idx, camera, tag, _), error in zip(observations, errors)
+           if error > cutoff}
+    if len(bad) > REPROJECTION_MAX_DROP_FRAC * len(observations):
+        raise RuntimeError(
+            f"reprojection rejection wants to drop {len(bad)}/{len(observations)} "
+            f"observations (>{REPROJECTION_MAX_DROP_FRAC:.0%}); capture is suspect")
+    filtered = []
+    dropped_placements = 0
+    for p_idx, placement in enumerate(placements):
+        corners = {key: value for key, value in placement.corners.items()
+                   if (p_idx, key[0], key[1]) not in bad}
+        if len({tag for _, tag in corners}) < 2:
+            dropped_placements += 1
+            continue
+        filtered.append(StereoPlacement(placement.anchors, corners))
+    return filtered, len(bad), dropped_placements, cutoff
+
+
+def save_sponge_tags(path, half_extents, faces, solved, res, calibration_meta=None):
     tags = {}
     for tag, (u, v, yaw) in solved.items():
         pos, quat = mat_to_pos_quat(
@@ -303,6 +771,8 @@ def save_sponge_tags(path, half_extents, faces, solved, res):
         "residual_pos_mm_rms": pos_mm,
         "residual_rot_deg_rms": rot_deg,
     }
+    if calibration_meta is not None:
+        data.update(calibration_meta)
     with open(path, "w") as f:
         yaml.safe_dump(data, f, default_flow_style=None, sort_keys=False)
 
@@ -321,66 +791,218 @@ def body_pose_from_tag(rvec, tvec, T_body_tag):
     return rt_to_mat(rvec, tvec) @ mat_inv(T_body_tag)
 
 
-def collect_pairs(frames, family, tags):
-    """Capture `frames` frame-pairs from both rig cameras and accumulate all
-    same-frame sponge-tag pairs as (id_i, id_j, T_ti_tj)."""
+def _annotate_camera(frame, camera, detections, accepted, angles, anchor_ok):
+    view = frame.copy()
+    for tag, detection in detections.items():
+        quad = detection.corners.astype(np.int32)
+        if tag == TABLE_TAG_ID:
+            color = (255, 180, 0)
+            label = f"table {tag}"
+        elif (camera, tag) in accepted:
+            color = (0, 220, 0)
+            label = f"tag {tag} {angles[tag]:.0f}deg OK"
+        else:
+            color = (0, 0, 255)
+            label = f"tag {tag} {angles[tag]:.0f}deg > {MAX_INCIDENCE_DEG:.0f}"
+        cv2.polylines(view, [quad], True, color, 3)
+        x, y = quad[0]
+        cv2.putText(view, label, (int(x), max(24, int(y) - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+    cv2.putText(view, f"{camera}  table={'OK' if anchor_ok else 'MISSING'}",
+                (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                (0, 220, 0) if anchor_ok else (0, 0, 255), 2)
+    return cv2.resize(view, (WIDTH // 2, HEIGHT // 2))
+
+
+def _show_capture_view(frames, detections, accepted, angles, anchors, result,
+                       n_placements, target_placements, counts):
+    views = [_annotate_camera(frames[camera], camera, detections[camera], accepted,
+                              angles[camera], camera in anchors)
+             for camera in CAMERA_NAMES]
+    stereo = np.hstack(views)
+    canvas = np.zeros((stereo.shape[0] + 92, stereo.shape[1], 3), dtype=np.uint8)
+    canvas[92:] = stereo
+    state_color = ((0, 255, 0) if result.state.startswith("captured")
+                   else (0, 220, 255) if result.state == "settling"
+                   else (0, 0, 255))
+    cv2.putText(canvas,
+                f"{result.state.upper()}  motion {result.motion_px:.2f}/"
+                f"{STATIONARY_CORNER_SHIFT_PX:.2f}px  "
+                f"dwell {result.dwell_s:.2f}/{STATIONARY_DWELL_S:.2f}s  "
+                f"placements {n_placements}/{target_placements}",
+                (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, state_color, 2)
+    coverage = "  ".join(f"{i}-{j}:{n}" for (i, j), n in sorted(counts.items())) or "none"
+    cv2.putText(canvas, f"pair coverage: {coverage}", (12, 62),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+    cv2.putText(canvas, "Move after capture  |  ENTER/q/ESC save and stop",
+                (12, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (190, 190, 190), 1)
+    cv2.imshow("sponge stereo tag calibration", canvas)
+
+
+def collect_placements(target_placements, family, tags, gui=True,
+                       initial_placements=(), cached_mats=None, cached_dists=None,
+                       cache_path=PLACEMENTS_PATH):
+    """Auto-capture distinct stationary placements from the complete stereo rig."""
+    T_base_table, _, _, _ = load_extrinsics()
     detector = make_detector(family)
-    wanted = set(tags)
-    caps, estimators = {}, {}
-    for name in CAMERA_NAMES:
-        caps[name], mat, dist = open_rig_camera(name)
-        estimators[name] = PoseEstimator(mat, dist)
-    pairs = []
-    per_tag_seen = {tag: 0 for tag in sorted(wanted)}
+    wanted = set(tags) | {TABLE_TAG_ID}
+    caps, mats, dists, estimators = {}, {}, {}, {}
+    for camera in CAMERA_NAMES:
+        caps[camera], mats[camera], dists[camera] = open_rig_camera(camera)
+        estimators[camera] = PoseEstimator(mats[camera], dists[camera])
+    if cached_mats is not None:
+        for camera in CAMERA_NAMES:
+            if not np.array_equal(mats[camera], cached_mats[camera]):
+                raise RuntimeError(f"{camera} intrinsics changed since placement cache")
+            if not np.array_equal(dists[camera], cached_dists[camera]):
+                raise RuntimeError(f"{camera} distortion changed since placement cache")
+
+    gate = StationaryPlacementGate()
+    recent = deque(maxlen=CAPTURE_FRAMES)
+    placements = list(initial_placements)
+    counts = pair_counts(pairs_from_placements(placements, estimators)) if placements else {}
+    last_print = 0.0
+    capture_flash_until = 0.0
+    print("Move the sponge to a new pose and release it. Capture is automatic after "
+          f"{STATIONARY_DWELL_S:.2f}s still with >=2 tags across the rig at "
+          f"<= {MAX_INCIDENCE_DEG:.0f} degrees. Move it clearly after each capture.")
     try:
-        for k in range(frames):
-            for name in CAMERA_NAMES:
-                ok, frame = caps[name].read()
+        while len(placements) < target_placements:
+            frames, detections, angles, anchors, accepted = {}, {}, {}, {}, {}
+            for camera in CAMERA_NAMES:
+                ok, frame = caps[camera].read()
                 if not ok:
-                    raise RuntimeError(f"camera read failed on '{name}'")
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                dets = {d.id: d for d in detector.detect(gray) if d.id in wanted}
-                for tag in dets:
-                    per_tag_seen[tag] += 1
-                T = {tag: rt_to_mat(*estimators[name].estimate(d))
-                     for tag, d in dets.items()}
-                ids = sorted(T)
-                for a in range(len(ids)):
-                    for b in range(a + 1, len(ids)):
-                        pairs.append((ids[a], ids[b],
-                                      mat_inv(T[ids[a]]) @ T[ids[b]]))
-            if (k + 1) % 10 == 0:
-                print(f"  frame {k + 1}/{frames}: {len(pairs)} pairs, "
-                      "seen " + " ".join(f"{t}:{n}" for t, n in per_tag_seen.items()),
-                      flush=True)
-            time.sleep(0.1)  # let the sponge be repositioned between frames
+                    raise RuntimeError(f"camera read failed on '{camera}'")
+                frames[camera] = frame
+                found = {d.id: d for d in detector.detect(
+                    cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)) if d.id in wanted}
+                detections[camera] = found
+                angles[camera] = {}
+                if TABLE_TAG_ID in found:
+                    anchors[camera] = base_cam_from_table(
+                        T_base_table, *estimators[camera].estimate(found[TABLE_TAG_ID]))
+                for tag, detection in found.items():
+                    if tag == TABLE_TAG_ID:
+                        continue
+                    rvec, tvec = estimators[camera].estimate(detection)
+                    angle = incidence_angle_deg(rvec, tvec)
+                    angles[camera][tag] = angle
+                    if angle <= MAX_INCIDENCE_DEG:
+                        accepted[(camera, tag)] = detection.corners.copy()
+
+            gate_input = accepted if set(anchors) == set(CAMERA_NAMES) else {}
+            now = time.monotonic()
+            result = gate.update(now, gate_input)
+            if result.reset_window:
+                recent.clear()
+            if len({tag for _, tag in gate_input}) >= 2:
+                recent.append({
+                    "anchors": {camera: anchors[camera].copy() for camera in CAMERA_NAMES},
+                    "corners": {key: value.copy() for key, value in accepted.items()},
+                })
+            if result.capture:
+                assert len(recent) == CAPTURE_FRAMES, len(recent)
+                placement = aggregate_placement(list(recent), estimators)
+                placements.append(placement)
+                counts = pair_counts(pairs_from_placements(placements, estimators))
+                save_placements(cache_path, placements, mats, dists)
+                print(f"CAPTURED placement {len(placements)}/{target_placements}: "
+                      f"tags {sorted({tag for _, tag in placement.corners})}, "
+                      f"pair coverage {counts}; saved {cache_path.name}", flush=True)
+                capture_flash_until = now + 1.0
+
+            if gui:
+                display_result = result
+                if now < capture_flash_until and not result.capture:
+                    display_result = GateResult(
+                        f"captured #{len(placements)}", result.dwell_s,
+                        result.motion_px, False, False)
+                _show_capture_view(frames, detections, accepted, angles, anchors,
+                                   display_result, len(placements), target_placements, counts)
+                final_capture = result.capture and len(placements) == target_placements
+                delay_ms = 1000 if final_capture else 1
+                key = cv2.waitKey(delay_ms) & 0xFF
+                if key in (13, 27, ord("q")):
+                    break
+            elif now - last_print >= 1.0:
+                print(f"{result.state}: dwell {result.dwell_s:.2f}s, "
+                      f"placements {len(placements)}/{target_placements}", flush=True)
+                last_print = now
     finally:
         for cap in caps.values():
             cap.release()
-    return pairs
+        if gui:
+            cv2.destroyAllWindows()
+        detector.close()
+    complete = len(placements) >= target_placements
+    return placements, mats, dists, complete
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Solve sponge tag placements -> sponge_tags.yaml")
-    parser.add_argument("--frames", type=int, default=300)
+    parser.add_argument("--placements", type=int, default=30,
+                        help="distinct settled sponge poses to auto-capture")
     parser.add_argument("--family", choices=("apriltag", "aruco"), default="apriltag")
-    parser.add_argument("--tags", type=int, nargs="+", default=list(SPONGE_TAG_IDS),
+    parser.add_argument("--tags", type=int, nargs="+", default=sorted(AXIS_OF_TAG),
                         help="tag ids glued to the sponge this session")
     parser.add_argument("--from-cache", action="store_true",
-                        help=f"re-fit the pairs in {PAIRS_PATH.name} instead of capturing")
+                        help=f"re-fit {PLACEMENTS_PATH.name} instead of capturing")
+    parser.add_argument("--validate", action="store_true",
+                        help="capture held-out placements and report center consistency")
+    parser.add_argument("--new-session", action="store_true",
+                        help="archive any placement cache and start from zero")
+    parser.add_argument("--no-gui", action="store_true",
+                        help="disable the annotated stereo preview")
     args = parser.parse_args()
+    assert not (args.from_cache and (args.new_session or args.validate)), \
+        "--from-cache is mutually exclusive with --new-session and --validate"
 
     half_extents = load_box_half_extents()
     print(f"box half extents (from {SCENE_XML.name}): {half_extents}")
     if args.from_cache:
-        pairs = load_pairs(PAIRS_PATH)
-        print(f"loaded {len(pairs)} cached pairs from {PAIRS_PATH.name}")
+        placements, mats, dists = load_placements(PLACEMENTS_PATH)
+        print(f"loaded {len(placements)} settled placements from {PLACEMENTS_PATH.name}")
     else:
-        pairs = collect_pairs(args.frames, args.family, args.tags)
-        if not pairs:
-            raise RuntimeError("no frame had >= 2 co-visible sponge tags")
-        save_pairs(PAIRS_PATH, pairs)
+        cache_path = VALIDATION_PLACEMENTS_PATH if args.validate else PLACEMENTS_PATH
+        session_kind = "validation" if args.validate else "calibration"
+        if args.new_session and cache_path.exists():
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            backup = cache_path.with_name(f"{cache_path.stem}_{stamp}.npz")
+            cache_path.replace(backup)
+            print(f"archived previous placement cache -> {backup}")
+        if cache_path.exists():
+            placements, cached_mats, cached_dists = load_placements(cache_path)
+            print(f"resuming {len(placements)}/{args.placements} placements from "
+                  f"{cache_path.name}")
+        else:
+            placements, cached_mats, cached_dists = [], None, None
+        if len(placements) < args.placements:
+            placements, mats, dists, complete = collect_placements(
+                args.placements, args.family, args.tags, gui=not args.no_gui,
+                initial_placements=placements, cached_mats=cached_mats,
+                cached_dists=cached_dists, cache_path=cache_path)
+        else:
+            mats, dists, complete = cached_mats, cached_dists, True
+        if not complete:
+            if placements:
+                print(f"saved partial {session_kind}: {len(placements)}/{args.placements} "
+                      f"placements in {cache_path}; run the same command to continue")
+            else:
+                print("stopped before the first placement was captured; nothing saved")
+            return
+
+    if args.validate:
+        _, tag_transforms = load_sponge_tags()
+        cross_tag, cross_camera = validation_errors(
+            placements, mats, dists, tag_transforms)
+        print_validation_report(cross_tag, cross_camera, args.tags)
+        return
+
+    estimators = {camera: PoseEstimator(mats[camera], dists[camera])
+                  for camera in CAMERA_NAMES}
+    pairs = pairs_from_placements(placements, estimators)
+    require_pair_coverage(pairs, args.tags)
     pairs, dropped = reject_flipped_pairs(pairs)
     print(f"dropped {dropped} flipped measurements, {len(pairs)} pairs remain")
     observed = sorted({i for p in pairs for i in p[:2]})
@@ -395,7 +1017,23 @@ def main():
         layout = " ".join(f"{tag}:{faces[tag]}" for tag in observed)
         print(f"  {layout}   {pos_mm:6.2f} mm  {rot_deg:7.2f} deg")
 
-    _, faces, solved, res = scored[0]
+    _, faces, initial_solved, _ = scored[0]
+    print("\nrefining all tag placements + per-placement body poses from raw "
+          "stereo corner reprojection ...")
+    solved, _, observations, errors = fit_joint_reprojection(
+        placements, faces, half_extents, initial_solved, mats, dists)
+    filtered, dropped_obs, dropped_placements, cutoff = reject_reprojection_outliers(
+        placements, observations, errors)
+    if dropped_obs or dropped_placements:
+        print(f"reprojection gate: dropped {dropped_obs}/{len(observations)} tag views "
+              f"and {dropped_placements} underconstrained placements at {cutoff:.2f} px")
+        filtered_pairs = pairs_from_placements(filtered, estimators)
+        require_pair_coverage(filtered_pairs, args.tags)
+        solved, _, observations, errors = fit_joint_reprojection(
+            filtered, faces, half_extents, solved, mats, dists)
+        placements = filtered
+        pairs = filtered_pairs
+    res = pair_residuals(pairs, faces, half_extents, solved)
     print(f"\nbest assignment: {faces}")
     for tag, (u, v, yaw) in sorted(solved.items()):
         margins = face_margins(tag, faces[tag], half_extents)
@@ -406,10 +1044,19 @@ def main():
               f"yaw={np.degrees(yaw):+.1f} deg{pinned}")
     pos_rms, rot_rms = residual_rms(res)
     print(f"pair residuals: {pos_rms:.2f} mm RMS, {rot_rms:.2f} deg RMS")
+    reprojection_rms = float(np.sqrt(np.mean(np.square(errors))))
+    print(f"joint corner reprojection: {reprojection_rms:.3f} px RMS, "
+          f"{np.percentile(errors, 95):.3f} px observation p95")
     print("a placement pinned at its bound means AXIS_OF_TAG names a face too "
           "small for its tag. Swapping the two narrow axes shows up in neither "
           "the residual nor the offsets — measure those faces.")
-    save_sponge_tags(SPONGE_TAGS_PATH, half_extents, faces, solved, res)
+    save_sponge_tags(SPONGE_TAGS_PATH, half_extents, faces, solved, res, {
+        "n_placements": int(len(placements)),
+        "n_camera_tag_observations": int(len(observations)),
+        "reprojection_px_rms": reprojection_rms,
+        "reprojection_px_p95": float(np.percentile(errors, 95)),
+        "max_incidence_deg": MAX_INCIDENCE_DEG,
+    })
     print(f"wrote {SPONGE_TAGS_PATH}")
 
 

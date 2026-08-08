@@ -10,9 +10,17 @@ The dual-channel pipeline is implemented end to end (plan:
 `real/tracking/{tag_body_calib,record_shapes,eval_estimator,hull_shape}.py`).
 Open, roughly in order:
 
-- **Record the full dataset.** Done so far: tags 1/3/4 glued and solved
-  (`real/tracking/sponge_tags.yaml`, 2.97 mm / 1.29 deg RMS), plus a 2-minute
-  smoke recording (`datasets/sponge_20260725_213859`, 19 static windows) whose
+- **Validate the calibration, then record the full dataset.** The stationary stereo tag-body calibration was
+  captured on 2026-08-08: 30 placements, 29 retained after reprojection outlier
+  rejection, 0.513 px joint corner RMS / 0.906 px observation p95. The larger
+  3.12 mm pair residual is the independent planar solvePnP depth disagreement,
+  not the objective of the raw-corner joint fit. The partial capture cache is
+  `real/tracking/tag_placements.npz`; the resulting GT transforms are in
+  `real/tracking/sponge_tags.yaml`. Before recording, capture a separate held-out
+  set with `real.tracking.tag_body_calib --validate --placements 15`; it reports
+  cross-tag/cross-camera center disagreement without changing the calibration.
+  Also done: a 2-minute smoke recording
+  (`datasets/sponge_20260725_213859`, 19 static windows) whose
   "implied knobs" report re-seeded `precise_sigma`, `obs_bias.live_sigma` and
   `sqrtm_depth_sigma` in `conf/dr/{full,light}.yaml`. Still owed: the ~10 min
   recording with the **occlusion sweep**, which the smoke run has none of.

@@ -295,15 +295,21 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ScriptSpec(
         id="tag_body_calib", title="Sponge tag placement calib", page="camera",
         module="real.tracking.tag_body_calib", arg_style="argparse",
-        description="Solve each glued sponge tag's in-plane offset + yaw on its "
-                    "declared face from co-visible pairs -> sponge_tags.yaml "
-                    "(GT body pose for the shape dataset).",
+        description="Auto-capture settled stereo views, then jointly solve each "
+                    "sponge tag's face placement from both cameras. Opens an "
+                    "annotated view showing angle/stationarity/capture state; "
+                    "partial sessions save and resume automatically. Validation "
+                    "uses a separate cache and never changes the solved transforms.",
         args=(
-            ArgSpec("--frames", "int", "Frame pairs to accumulate", default="60"),
+            ArgSpec("--placements", "int", "Settled positions", default="30"),
             ArgSpec("--family", "choice", "Marker family", default="apriltag",
                     choices=("apriltag", "aruco")),
+            ArgSpec("--from-cache", "flag", "Re-solve cached placements"),
+            ArgSpec("--validate", "flag", "Capture held-out validation set"),
+            ArgSpec("--new-session", "flag", "Archive cache and start over"),
         ),
         resources=(Resource.CAMERA,),
+        native_gui=True,
     ),
     ScriptSpec(
         id="record_shapes", title="Record shape dataset", page="camera",

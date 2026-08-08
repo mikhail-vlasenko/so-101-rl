@@ -9,16 +9,27 @@ from scipy.spatial.transform import Rotation
 from real.calib.extrinsics import mat_inv
 from real.marker_spec import TAG_SIZE_MM
 from real.tracking.tag_body_calib import (
+    GateResult,
+    StationaryPlacementGate,
+    StereoPlacement,
     TAG_OVERHANG_ALLOWANCE_M,
     face_assignments,
     face_frame,
     face_margins,
+    fit_joint_reprojection,
+    incidence_angle_deg,
+    load_placements,
+    pairs_from_placements,
     reject_flipped_pairs,
+    reject_reprojection_outliers,
     residual_rms,
+    save_placements,
     solve_faces_and_placements,
     solve_tag_placements,
     tag_body_transform,
+    validation_errors,
 )
+from real.vision.pose import PoseEstimator, tag_object_points
 
 HALF = np.array([0.03, 0.02, 0.0125])
 
@@ -265,3 +276,182 @@ def test_solver_rejects_undeclared_tag():
     pairs = _synthetic_pairs(rng, truth, n_pairs=10)
     with pytest.raises(AssertionError):
         solve_tag_placements(pairs, {1: "+z"}, HALF)
+
+
+def _corner_map(shift=0.0):
+    square = np.array([[0.0, 0.0], [10.0, 0.0],
+                       [10.0, 10.0], [0.0, 10.0]])
+    return {("main", 1): square + shift,
+            ("aux", 3): square + np.array([30.0 + shift, 0.0])}
+
+
+def test_stationary_gate_captures_once_then_requires_real_movement():
+    gate = StationaryPlacementGate(dwell_s=0.2, still_px=0.5,
+                                   rearm_px=10.0, capture_frames=3)
+    assert gate.update(0.0, _corner_map()).state == "hold still"
+    assert gate.update(0.1, _corner_map(0.1)).state == "settling"
+    captured = gate.update(0.21, _corner_map(0.2))
+    assert captured == GateResult("captured", pytest.approx(0.21),
+                                  pytest.approx(0.12071, abs=1e-5), False, True)
+    assert gate.update(0.3, _corner_map(0.2)).state == "move sponge"
+    rearmed = gate.update(0.4, _corner_map(20.0))
+    assert rearmed.reset_window
+    assert rearmed.state == "settling"
+
+
+def test_stationary_gate_needs_two_distinct_tags_not_two_camera_views():
+    square = _corner_map()[("main", 1)]
+    gate = StationaryPlacementGate(dwell_s=0.0, capture_frames=1)
+    result = gate.update(0.0, {("main", 1): square, ("aux", 1): square})
+    assert result.state == "need 2 tags"
+
+
+def test_stationary_gate_ignores_a_flickering_third_tag():
+    first = _corner_map()
+    first[("main", 4)] = first[("main", 1)] + 60.0
+    gate = StationaryPlacementGate(dwell_s=1.0, still_px=0.5, capture_frames=2)
+    assert gate.update(0.0, first).state == "hold still"
+    result = gate.update(0.1, _corner_map(0.1))
+    assert result.state == "settling"
+    assert result.motion_px == pytest.approx(0.12071, abs=1e-5)
+
+
+def test_incidence_angle_uses_outward_normal_toward_camera():
+    front = Rotation.from_euler("x", 180.0, degrees=True)
+    assert incidence_angle_deg(front.as_rotvec(), [0.0, 0.0, 1.0]) == pytest.approx(0.0)
+    tilted = Rotation.from_euler("y", 60.0, degrees=True) * front
+    assert incidence_angle_deg(tilted.as_rotvec(), [0.0, 0.0, 1.0]) == pytest.approx(60.0)
+
+
+def _synthetic_stereo_placements():
+    K = np.array([[800.0, 0.0, 320.0],
+                  [0.0, 800.0, 240.0],
+                  [0.0, 0.0, 1.0]])
+    mats = {camera: K.copy() for camera in ("main", "aux")}
+    dists = {camera: np.zeros(5) for camera in ("main", "aux")}
+    anchors = {"main": np.eye(4), "aux": np.eye(4)}
+    anchors["aux"][:3, 3] = [0.12, 0.0, 0.0]
+    faces = {1: "-z", 3: "+y", 4: "+x"}
+    truth = {1: (0.003, -0.002, 0.08),
+             3: (0.001, 0.004, -0.12),
+             4: (-0.002, 0.001, 0.16)}
+    tag_transforms = {tag: tag_body_transform(faces[tag], HALF, *truth[tag])
+                      for tag in truth}
+    placements = []
+    for index in range(8):
+        T_base_body = np.eye(4)
+        T_base_body[:3, :3] = Rotation.from_euler(
+            "xyz", [2.0 * index, -1.5 * index, 3.0 * index], degrees=True).as_matrix()
+        T_base_body[:3, 3] = [-0.025 + 0.008 * index,
+                              -0.015 + 0.004 * index, 0.48 + 0.005 * index]
+        corners = {}
+        for camera, tag in (("main", 1), ("aux", 3),
+                            (("main" if index % 2 == 0 else "aux"), 4)):
+            points_body = (tag_transforms[tag][:3, :3] @ tag_object_points(tag).T).T \
+                + tag_transforms[tag][:3, 3]
+            points_base = (T_base_body[:3, :3] @ points_body.T).T + T_base_body[:3, 3]
+            T_cam_base = mat_inv(anchors[camera])
+            points_cam = (T_cam_base[:3, :3] @ points_base.T).T + T_cam_base[:3, 3]
+            pixels = (points_cam[:, :2] / points_cam[:, 2, None]) * 800.0
+            pixels += np.array([320.0, 240.0])
+            corners[(camera, tag)] = pixels
+        placements.append(StereoPlacement(
+            {camera: value.copy() for camera, value in anchors.items()}, corners))
+    return placements, mats, dists, faces, truth
+
+
+def test_cross_camera_tags_form_pair_without_same_camera_covisibility():
+    _, _, _, faces, truth = _synthetic_stereo_placements()
+    transforms = {tag: tag_body_transform(faces[tag], HALF, *truth[tag])
+                  for tag in truth}
+    T_base_body = np.eye(4)
+    T_base_body[:3, 3] = [0.02, -0.01, 0.4]
+    anchors = {"main": np.eye(4), "aux": np.eye(4)}
+    anchors["aux"][:3, 3] = [0.12, 0.0, 0.0]
+    camera_tag = {
+        ("main", 1): mat_inv(anchors["main"]) @ T_base_body @ transforms[1],
+        ("aux", 3): mat_inv(anchors["aux"]) @ T_base_body @ transforms[3],
+    }
+
+    class FakeEstimator:
+        def __init__(self, camera):
+            self.camera = camera
+
+        def estimate(self, detection):
+            T = camera_tag[(self.camera, detection.id)]
+            return Rotation.from_matrix(T[:3, :3]).as_rotvec(), T[:3, 3]
+
+    square = np.zeros((4, 2))
+    placement = StereoPlacement(anchors, {("main", 1): square, ("aux", 3): square})
+    estimators = {camera: FakeEstimator(camera) for camera in anchors}
+    pairs = pairs_from_placements([placement], estimators)
+    assert len(pairs) == 1
+    i, j, measured = pairs[0]
+    assert (i, j) == (1, 3)
+    np.testing.assert_allclose(measured, mat_inv(transforms[i]) @ transforms[j],
+                               atol=1e-12)
+
+
+def test_joint_stereo_reprojection_recovers_tag_placements():
+    placements, mats, dists, faces, truth = _synthetic_stereo_placements()
+    initial = {tag: (u + 0.0005, v - 0.0004, yaw + 0.015)
+               for tag, (u, v, yaw) in truth.items()}
+    solved, _, _, errors = fit_joint_reprojection(
+        placements, faces, HALF, initial, mats, dists)
+    for tag in truth:
+        np.testing.assert_allclose(solved[tag], truth[tag], atol=2e-5)
+    assert errors.max() < 1e-4
+
+
+def test_held_out_validation_recovers_cross_tag_consistency():
+    placements, mats, dists, faces, truth = _synthetic_stereo_placements()
+    transforms = {tag: tag_body_transform(faces[tag], HALF, *truth[tag])
+                  for tag in truth}
+    cross_tag, cross_camera = validation_errors(placements, mats, dists, transforms)
+    assert set(cross_tag) == {(1, 3), (1, 4), (3, 4)}
+    # Independent planar solvePnP has depth ambiguity even for exact projected
+    # corners; the validator intentionally includes that deployment-path error.
+    assert max(values[:, 0].max() for values in cross_tag.values()) < 2.0
+    assert cross_camera == {}
+
+    baseline = {pair: values.copy() for pair, values in cross_tag.items()}
+    biased = {tag: value.copy() for tag, value in transforms.items()}
+    biased[3][:3, 3] += [0.002, 0.0, 0.0]
+    cross_tag, _ = validation_errors(placements, mats, dists, biased)
+    np.testing.assert_allclose(cross_tag[(1, 4)], baseline[(1, 4)])
+    assert not np.allclose(cross_tag[(1, 3)], baseline[(1, 3)])
+    assert not np.allclose(cross_tag[(3, 4)], baseline[(3, 4)])
+
+
+def test_stereo_placement_cache_roundtrip(tmp_path):
+    placements, mats, dists, _, _ = _synthetic_stereo_placements()
+    path = tmp_path / "placements.npz"
+    save_placements(path, placements, mats, dists)
+    assert not (tmp_path / ".placements.npz.tmp").exists()
+    loaded, loaded_mats, loaded_dists = load_placements(path)
+    assert len(loaded) == len(placements)
+    for before, after in zip(placements, loaded):
+        assert set(after.corners) == set(before.corners)
+        for key in before.corners:
+            np.testing.assert_allclose(after.corners[key], before.corners[key])
+        for camera in before.anchors:
+            np.testing.assert_allclose(after.anchors[camera], before.anchors[camera])
+    for camera in mats:
+        np.testing.assert_allclose(loaded_mats[camera], mats[camera])
+        np.testing.assert_allclose(loaded_dists[camera], dists[camera])
+
+
+def test_reprojection_gate_discards_bad_view_without_losing_placement():
+    placements, _, _, _, _ = _synthetic_stereo_placements()
+    observations = [(p_idx, camera, tag, corners)
+                    for p_idx, placement in enumerate(placements)
+                    for (camera, tag), corners in sorted(placement.corners.items())]
+    errors = np.full(len(observations), 0.2)
+    errors[0] = 8.0
+    filtered, dropped, dropped_placements, cutoff = reject_reprojection_outliers(
+        placements, observations, errors)
+    assert dropped == 1
+    assert dropped_placements == 0
+    assert len(filtered) == len(placements)
+    assert len(filtered[0].corners) == len(placements[0].corners) - 1
+    assert cutoff == pytest.approx(1.0)

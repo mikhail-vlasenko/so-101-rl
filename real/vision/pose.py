@@ -46,6 +46,11 @@ def _object_points(size_m):
                      [-h, -h, 0.0]], dtype=np.float64)
 
 
+def tag_object_points(tag_id):
+    """Metric tag corners in canonical detection order for ``tag_id``."""
+    return _object_points(TAG_SIZE_MM[tag_id] / 1000.0)
+
+
 class PoseEstimator:
     def __init__(self, camera_matrix, dist_coeffs, tag_size_mm=TAG_SIZE_MM):
         self.camera_matrix = camera_matrix
