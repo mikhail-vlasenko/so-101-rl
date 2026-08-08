@@ -134,6 +134,10 @@ small): `conda install -n mujoco_env -c conda-forge 'tk=8.6.13=xft_*'`.
   things out "for later." Version control exists.
 - **No redundant comments.** Don't restate what the code already says. Comments
   explain *why*, not *what*.
+- **Detailed commit messages.** For non-trivial changes, use a descriptive subject
+  plus a body that explains the behavior and contracts changed, important cross-file
+  effects or decisions, and the verification performed. Avoid subject-only summaries
+  that make the diff necessary to understand the commit.
 - **Verify env behavior with tests, not inline scripts.** When checking that an
   environment, reward, or observation pipeline behaves as intended, write a pytest
   under `tests/` (e.g. `tests/env/test_obs_noise.py`) and run it with
