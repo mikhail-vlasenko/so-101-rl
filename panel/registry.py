@@ -279,6 +279,24 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         native_gui=True,
     ),
     ScriptSpec(
+        id="view_object_estimate", title="View sponge observation", page="camera",
+        module="real.tracking.view_object_estimate", arg_style="argparse",
+        description="Live MuJoCo + stereo-camera comparison of calibrated sponge-tag "
+                    "ground truth against the tag-free SAM live centroid and held "
+                    "visual-hull center/sqrtM observation.",
+        args=(
+            ArgSpec("--prompt", "str", "SAM3 text prompt", default="sponge"),
+            ArgSpec("--sam2-model", "choice", "SAM2 tracker size", default="tiny",
+                    choices=("tiny", "base+")),
+            ArgSpec("--family", "choice", "Marker family", default="apriltag",
+                    choices=("apriltag", "aruco")),
+            ArgSpec("--frames", "int", "Frame limit (0 runs until closed)", default="0"),
+            ArgSpec("--no-camera-view", "flag", "Show only the MuJoCo window"),
+        ),
+        resources=(Resource.CAMERA,),
+        native_gui=True,
+    ),
+    ScriptSpec(
         id="stereo_check", title="Stereo triangulation check", page="camera",
         module="real.tracking.stereo_check", arg_style="argparse",
         description="Triangulate the sponge tag from both table-anchored cameras "
@@ -316,14 +334,17 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         module="real.tracking.record_shapes", arg_style="argparse",
         description="Record dual-camera frames + tag GT + static labels into "
                     "datasets/sponge_<stamp>/ for offline estimator evaluation "
-                    "(masks computed later by eval_estimator).",
+                    "(masks computed later by eval_estimator). Opens the shared "
+                    "annotated stereo status viewer by default.",
         args=(
             ArgSpec("--minutes", "float", "Recording length (minutes)", default="10"),
             ArgSpec("--family", "choice", "Marker family", default="apriltag",
                     choices=("apriltag", "aruco")),
             ArgSpec("--out", "str", "Dataset directory (default: datasets/sponge_<stamp>)"),
+            ArgSpec("--no-gui", "flag", "Disable annotated stereo preview"),
         ),
         resources=(Resource.CAMERA,),
+        native_gui=True,
     ),
     ScriptSpec(
         id="focus_picker", title="Focus picker", page="camera",

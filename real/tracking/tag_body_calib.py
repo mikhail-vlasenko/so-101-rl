@@ -87,8 +87,18 @@ from real.calib.extrinsics import (
     rt_to_mat,
 )
 from real.marker_spec import TABLE_TAG_ID, TAG_SIZE_MM
-from real.vision.camera import HEIGHT, WIDTH
 from real.vision.detect import Detection, make_detector
+from real.vision.overlay import (
+    GREEN,
+    RED,
+    TABLE_BLUE,
+    WHITE,
+    YELLOW,
+    OverlayLine,
+    StereoViewer,
+    TagStyle,
+    annotate_tags,
+)
 from real.vision.pose import PoseEstimator, tag_object_points
 from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
 
@@ -791,52 +801,41 @@ def body_pose_from_tag(rvec, tvec, T_body_tag):
     return rt_to_mat(rvec, tvec) @ mat_inv(T_body_tag)
 
 
-def _annotate_camera(frame, camera, detections, accepted, angles, anchor_ok):
-    view = frame.copy()
-    for tag, detection in detections.items():
-        quad = detection.corners.astype(np.int32)
-        if tag == TABLE_TAG_ID:
-            color = (255, 180, 0)
-            label = f"table {tag}"
-        elif (camera, tag) in accepted:
-            color = (0, 220, 0)
-            label = f"tag {tag} {angles[tag]:.0f}deg OK"
-        else:
-            color = (0, 0, 255)
-            label = f"tag {tag} {angles[tag]:.0f}deg > {MAX_INCIDENCE_DEG:.0f}"
-        cv2.polylines(view, [quad], True, color, 3)
-        x, y = quad[0]
-        cv2.putText(view, label, (int(x), max(24, int(y) - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
-    cv2.putText(view, f"{camera}  table={'OK' if anchor_ok else 'MISSING'}",
-                (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                (0, 220, 0) if anchor_ok else (0, 0, 255), 2)
-    return cv2.resize(view, (WIDTH // 2, HEIGHT // 2))
-
-
-def _show_capture_view(frames, detections, accepted, angles, anchors, result,
-                       n_placements, target_placements, counts):
-    views = [_annotate_camera(frames[camera], camera, detections[camera], accepted,
-                              angles[camera], camera in anchors)
-             for camera in CAMERA_NAMES]
-    stereo = np.hstack(views)
-    canvas = np.zeros((stereo.shape[0] + 92, stereo.shape[1], 3), dtype=np.uint8)
-    canvas[92:] = stereo
-    state_color = ((0, 255, 0) if result.state.startswith("captured")
-                   else (0, 220, 255) if result.state == "settling"
-                   else (0, 0, 255))
-    cv2.putText(canvas,
-                f"{result.state.upper()}  motion {result.motion_px:.2f}/"
-                f"{STATIONARY_CORNER_SHIFT_PX:.2f}px  "
-                f"dwell {result.dwell_s:.2f}/{STATIONARY_DWELL_S:.2f}s  "
-                f"placements {n_placements}/{target_placements}",
-                (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, state_color, 2)
+def _show_capture_view(viewer, frames, detections, accepted, angles, anchors, result,
+                       n_placements, target_placements, counts, delay_ms):
+    annotated = {}
+    camera_lines = {}
+    for camera in CAMERA_NAMES:
+        styles = {}
+        for tag in detections[camera]:
+            if tag == TABLE_TAG_ID:
+                styles[tag] = TagStyle(f"table {tag}", TABLE_BLUE, 3)
+            elif (camera, tag) in accepted:
+                styles[tag] = TagStyle(f"tag {tag} {angles[camera][tag]:.0f}deg OK",
+                                       GREEN, 3)
+            else:
+                styles[tag] = TagStyle(
+                    f"tag {tag} {angles[camera][tag]:.0f}deg > {MAX_INCIDENCE_DEG:.0f}",
+                    RED, 3)
+        annotated[camera] = annotate_tags(
+            frames[camera].copy(), detections[camera].values(), styles)
+        anchor_ok = camera in anchors
+        camera_lines[camera] = [OverlayLine(
+            f"{camera}  table={'OK' if anchor_ok else 'MISSING'}",
+            GREEN if anchor_ok else RED)]
+    state_color = (GREEN if result.state.startswith("captured")
+                   else YELLOW if result.state == "settling" else RED)
     coverage = "  ".join(f"{i}-{j}:{n}" for (i, j), n in sorted(counts.items())) or "none"
-    cv2.putText(canvas, f"pair coverage: {coverage}", (12, 62),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-    cv2.putText(canvas, "Move after capture  |  ENTER/q/ESC save and stop",
-                (12, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (190, 190, 190), 1)
-    cv2.imshow("sponge stereo tag calibration", canvas)
+    header_lines = [
+        OverlayLine(
+            f"{result.state.upper()}  motion {result.motion_px:.2f}/"
+            f"{STATIONARY_CORNER_SHIFT_PX:.2f}px  "
+            f"dwell {result.dwell_s:.2f}/{STATIONARY_DWELL_S:.2f}s  "
+            f"placements {n_placements}/{target_placements}", state_color),
+        OverlayLine(f"pair coverage: {coverage}", WHITE),
+        OverlayLine("Move after capture  |  ENTER/q/ESC save and stop", WHITE),
+    ]
+    return viewer.show(annotated, camera_lines, header_lines, delay_ms)
 
 
 def collect_placements(target_placements, family, tags, gui=True,
@@ -863,6 +862,7 @@ def collect_placements(target_placements, family, tags, gui=True,
     counts = pair_counts(pairs_from_placements(placements, estimators)) if placements else {}
     last_print = 0.0
     capture_flash_until = 0.0
+    viewer = StereoViewer("sponge stereo tag calibration") if gui else None
     print("Move the sponge to a new pose and release it. Capture is automatic after "
           f"{STATIONARY_DWELL_S:.2f}s still with >=2 tags across the rig at "
           f"<= {MAX_INCIDENCE_DEG:.0f} degrees. Move it clearly after each capture.")
@@ -917,11 +917,11 @@ def collect_placements(target_placements, family, tags, gui=True,
                     display_result = GateResult(
                         f"captured #{len(placements)}", result.dwell_s,
                         result.motion_px, False, False)
-                _show_capture_view(frames, detections, accepted, angles, anchors,
-                                   display_result, len(placements), target_placements, counts)
                 final_capture = result.capture and len(placements) == target_placements
                 delay_ms = 1000 if final_capture else 1
-                key = cv2.waitKey(delay_ms) & 0xFF
+                key = _show_capture_view(
+                    viewer, frames, detections, accepted, angles, anchors,
+                    display_result, len(placements), target_placements, counts, delay_ms)
                 if key in (13, 27, ord("q")):
                     break
             elif now - last_print >= 1.0:
@@ -931,8 +931,8 @@ def collect_placements(target_placements, family, tags, gui=True,
     finally:
         for cap in caps.values():
             cap.release()
-        if gui:
-            cv2.destroyAllWindows()
+        if viewer is not None:
+            viewer.close()
         detector.close()
     complete = len(placements) >= target_placements
     return placements, mats, dists, complete

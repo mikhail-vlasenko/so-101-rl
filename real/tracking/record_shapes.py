@@ -13,7 +13,9 @@ Static/moving is auto-labeled from the GT body track with the same
 checklist (resting-face class x yaw bin x workspace region, static/moving,
 settle events) prints as you go; occlusion coverage (park the arm over the
 sponge at roughly 0/25/50/75 percent per camera) is a manual protocol step —
-follow the printed reminder.
+follow the printed reminder. The shared stereo viewer outlines table/sponge
+tags and shows anchor status, the current static label, GT center and coverage;
+press q/Esc to stop cleanly. Use `--no-gui` for unattended capture.
 
 Run:
     conda run -n mujoco_env python -m real.tracking.record_shapes --minutes 10
@@ -38,6 +40,17 @@ from real.calib.extrinsics import (
 from real.marker_spec import SPONGE_TAG_IDS, TABLE_TAG_ID
 from real.tracking.tag_body_calib import SPONGE_TAGS_PATH, body_pose_from_tag, load_sponge_tags
 from real.vision.detect import make_detector
+from real.vision.overlay import (
+    GREEN,
+    RED,
+    TABLE_BLUE,
+    WHITE,
+    YELLOW,
+    OverlayLine,
+    StereoViewer,
+    TagStyle,
+    annotate_tags,
+)
 from real.vision.pose import PoseEstimator
 from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
 from src.shape_obs import STATIC_DWELL_S, is_static
@@ -97,6 +110,14 @@ class Coverage:
                          f"yaw bins {yaws} | regions {regions}")
         return "\n".join(lines)
 
+    def preview_summary(self):
+        totals = {face: sum(value for (seen_face, _, _), value in self.counts.items()
+                            if seen_face == face)
+                  for face in "xyz"}
+        return (f"coverage static={self.static_frames} moving={self.moving_frames} "
+                f"settles={self.settle_events}  face frames "
+                + " ".join(f"{face}={totals[face]}" for face in "xyz"))
+
 
 def main():
     parser = argparse.ArgumentParser(description="Record the sponge shape dataset")
@@ -104,6 +125,8 @@ def main():
     parser.add_argument("--family", choices=("apriltag", "aruco"), default="apriltag")
     parser.add_argument("--out", default=None,
                         help="dataset directory (default: datasets/sponge_<stamp>)")
+    parser.add_argument("--no-gui", action="store_true",
+                        help="disable the annotated stereo preview")
     args = parser.parse_args()
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -121,6 +144,10 @@ def main():
         caps[name], mats[name], dists[name] = open_rig_camera(name)
         estimators[name] = PoseEstimator(mats[name], dists[name])
         cam_ema[name] = PoseEMA(CAM_EMA_ALPHA)
+    viewer = None if args.no_gui else StereoViewer("sponge shape dataset recorder")
+    tag_styles = {TABLE_TAG_ID: TagStyle(f"table {TABLE_TAG_ID}", TABLE_BLUE, 3)}
+    tag_styles.update({tag: TagStyle(f"sponge tag {tag}", GREEN, 3)
+                       for tag in tag_transforms})
 
     with open(out_dir / "meta.yaml", "w") as f:
         yaml.safe_dump({
@@ -141,7 +168,8 @@ def main():
     coverage = Coverage()
     body_hist_t: list[float] = []
     body_hist_p: list[np.ndarray] = []
-    deadline = time.monotonic() + args.minutes * 60.0
+    started = time.monotonic()
+    deadline = started + args.minutes * 60.0
     k = 0
     index = open(out_dir / "index.jsonl", "w")
     try:
@@ -150,16 +178,20 @@ def main():
             record = {"k": k, "t": {}, "frame": {}, "T_base_cam": {},
                       "tags": {}, "body": {}}
             T_base_body_views = []
+            frames = {}
+            frame_dets = {}
             for name in CAMERA_NAMES:
                 ok, frame = caps[name].read()
                 t_recv = time.monotonic()
                 if not ok:
                     raise RuntimeError(f"camera read failed on '{name}'")
+                frames[name] = frame
                 rel = f"frames/{name}_{k:06d}.jpg"
                 cv2.imwrite(str(out_dir / rel), frame,
                             [cv2.IMWRITE_JPEG_QUALITY, 95])
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 dets = {d.id: d for d in detector.detect(gray) if d.id in wanted}
+                frame_dets[name] = dets
                 record["t"][name] = t_recv
                 record["frame"][name] = rel
 
@@ -198,6 +230,7 @@ def main():
                                         "n_tags": len(candidates)}
 
             static = None
+            fused = None
             if T_base_body_views:
                 fused = average_transforms(T_base_body_views)
                 pos, quat = mat_to_pos_quat(fused)
@@ -216,6 +249,41 @@ def main():
             record["static"] = static
             index.write(json.dumps(record) + "\n")
 
+            if viewer is not None:
+                annotated = {name: annotate_tags(
+                    frames[name].copy(), frame_dets[name].values(), tag_styles)
+                    for name in CAMERA_NAMES}
+                camera_lines = {}
+                for name in CAMERA_NAMES:
+                    anchor_ok = record["T_base_cam"][name] is not None
+                    sponge_seen = sorted(set(frame_dets[name]) & set(tag_transforms))
+                    ok = anchor_ok and bool(sponge_seen)
+                    camera_lines[name] = [OverlayLine(
+                        f"{name}  table={'OK' if anchor_ok else 'MISSING'}  "
+                        f"sponge tags={sponge_seen}", GREEN if ok else RED)]
+                if static is True:
+                    state, state_color = "STATIC", GREEN
+                elif static is False:
+                    state, state_color = "MOVING", YELLOW
+                else:
+                    state, state_color = "NO GT", RED
+                elapsed = time.monotonic() - started
+                gt_text = ("GT center unavailable" if fused is None else
+                           "GT center " + np.array2string(
+                               fused[:3, 3] * 100.0, precision=1,
+                               suppress_small=True) + " cm")
+                header_lines = [
+                    OverlayLine(
+                        f"RECORDING {elapsed:5.1f}/{args.minutes * 60.0:.0f}s  "
+                        f"frame {k}  {state}", state_color),
+                    OverlayLine(gt_text, WHITE),
+                    OverlayLine(coverage.preview_summary(), WHITE),
+                    OverlayLine("Move, release, hold  |  q/ESC stop safely", WHITE),
+                ]
+                key = viewer.show(annotated, camera_lines, header_lines)
+                if key in (27, ord("q")):
+                    break
+
             if k % 60 == 0:
                 index.flush()
                 print(f"[{k} frame pairs]")
@@ -226,6 +294,9 @@ def main():
         index.close()
         for cap in caps.values():
             cap.release()
+        detector.close()
+        if viewer is not None:
+            viewer.close()
 
     print(f"\nrecorded {k} frame pairs into {out_dir}")
     print(coverage.report())

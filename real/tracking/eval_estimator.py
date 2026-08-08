@@ -25,7 +25,7 @@ Ship the estimator when green; escalate (plan decision 3) when not, choosing
 from the occlusion/component slices below.
 
 Run:
-    conda run -n mujoco_env python -m real.tracking.eval_estimator datasets/sponge_<stamp>
+    conda run --no-capture-output -n mujoco_env python -m real.tracking.eval_estimator datasets/sponge_<stamp>
 """
 import argparse
 import json
@@ -35,6 +35,7 @@ import cv2
 import numpy as np
 import yaml
 from scipy.spatial.transform import Rotation
+from tqdm.auto import tqdm
 
 from real.calib.extrinsics import pos_quat_to_mat
 from real.vision.stereo import pixel_rays, triangulate_rays
@@ -81,41 +82,51 @@ def compute_masks(dataset_dir: Path, records, meta, prompt, sam2_model,
     mask_dir = dataset_dir / "masks" / sam2_model
     todo = [(rec, name) for rec in records for name in meta["cameras"]
             if not (mask_dir / rec["frame"][name]).with_suffix(".png").exists()]
+    total = len(records) * len(meta["cameras"])
     if not todo:
+        print(f"using {total} cached SAM masks from {mask_dir}")
         return mask_dir
-    print(f"computing {len(todo)} masks into {mask_dir} ...", flush=True)
+    cached = total - len(todo)
+    print(f"computing {len(todo)} SAM masks ({cached} cached) into {mask_dir}; "
+          f"loading SAM3 + SAM2 {sam2_model} on CUDA ...", flush=True)
     sam3 = load_sam3()
     tracker = MaskTracker(sam2_model)
-    for name in meta["cameras"]:
-        (mask_dir / "frames").mkdir(parents=True, exist_ok=True)
-        primed = False
-        empty_run = 0
-        retry_in = 0
-        for rec in records:
-            out_path = (mask_dir / rec["frame"][name]).with_suffix(".png")
-            if out_path.exists():
-                continue
-            frame = cv2.imread(str(dataset_dir / rec["frame"][name]))
-            assert frame is not None, rec["frame"][name]
-            if primed and empty_run < reprompt_after:
-                mask = tracker.track(frame)
-            elif retry_in > 0:
-                retry_in -= 1
-                mask = np.zeros(frame.shape[:2], dtype=bool)
-            else:
-                found = find_text_mask(sam3, frame, prompt)
-                if found is None:
-                    primed = False
-                    retry_in = reprompt_after
+    with tqdm(total=total, initial=cached, unit="mask", desc="SAM masks",
+              dynamic_ncols=True) as progress:
+        for name in meta["cameras"]:
+            (mask_dir / "frames").mkdir(parents=True, exist_ok=True)
+            progress.set_postfix(camera=name)
+            primed = False
+            empty_run = 0
+            retry_in = 0
+            for rec in records:
+                out_path = (mask_dir / rec["frame"][name]).with_suffix(".png")
+                if out_path.exists():
+                    continue
+                frame = cv2.imread(str(dataset_dir / rec["frame"][name]))
+                assert frame is not None, rec["frame"][name]
+                if primed and empty_run < reprompt_after:
+                    mask = tracker.track(frame)
+                elif retry_in > 0:
+                    retry_in -= 1
                     mask = np.zeros(frame.shape[:2], dtype=bool)
                 else:
-                    mask, score = found
-                    tracker.prime(frame, mask)
-                    primed = True
-                    print(f"  {name}: (re)prompted at k={rec['k']}, "
-                          f"score {score:.2f}", flush=True)
-            empty_run = 0 if mask.any() else empty_run + 1
-            cv2.imwrite(str(out_path), mask.astype(np.uint8) * 255)
+                    found = find_text_mask(sam3, frame, prompt)
+                    if found is None:
+                        primed = False
+                        retry_in = reprompt_after
+                        mask = np.zeros(frame.shape[:2], dtype=bool)
+                    else:
+                        mask, score = found
+                        tracker.prime(frame, mask)
+                        primed = True
+                        progress.write(f"  {name}: (re)prompted at k={rec['k']}, "
+                                       f"score {score:.2f}")
+                empty_run = 0 if mask.any() else empty_run + 1
+                written = cv2.imwrite(str(out_path), mask.astype(np.uint8) * 255)
+                if not written:
+                    raise RuntimeError(f"failed to write mask {out_path}")
+                progress.update()
     return mask_dir
 
 

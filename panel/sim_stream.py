@@ -81,6 +81,27 @@ PRECISE_ELLIPSOID_RGBA = (1.0, 0.55, 0.1, 0.45)
 _LIVE_BALL_RADIUS = np.array([0.008, 0.0, 0.0])
 
 
+def draw_sqrtm_ellipsoid(scn: mujoco.MjvScene, center: np.ndarray,
+                         sqrtm6: np.ndarray, rgba) -> None:
+    """Append the box-equivalent ellipsoid represented by one √M channel.
+
+    Its semi-axes are √3 times √M's eigenvalues, so a true box tensor touches
+    the corresponding box at every face center. A caller-selected color lets
+    diagnostics overlay ground truth and an observation using identical
+    geometry; rollout views use the standard orange below.
+    """
+    if not np.any(sqrtm6) or scn.ngeom >= scn.maxgeom:
+        return
+    w, V = np.linalg.eigh(sqrtm_from_upper(sqrtm6))
+    if np.linalg.det(V) < 0:  # mjvGeom.mat must be a proper rotation
+        V[:, 0] = -V[:, 0]
+    mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_ELLIPSOID,
+                        np.sqrt(3.0) * np.clip(w, 1e-4, None),
+                        np.asarray(center, np.float64), V.T.flatten(),
+                        np.asarray(rgba, np.float32))
+    scn.ngeom += 1
+
+
 def draw_object_channels(scn: mujoco.MjvScene, live: np.ndarray,
                          center: np.ndarray, sqrtm6: np.ndarray) -> None:
     """Append the object channels' decorative geoms to a built scene: the live
@@ -92,15 +113,7 @@ def draw_object_channels(scn: mujoco.MjvScene, live: np.ndarray,
                             np.eye(3).flatten(),
                             np.asarray(LIVE_POINT_RGBA, np.float32))
         scn.ngeom += 1
-    if np.any(sqrtm6) and scn.ngeom < scn.maxgeom:
-        w, V = np.linalg.eigh(sqrtm_from_upper(sqrtm6))
-        if np.linalg.det(V) < 0:  # mjvGeom.mat must be a proper rotation
-            V[:, 0] = -V[:, 0]
-        mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_ELLIPSOID,
-                            np.sqrt(3.0) * np.clip(w, 1e-4, None),
-                            np.asarray(center, np.float64), V.T.flatten(),
-                            np.asarray(PRECISE_ELLIPSOID_RGBA, np.float32))
-        scn.ngeom += 1
+    draw_sqrtm_ellipsoid(scn, center, sqrtm6, PRECISE_ELLIPSOID_RGBA)
 
 
 class SimStreamPublisher:

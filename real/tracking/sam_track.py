@@ -36,6 +36,7 @@ import numpy as np
 from real.vision.detect import make_detector
 from real.calib.extrinsics import base_cam_from_table, load_extrinsics
 from real.marker_spec import CUBE_TAG_ID, TABLE_TAG_ID
+from real.vision.overlay import YELLOW, StereoViewer, TagStyle, annotate_tags
 from real.vision.pose import PoseEstimator
 from real.tracking.sam_seg import SAM2_MODELS, MaskTracker, load_sam3, mask_centroid, text_to_mask
 from real.vision.stereo import pixel_rays, triangulate_rays
@@ -49,7 +50,9 @@ def overlay(frame, mask, centroid, tag_det, label):
     if centroid is not None:
         cv2.circle(view, (int(centroid[0]), int(centroid[1])), 6, (0, 0, 255), -1)
     if tag_det is not None:
-        cv2.polylines(view, [tag_det.corners.astype(np.int32)], True, (0, 255, 255), 2)
+        annotate_tags(view, [tag_det], {
+            tag_det.id: TagStyle(f"GT tag {tag_det.id}", YELLOW)
+        })
     cv2.putText(view, label, (12, 36), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
     return view
 
@@ -104,6 +107,7 @@ def main():
     centroids_px = {n: [] for n in CAMERA_NAMES}
     sam_pts, sam_gaps, tag_pts, tag_gaps, deltas = [], [], [], [], []
     lost = {n: 0 for n in CAMERA_NAMES}
+    viewer = StereoViewer("sam_track") if args.gui else None
     loop_t0 = time.monotonic()
     n_loops = 0
 
@@ -158,17 +162,15 @@ def main():
                 deltas.append(sam_pt - pts[0])
 
         if args.gui and views:
-            both = cv2.resize(np.hstack([views[n] for n in CAMERA_NAMES]), None,
-                              fx=0.5, fy=0.5)
-            cv2.imshow("sam_track", both)
-            if (cv2.waitKey(1) & 0xFF) == ord("q"):
+            if viewer.show(views) in (27, ord("q")):
                 break
 
     wall = time.monotonic() - loop_t0
     for name in CAMERA_NAMES:
         caps[name].release()
-    if args.gui:
-        cv2.destroyAllWindows()
+    detector.close()
+    if viewer is not None:
+        viewer.close()
     if args.save_frames and views:
         os.makedirs(args.save_frames, exist_ok=True)
         for name, view in views.items():

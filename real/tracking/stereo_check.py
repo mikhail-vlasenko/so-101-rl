@@ -28,21 +28,10 @@ import numpy as np
 from real.vision.detect import make_detector
 from real.calib.extrinsics import base_cam_from_table, load_extrinsics, rt_to_mat
 from real.marker_spec import CUBE_TAG_ID, TABLE_TAG_ID, TAG_SIZE_MM
+from real.vision.overlay import annotate_tags
 from real.vision.pose import PoseEstimator
 from real.vision.stereo import pixel_rays, triangulate_rays
 from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
-
-
-def annotate(frame, dets):
-    view = frame.copy()
-    for d in dets.values():
-        pts = d.corners.astype(np.int32)
-        cv2.polylines(view, [pts], True, (0, 255, 0), 2)
-        c = pts.mean(axis=0).astype(int)
-        cv2.circle(view, tuple(c), 3, (0, 0, 255), -1)
-        cv2.putText(view, str(d.id), tuple(pts[0]), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 255), 2)
-    return view
 
 
 def fmt_mm(v):
@@ -122,7 +111,7 @@ def main():
         os.makedirs(args.save_frames, exist_ok=True)
         for name, (frame, dets) in last.items():
             path = os.path.join(args.save_frames, f"stereo_check_{name}.jpg")
-            cv2.imwrite(path, annotate(frame, dets))
+            cv2.imwrite(path, annotate_tags(frame.copy(), dets.values()))
             print(f"  wrote {path}")
     if n == 0:
         raise RuntimeError("no frame had table + cube tags in both views; "

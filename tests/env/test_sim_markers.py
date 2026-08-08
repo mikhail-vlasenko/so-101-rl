@@ -9,7 +9,13 @@ import mujoco
 import numpy as np
 import pytest
 
-from panel.sim_stream import _MARKER_BOX_HALF, _rotvec_to_mat, draw_detected_markers
+from panel.sim_stream import (
+    _MARKER_BOX_HALF,
+    _rotvec_to_mat,
+    draw_detected_markers,
+    draw_sqrtm_ellipsoid,
+)
+from src.shape_obs import sqrtm_upper
 
 # Minimal model so MjvScene allocates its geoms buffer (a bare MjvScene() has
 # none); the geometry is irrelevant — we only draw decorative overlay geoms.
@@ -79,6 +85,20 @@ def test_rotvec_to_mat_is_orthonormal():
     mat = _rotvec_to_mat(np.array([0.3, -0.4, 0.5])).reshape(3, 3)
     np.testing.assert_allclose(mat @ mat.T, np.eye(3), atol=1e-9)
     assert np.isclose(np.linalg.det(mat), 1.0)
+
+
+def test_sqrtm_ellipsoid_uses_box_equivalent_half_extents():
+    scn = fresh_scene()
+    center = np.array([0.2, -0.1, 0.03])
+    half_extents = np.array([0.03, 0.02, 0.0125])
+    sqrtm = np.diag(half_extents / np.sqrt(3.0))
+
+    draw_sqrtm_ellipsoid(scn, center, sqrtm_upper(sqrtm), (0.0, 1.0, 0.0, 0.4))
+
+    assert scn.ngeom == 1
+    assert scn.geoms[0].type == mujoco.mjtGeom.mjGEOM_ELLIPSOID
+    np.testing.assert_allclose(scn.geoms[0].pos, center)
+    np.testing.assert_allclose(np.sort(scn.geoms[0].size), np.sort(half_extents))
 
 
 if __name__ == "__main__":

@@ -2,52 +2,27 @@
 
 Long-term tasks and ideas. Not a changelog.
 
-## Tag-free object tracking (dual C922 + SAM + shape tensor), follow-ups
+## Tag-free object tracking (dual C922 + SAM), follow-ups
 
-The dual-channel pipeline is implemented end to end (plan:
+The v1 dual-channel visual-hull pipeline is implemented end to end (plan:
 `.claude/plans/shape_tensor_tracking.md`; sim `src/shape_obs.py` +
 `src/base_env.py`, real `real/rollout/{frame_bus,object_obs}.py`, dataset/eval
 `real/tracking/{tag_body_calib,record_shapes,eval_estimator,hull_shape}.py`).
 Open, roughly in order:
 
-- **Validate the calibration, then record the full dataset.** The stationary stereo tag-body calibration was
-  captured on 2026-08-08: 30 placements, 29 retained after reprojection outlier
-  rejection, 0.513 px joint corner RMS / 0.906 px observation p95. The larger
-  3.12 mm pair residual is the independent planar solvePnP depth disagreement,
-  not the objective of the raw-corner joint fit. The partial capture cache is
-  `real/tracking/tag_placements.npz`; the resulting GT transforms are in
-  `real/tracking/sponge_tags.yaml`. Before recording, capture a separate held-out
-  set with `real.tracking.tag_body_calib --validate --placements 15`; it reports
-  cross-tag/cross-camera center disagreement without changing the calibration.
-  Also done: a 2-minute smoke recording
-  (`datasets/sponge_20260725_213859`, 19 static windows) whose
-  "implied knobs" report re-seeded `precise_sigma`, `obs_bias.live_sigma` and
-  `sqrtm_depth_sigma` in `conf/dr/{full,light}.yaml`. Still owed: the ~10 min
-  recording with the **occlusion sweep**, which the smoke run has none of.
-- **`obs_noise.live_sigma` is still a placeholder** — the only knob the smoke
-  dataset could not measure. Its static unoccluded windows give 0.05 mm, i.e.
-  the regime where the live channel is trivially perfect; the deployment number
-  comes from partial occlusion and motion blur. Held at 0.003 deliberately
-  (under-randomizing is the dangerous direction) until the occlusion sweep
-  exists. Note the acceptance eval reads its own envelope from these same
-  knobs, so a re-seeded knob is a measurement, never a pass.
-- **The √M size signal may be below the estimator's noise floor.** Measured
-  eigenvalue error p95 is 5.0 mm against a `cube_size_jitter/2/sqrt(3)` =
-  2.9 mm envelope — i.e. larger than the *entire* half-range of eigenvalue
-  variation the size DR produces, so a policy cannot read the episode's sponge
-  size out of √M. Do NOT fix this by inflating `cube_size_jitter`; that changes
-  the physical task rather than the perception. The error is dominated by the
-  depth spread below and is world-fixed (along the camera bisector), which the
-  sim models faithfully, so orientation/aspect may still survive where size
-  does not. Check what the trained policy actually uses before escalating.
-- **Hull's residual vertical bias.** Widening the cameras fixed the in-plane
-  axes (real rig long axis 1.40x -> 1.02x) but the vertical half extent still
-  reads ~1.45x: neither camera sees the top face, so the hull's ceiling is set
-  by where the two silhouettes cross — azimuth can't fix it and raising a
-  camera doesn't either. Sim models it (`obs_bias.sqrtm_depth_sigma`,
-  `src/base_env._hull_sqrtm`), now at the measured 12.8 mm — 60% above the
-  guess it replaced, and the estimator's dominant error mode. A third, higher
-  view is the alternative if the trained policy proves sensitive to it.
+- **Replace the precise object channel with dense stereo and a pretrained
+  point-cloud encoder.** First move the cameras to a common rigid 10–12 cm
+  stereo mount, run shared checkerboard calibration, and capture a short tagged
+  dense-depth validation set. Re-snapshot both sim camera mounts after moving
+  them.
+- **`obs_noise.live_sigma` is still a placeholder.** The full dataset measured
+  only 0.31 mm per-component static scatter and produced only the 0–25%
+  occlusion slice: held occlusion inflates each static window's own area
+  baseline, while moving segments are not scored. Keep 0.003 deliberately above
+  that trivial static measurement until dense-stereo work also fixes the
+  occlusion reference and measures motion/settling. Note the acceptance eval
+  reads its own envelope from these same knobs, so a re-seeded knob is a
+  measurement, never a pass.
 - **Mono live fallback.** The live channel requires BOTH views; one lost view
   stales it even though a single mask still gives a ray. Measure the dataset's
   both-view availability first — only build the fallback if the number says
@@ -60,11 +35,6 @@ Open, roughly in order:
   regime right after motion, where blur, sync skew and tracker lag inflate
   the live noise. Measure the false-trip rate on the dataset's post-motion
   segments before swapping the statistic.
-- **Occlusion-gate baseline honesty.** `ObjectSource` gauges visibility as
-  mask area vs the current static window's max, so an occlusion present from
-  the window's first frame inflates the baseline and can let a degraded hull
-  refresh through. The offline eval slices catch it; if real windows show it,
-  carry the baseline across windows (area normalized by pose class) instead.
 - **Pickplace `ObjectSource` rollout.** `rollout_lift` consumes the dual
   channels; pickplace needs the equivalent (place-target definition on the
   real table, ring pose, phase-aware termination) on `ArmLoop` + the same
@@ -74,8 +44,8 @@ Open, roughly in order:
   for `distill.teacher_obs=legacy_tag` (migrating the last tag-obs
   checkpoint); delete both, plus the mode, once no tag-obs teacher matters.
 - **EdgeTAM** (`transformers` ships it) is an efficiency-focused SAM2-style
-  tracker — candidate if GPU budget ever tightens (two SAM2 streams + hull
-  already share one GPU with inference).
+  tracker — candidate if GPU budget tightens once two SAM streams and dense
+  stereo share the GPU.
 
 Footnote — camera sync: free-running cameras are up to ~half a frame apart
 (~3 mm at 0.2 m/s, irrelevant static). The two-regime obs design absorbs
