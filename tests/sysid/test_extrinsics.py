@@ -177,13 +177,16 @@ def test_snap_inplane_offset_reports_residual_when_askew():
 
 def test_save_load_round_trip(tmp_path):
     T_base_table = make_T([0.0, 0.0, 1.4], [0.25, 0.05, 0.0])
+    T_base_table_11 = make_T([0.0, 0.0, -0.2], [0.40, 0.05, 0.0])
     T_base_cam = make_T([0.1, -0.5, 0.2], [0.12, -0.42, 0.30])
     path = tmp_path / "extrinsics.yaml"
-    save_extrinsics(path, T_base_table, T_base_cam, focus_absolute=30,
+    save_extrinsics(path, {10: T_base_table, 11: T_base_table_11},
+                    T_base_cam, focus_absolute=30,
                     n_samples=9, spread_mm=2.1, spread_deg=0.7,
                     quarter_turns={0: 1, 2: 3})
-    table2, cam2, focus, quarter_turns = load_extrinsics(path)
-    np.testing.assert_allclose(table2, T_base_table, atol=1e-9)
+    anchors2, cam2, focus, quarter_turns = load_extrinsics(path)
+    np.testing.assert_allclose(anchors2[10], T_base_table, atol=1e-9)
+    np.testing.assert_allclose(anchors2[11], T_base_table_11, atol=1e-9)
     np.testing.assert_allclose(cam2, T_base_cam, atol=1e-9)
     assert focus == 30
     assert quarter_turns == {0: 1, 2: 3}

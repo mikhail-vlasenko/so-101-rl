@@ -1,10 +1,11 @@
 """Gate tests for CameraMarkerSource.warmup() — the pre-episode wait that blocks
-until the table anchor tag is being detected before the real-arm lift rollout
+until both table anchor tags produce a valid solve before the real-arm lift rollout
 starts moving. Pure timing/state logic, exercised on a bare instance so no
-camera or detector is touched: warmup must return once the table tag is fresh,
+camera or detector is touched: warmup must return once the anchor pair is fresh,
 fail loud on timeout, and re-raise a dead capture-thread error.
 """
 
+import re
 import threading
 import time
 
@@ -12,7 +13,7 @@ import numpy as np
 import pytest
 
 from real.rollout.marker_obs import CameraMarkerSource
-from real.marker_spec import TABLE_TAG_ID
+from real.marker_spec import TABLE_TAG_IDS
 
 
 def bare_source(table_last_capture_t: float = -np.inf,
@@ -39,7 +40,8 @@ def test_warmup_returns_immediately_when_table_fresh():
 
 def test_warmup_times_out_when_table_never_detected():
     src = bare_source(table_last_capture_t=-np.inf)
-    with pytest.raises(RuntimeError, match=f"table anchor tag \\(id {TABLE_TAG_ID}\\)"):
+    with pytest.raises(RuntimeError, match=re.escape(
+            f"table anchor tags {TABLE_TAG_IDS}")):
         src.warmup(timeout_s=0.1)
 
 

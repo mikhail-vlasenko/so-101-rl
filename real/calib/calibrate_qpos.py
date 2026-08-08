@@ -5,7 +5,7 @@ FK(theta_enc - b) lands the arm tags where the camera says they are, then re-der
 the table-tag anchor with the corrected kinematics. (Trusting the raw encoders to
 register the camera instead leaves ~11 mm of arm-tag residual dominated by
 uncalibrated zero-offsets — commit 888c3bc — which this closes.) One pass writes both
-`extrinsics.yaml` (`t_base_cam_fixed`, `t_base_table`, `quarter_turns`) and
+`extrinsics.yaml` (`t_base_cam_fixed`, `table_anchors`, `quarter_turns`) and
 `calibration.yaml` (`qpos_bias`).
 
 How it works:
@@ -89,14 +89,19 @@ from real.calib.calib_solve import (
     load_samples,
     save_samples,
     sim_cam_R_opencv,
-    solve_table,
+    solve_table_anchors,
 )
 from real.calib.calibration import CALIBRATION_PATH, save_calibration
 from real.vision.camera import open_camera
 from real.calib.compliance import COMP_JOINTS, gravity_deflection
 from real.vision.detect import make_detector
 from real.calib.extrinsics import EXTRINSICS_PATH, rigid_register, save_extrinsics
-from real.marker_spec import ARM_TAG_TO_SITE, MARKER_EXPOSURE, MARKER_GAIN, TABLE_TAG_ID
+from real.marker_spec import (
+    ARM_TAG_TO_SITE,
+    MARKER_EXPOSURE,
+    MARKER_GAIN,
+    TABLE_TAG_IDS,
+)
 from real.vision.overlay import annotate_detections
 from real.vision.pose import PoseEstimator, load_intrinsics
 from real.twin.constants import (
@@ -153,7 +158,7 @@ MOUNT_OFFSET_WARN_MM = 12.0  # past this the prior can't be the whole story: a t
 # per-pose outlier can sit under the robust cutoff of that looser field while standing
 # clear of the tighter compliance-aware one. Threshold is robust (median + K *
 # scaled-MAD of the residual) with a floor so a tight clean fit isn't pruned. Only arm
-# tags are rejected here; the table tag's repeatability is its own gate in solve_table.
+# tags are rejected here; the table anchors' repeatability has its own solve gate.
 #
 # When a tag is flagged, both arm tags at that pose share one encoder qpos and one
 # camera frame, so a pose-level fault (arm not settled, motion blur, camera bump)
@@ -436,7 +441,7 @@ class MarkerCamera(threading.Thread):
         self.cap = open_camera(focus=FOCUS_ABSOLUTE, exposure=MARKER_EXPOSURE, gain=MARKER_GAIN)
         self.detector = make_detector(family)
         self.estimator = PoseEstimator(*load_intrinsics())
-        self.wanted = set(ARM_TAG_TO_SITE) | {TABLE_TAG_ID}
+        self.wanted = set(ARM_TAG_TO_SITE) | set(TABLE_TAG_IDS)
         self._stream = _FrameStreamer(stream_port) if stream_port is not None else None
         self._lock = threading.Lock()
         self._latest = {}      # id -> (rvec, tvec) from the newest decoded frame
@@ -523,9 +528,10 @@ def capture(args, jm, direction, poses, max_raw_delta):
                 raise cam.error
             tag_poses = cam.capture_median(CAPTURE_FRAMES)
             arm_seen = [t for t in ARM_TAG_TO_SITE if t in tag_poses]
-            if TABLE_TAG_ID not in tag_poses or not arm_seen:
+            anchors_seen = [tag for tag in TABLE_TAG_IDS if tag in tag_poses]
+            if len(anchors_seen) != len(TABLE_TAG_IDS) or not arm_seen:
                 print(f"  pose {i + 1}/{len(poses)}: SKIP "
-                      f"(table={'ok' if TABLE_TAG_ID in tag_poses else 'MISSING'}, "
+                      f"(table anchors={anchors_seen or 'none'}, "
                       f"arm={arm_seen or 'none'})")
                 continue
             qpos = raw_to_rad(bus.read_all(), jm, direction)
@@ -737,8 +743,8 @@ def reject_outliers(samples, model, data, qposadr, site_ids):
 
     A flagged tag also condemns any co-tag at the same pose that clears the looser
     companion bar (OUTLIER_COMPANION_K), since both tags share the pose's qpos/frame;
-    a clean co-tag is kept, so a lone-tag fluke doesn't lose the good tag. The table
-    tag is never touched (solve_table needs it and gates it separately). Fails loud if
+    a clean co-tag is kept, so a lone-tag fluke doesn't lose the good tag. The
+    table anchors are never touched (their solve gates them separately). Fails loud if
     more than OUTLIER_MAX_DROP_FRAC of the arm points would be discarded — that
     points at a bad capture (camera bumped mid-run, wrong calibration json), not a
     handful of flukes."""
@@ -817,7 +823,7 @@ def report_and_save(args, samples, model, data, jm, site_ids):
     # solve_calibration left model.site_pos at the solved mounts, so the camera and
     # table fits below use the same mount-corrected forward model.
     T_base_cam, rms_after, tags, err_mm = solve_camera(corrected, model, data, qposadr, site_ids)
-    T_base_table, t_mm, t_deg = solve_table(corrected, T_base_cam)
+    table_anchors, t_mm, t_deg = solve_table_anchors(corrected, T_base_cam)
     quarter_turns, _ = determine_quarter_turns(
         corrected, model, data, qposadr, site_ids, sim_cam_R_opencv(model, data))
 
@@ -838,8 +844,11 @@ def report_and_save(args, samples, model, data, jm, site_ids):
         warn = "  <-- mis-stuck/peeling? re-tape" if np.linalg.norm(d) > MOUNT_OFFSET_WARN_MM else ""
         print(f"    tag {tag} ({ARM_TAG_TO_SITE[tag]}) centre offset "
               f"[{d[0]:+.1f} {d[1]:+.1f} {d[2]:+.1f}] mm  |d| {np.linalg.norm(d):.1f}{warn}")
-    print(f"  table tag in base: {T_base_table[:3, 3].round(4).tolist()} m  "
-          f"(detection repeatability {np.median(t_mm):.1f} mm / {np.median(t_deg):.2f} deg)")
+    for tag in TABLE_TAG_IDS:
+        print(f"  table anchor {tag} in base: "
+              f"{table_anchors[tag][:3, 3].round(4).tolist()} m")
+    print(f"  pooled anchor detection repeatability {np.median(t_mm):.1f} mm / "
+          f"{np.median(t_deg):.2f} deg")
     print("  target a few mm. Worse => a tag glued askew beyond the prior, or bad capture.")
 
     write_marker_sites(ARM_XML, {ARM_TAG_TO_SITE[tag]: model.site_pos[sid].copy()
@@ -856,7 +865,7 @@ def report_and_save(args, samples, model, data, jm, site_ids):
             f"site {name!r}: {args.xml} did not pick up the mount written to {ARM_XML} "
             "(is --xml a model that doesn't include it?)")
 
-    save_extrinsics(args.out, T_base_table, T_base_cam, FOCUS_ABSOLUTE,
+    save_extrinsics(args.out, table_anchors, T_base_cam, FOCUS_ABSOLUTE,
                     len(samples), rms_after, float(np.median(t_deg)), quarter_turns)
     save_calibration(args.cal_out, b_full, compliance, len(samples), rms_before, rms_after)
     print(f"\nwrote {ARM_XML} (marker site mounts)\nwrote {args.out}\nwrote {args.cal_out}")

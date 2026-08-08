@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_ID
+from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_IDS
 from real.twin.mapping import JOINT_NAMES, load_joint_maps
 from sysid.probe_backlash import (
     MIN_LEVER_M,
@@ -119,8 +119,9 @@ def test_table_tag_drift_reported(setup):
     model, data, jm, site_ids = setup
     records = synth_pair(model, data, jm, site_ids, T_BASE_CAM,
                          BASE_Q, "shoulder_lift", np.radians(0.5), 0.0)
-    for rec, tvec in zip(records, ([0.1, 0.2, 0.5], [0.1, 0.2, 0.5024])):
-        rec["tags"][str(TABLE_TAG_ID)] = tvec
+    for table_tag in TABLE_TAG_IDS:
+        for rec, tvec in zip(records, ([0.1, 0.2, 0.5], [0.1, 0.2, 0.5024])):
+            rec["tags"][str(table_tag)] = tvec
     rows = hysteresis_estimates(records, model, data, jm,
                                 np.zeros(6), T_BASE_CAM[:3, :3])
     assert all(abs(r["table_drift_mm"] - 2.4) < 1e-6 for r in rows)

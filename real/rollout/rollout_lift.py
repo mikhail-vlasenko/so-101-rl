@@ -472,7 +472,7 @@ def main() -> int:
             # the table anchor tag is being detected, so the first obs is built on
             # a camera actually mapped to the base frame, not zeroed/held poses.
             waited = marker_source.warmup()
-            print(f"camera warmup: table tag anchored after {waited:.2f} s")
+            print(f"camera warmup: two-tag board anchored after {waited:.2f} s")
             from .object_obs import ObjectSource
             object_source = ObjectSource(frame_bus.feeds, prompt=args.prompt,
                                          sam2_model=args.sam2_model,

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from real.calib.extrinsics import PoseEMA, pos_quat_to_mat
-from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_ID
+from real.marker_spec import ARM_TAG_TO_SITE
 from real.rollout.marker_obs import CameraMarkerSource
 
 ARM_TAGS = sorted(ARM_TAG_TO_SITE)
@@ -23,16 +23,16 @@ def _rvec_tvec(tvec):
     return np.zeros(3), np.asarray(tvec, dtype=np.float64)
 
 
-def test_arm_tags_survive_a_missing_table_tag():
+def test_arm_tags_map_through_a_held_camera_pose():
     src = _source()
-    anchored = {TABLE_TAG_ID: _rvec_tvec([0.0, 0.0, 0.6]),
-                ARM_TAGS[0]: _rvec_tvec([0.02, 0.0, 0.5])}
-    pos_seen, _, detected_seen = src._poses_to_base(anchored)
-    assert detected_seen[0], "arm tag must resolve while the table tag is visible"
+    poses = {ARM_TAGS[0]: _rvec_tvec([0.02, 0.0, 0.5])}
+    T_base_cam = np.eye(4)
+    pos_seen, _, detected_seen = src._poses_to_base(poses, T_base_cam)
+    assert detected_seen[0], "arm tag must resolve through the accepted camera pose"
 
-    # Same arm detection, table tag now occluded: still resolved, same place.
-    pos_held, _, detected_held = src._poses_to_base({ARM_TAGS[0]: anchored[ARM_TAGS[0]]})
-    assert detected_held[0], "an occluded table tag must not stale the arm tags"
+    # The anchor tracker holds this transform when either table tag is hidden.
+    pos_held, _, detected_held = src._poses_to_base(poses, T_base_cam)
+    assert detected_held[0], "an incomplete anchor pair must not stale arm tags"
     np.testing.assert_allclose(pos_held[0], pos_seen[0], atol=1e-12)
 
 
@@ -40,7 +40,8 @@ def test_nothing_resolves_before_the_first_anchor():
     """With no anchor ever seen there is nothing to map through — the tags
     stay undetected rather than being mapped through a bogus identity."""
     src = _source()
-    pos, rot, detected = src._poses_to_base({ARM_TAGS[0]: _rvec_tvec([0.02, 0.0, 0.5])})
+    pos, rot, detected = src._poses_to_base(
+        {ARM_TAGS[0]: _rvec_tvec([0.02, 0.0, 0.5])}, None)
     assert not detected.any()
     assert not pos.any() and not rot.any()
 

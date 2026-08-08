@@ -64,6 +64,17 @@ cube_smallest_face_only: false
 # smallest_face_only -> no_flat_spawns -> none).
 cube_no_flat_spawns: false
 
+# Runtime camera anchoring uses tags 10 and 11 as one planar board. A camera pose
+# is accepted only when both tags are present and their independent square-PnP
+# poses agree; accepted board solves feed this EMA. Missing/rejected frames hold
+# the last EMA value exactly. The board itself is calibrated in the arm base at
+# z=0 with +z as its normal, so tag rvec bias cannot tilt the virtual table.
+table_anchor:
+  ema_alpha: 0.05
+  max_reprojection_rmse_px: 1.5
+  max_camera_translation_disagreement_mm: 5.0
+  max_camera_rotation_disagreement_deg: 1.0
+
 # Mechanical gates for `python -m real.calib.align_stereo_rig`. The checker
 # projects the union of the lift/pickplace `cube_low`/`cube_high` boxes from the
 # env configs through each live table-anchored camera pose. These are raw-image

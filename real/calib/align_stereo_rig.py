@@ -1,10 +1,10 @@
 """Mechanically align the rigid C922 stereo pair before checkerboard calibration.
 
-Each camera observes the fixed table tag, which gives its live pose in the arm
-base frame. A rolling window then checks the contracts dense rectified stereo
-needs before calibration: horizontal baseline, matched camera height, nearly
-parallel optical frames, stable anchoring, shared configured-workspace coverage
-and border margin for the later rectification crop.
+Each camera observes the fixed two-tag table board, which gives its live pose in
+the arm base frame. A rolling window then checks the contracts dense rectified
+stereo needs before calibration: horizontal baseline, matched camera height,
+nearly parallel optical frames, stable anchoring, shared configured-workspace
+coverage and border margin for the later rectification crop.
 
 The optional viewer draws the configured lift/pickplace cube workspace as a 3-D
 wire box in both raw images. Green means that camera has enough margin; red and
@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 
@@ -40,12 +40,11 @@ import yaml
 
 from real.calib.extrinsics import (
     average_transforms,
-    base_cam_from_table,
-    load_extrinsics,
     mat_inv,
     transform_spread,
 )
-from real.marker_spec import TABLE_TAG_ID
+from real.calib.table_anchor import TableAnchorTracker, load_table_anchor_limits
+from real.marker_spec import TABLE_TAG_IDS
 from real.vision.detect import make_detector
 from real.vision.overlay import (
     GREEN,
@@ -57,7 +56,6 @@ from real.vision.overlay import (
     TagStyle,
     annotate_tags,
 )
-from real.vision.pose import PoseEstimator
 from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
 
 
@@ -248,7 +246,7 @@ def evaluate_alignment(
 
     if pair_detection_fraction < limits.min_pair_detection_fraction:
         failures.append(
-            f"paired table-tag visibility {pair_detection_fraction:.0%} is below "
+            f"paired two-tag-board visibility {pair_detection_fraction:.0%} is below "
             f"{limits.min_pair_detection_fraction:.0%}")
     if sample_count < limits.min_samples:
         failures.append(
@@ -369,12 +367,12 @@ def _viewer_lines(report: AlignmentReport | None,
                       list[OverlayLine], dict[str, list[OverlayLine]]]:
     if report is None:
         return [
-            OverlayLine("collecting table-tag poses", TABLE_BLUE),
-            OverlayLine("keep the complete anchor visible in both views", TABLE_BLUE),
+            OverlayLine("collecting two-tag board poses", TABLE_BLUE),
+            OverlayLine("keep both complete anchors visible in both views", TABLE_BLUE),
         ], {
             camera: [OverlayLine(
-                f"{camera}: " + ("table tag visible" if table_visible[camera] else
-                                  "TABLE TAG NOT DETECTED - put full tag in frame"),
+                f"{camera}: " + ("both table tags visible" if table_visible[camera] else
+                                  "ANCHOR PAIR INCOMPLETE - show both full tags"),
                 GREEN if table_visible[camera] else RED)]
             for camera in CAMERA_NAMES
         }
@@ -409,8 +407,8 @@ def _viewer_lines(report: AlignmentReport | None,
         margins = "/".join(f"{value:.0f}" for value in camera_coverage.margins_px)
         camera_lines[camera] = [
             OverlayLine(
-                "table anchor visible" if table_visible[camera] else
-                "TABLE TAG NOT DETECTED - put full tag in frame",
+                "both table anchors visible" if table_visible[camera] else
+                "ANCHOR PAIR INCOMPLETE - show both full tags",
                 GREEN if table_visible[camera] else RED),
             OverlayLine(f"{camera} workspace L/R/T/B {margins} px",
                         GREEN if margin_ok else RED),
@@ -442,13 +440,14 @@ def main() -> None:
     if frame_limit < 0 or (frame_limit == 0 and not args.gui):
         parser.error("--frames must be positive, or 0 only with --gui")
 
-    T_base_table, _, _, _ = load_extrinsics()
     workspace = load_workspace_corners(limits)
     detector = make_detector(args.family)
-    caps, mats, dists, estimators = {}, {}, {}, {}
+    caps, mats, dists, anchors = {}, {}, {}, {}
+    raw_anchor_limits = replace(load_table_anchor_limits(), ema_alpha=1.0)
     for camera in CAMERA_NAMES:
         caps[camera], mats[camera], dists[camera] = open_rig_camera(camera)
-        estimators[camera] = PoseEstimator(mats[camera], dists[camera])
+        anchors[camera] = TableAnchorTracker(
+            mats[camera], dists[camera], limits=raw_anchor_limits)
 
     measurements = deque(maxlen=limits.sample_window)
     seen_counts = {camera: 0 for camera in CAMERA_NAMES}
@@ -468,12 +467,11 @@ def main() -> None:
                 image_sizes[camera] = (frame.shape[1], frame.shape[0])
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 by_id = {d.id: d for d in detector.detect(gray)}
-                if TABLE_TAG_ID in by_id:
-                    table_dets[camera] = by_id[TABLE_TAG_ID]
+                table_dets[camera] = {
+                    tag: by_id[tag] for tag in TABLE_TAG_IDS if tag in by_id}
+                if anchors[camera].observe(table_dets[camera]):
                     seen_counts[camera] += 1
-                    poses[camera] = base_cam_from_table(
-                        T_base_table,
-                        *estimators[camera].estimate(by_id[TABLE_TAG_ID]))
+                    poses[camera] = anchors[camera].value()
             paired = len(poses) == len(CAMERA_NAMES)
             measurements.append(poses if paired else None)
             loops += 1
@@ -482,7 +480,8 @@ def main() -> None:
                 measurements, mats, dists, image_sizes, workspace, limits)
             report = None if measurement is None else measurement[1]
             table_visible = {
-                camera: camera in table_dets for camera in CAMERA_NAMES
+                camera: len(table_dets[camera]) == len(TABLE_TAG_IDS)
+                for camera in CAMERA_NAMES
             }
             header, camera_lines = _viewer_lines(
                 report, limits, image_sizes, table_visible)
@@ -498,10 +497,10 @@ def main() -> None:
                     )
                     view = _draw_workspace(
                         frames[camera], report.coverage[camera], margins_ok)
-                if camera in table_dets:
-                    annotate_tags(view, [table_dets[camera]], {
-                        TABLE_TAG_ID: TagStyle("table anchor", TABLE_BLUE)
-                    })
+                annotate_tags(view, table_dets[camera].values(), {
+                    tag: TagStyle(f"table anchor {tag}", TABLE_BLUE)
+                    for tag in TABLE_TAG_IDS
+                })
                 views[camera] = view
             last_views = views
 
@@ -529,8 +528,8 @@ def main() -> None:
             f"{camera}={seen_counts[camera]}/{loops}"
             for camera in CAMERA_NAMES)
         raise RuntimeError(
-            "no paired table-tag pose was measured; per-camera detections: "
-            f"{visibility}. Put the complete table tag inside both frames")
+            "no paired two-tag-board pose was measured; per-camera acceptances: "
+            f"{visibility}. Put both complete table tags inside both frames")
     report = measurement[1]
     summary = format_report(report, limits)
     print(f"\n{summary}", flush=True)

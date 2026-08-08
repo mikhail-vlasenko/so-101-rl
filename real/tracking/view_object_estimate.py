@@ -34,15 +34,12 @@ import numpy as np
 
 from panel.sim_stream import draw_object_channels, draw_sqrtm_ellipsoid
 from real.calib.extrinsics import (
-    PoseEMA,
     average_transforms,
-    base_cam_from_table,
-    load_extrinsics,
     mat_to_pos_quat,
 )
-from real.marker_spec import TABLE_TAG_ID
+from real.calib.table_anchor import TableAnchorTracker
+from real.marker_spec import TABLE_TAG_IDS
 from real.rollout.object_obs import (
-    CAM_EMA_ALPHA,
     REPROMPT_AFTER_EMPTY,
     draw_object_overlay,
 )
@@ -182,16 +179,16 @@ def main():
         parser.error("--frames must be >= 0")
 
     half_extents, tag_transforms = load_sponge_tags()
-    T_base_table, _, _, _ = load_extrinsics()
     detector = make_detector(args.family)
-    wanted = set(tag_transforms) | {TABLE_TAG_ID}
-    caps, mats, dists, estimators, anchors, cam_ema = {}, {}, {}, {}, {}, {}
+    wanted = set(tag_transforms) | set(TABLE_TAG_IDS)
+    caps, mats, dists, estimators, anchors, anchor_trackers = {}, {}, {}, {}, {}, {}
     trackers = {}
     try:
         for camera in CAMERA_NAMES:
             caps[camera], mats[camera], dists[camera] = open_rig_camera(camera)
             estimators[camera] = PoseEstimator(mats[camera], dists[camera])
-            cam_ema[camera] = PoseEMA(CAM_EMA_ALPHA)
+            anchor_trackers[camera] = TableAnchorTracker(
+                mats[camera], dists[camera])
 
         print(f"prompting SAM3 with {args.prompt!r} on both views...", flush=True)
         sam3 = load_sam3()
@@ -255,10 +252,10 @@ def main():
                         tag: estimators[camera].estimate(det)
                         for tag, det in detections[camera].items()
                     }
-                    if TABLE_TAG_ID in tag_poses[camera]:
-                        anchors[camera] = cam_ema[camera].update(base_cam_from_table(
-                            T_base_table, *tag_poses[camera][TABLE_TAG_ID]))
-                    if camera in anchors:
+                    anchor_trackers[camera].observe(detections[camera])
+                    anchor = anchor_trackers[camera].value()
+                    if anchor is not None:
+                        anchors[camera] = anchor
                         geometry[camera] = (mats[camera], dists[camera],
                                             anchors[camera])
 
@@ -353,7 +350,8 @@ def main():
                                 *geometry[camera])
                         else:
                             views[camera] = frames[camera].copy()
-                        styles = {TABLE_TAG_ID: TagStyle("table", TABLE_BLUE, 3)}
+                        styles = {tag: TagStyle(f"table {tag}", TABLE_BLUE, 3)
+                                  for tag in TABLE_TAG_IDS}
                         for tag in tag_transforms:
                             angle = accepted.get((camera, tag))
                             if angle is None:

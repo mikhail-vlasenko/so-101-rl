@@ -2,7 +2,7 @@
 
 The cameras are bolted down, so every re-anchoring consumer (the marker
 pipeline, the dataset recorder, the object tracker) EMAs the per-frame
-table-tag solve (base_cam_from_table) to denoise the jitter that would
+accepted two-tag board solve to denoise the jitter that would
 otherwise move every derived pose in common. We drive PoseEMA directly with a
 fixed pose plus white noise.
 """
@@ -10,7 +10,10 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from real.calib.extrinsics import PoseEMA, mat_to_pos_quat, pos_quat_to_mat
-from real.rollout.marker_obs import CAM_EMA_ALPHA
+from real.calib.table_anchor import load_table_anchor_limits
+
+
+CAM_EMA_ALPHA = load_table_anchor_limits().ema_alpha
 
 
 def test_ema_seeds_on_first_call():

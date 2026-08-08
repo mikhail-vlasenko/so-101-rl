@@ -2,19 +2,16 @@
 
 End-to-end accuracy check of the binocular geometry stack before any
 segmentation model sits on top: both cameras are independently anchored to the
-arm base frame per frame via the fixed table tag (`t_base_table` in
-extrinsics.yaml is camera-independent), the cube tag's four corners are
-matched across views by construction, and each corner is triangulated
+arm base frame through the EMA-smoothed two-tag table board. The cube tag's four
+corners are matched across views by construction, and each corner is triangulated
 ray-by-ray (`real.vision.stereo`). The printed tag edge is known exactly
 (marker_spec.TAG_SIZE_MM), so the recovered corner-to-corner distances measure
 *metric* accuracy — intrinsics + anchoring + triangulation combined — while
 the ray-pair gaps measure cross-view consistency, and the triangulated centre
 is compared against each camera's solvePnP estimate of the same tag.
 
-Unlike the rollout pipeline (real.rollout.marker_obs) there is deliberately no camera
-EMA: per-frame raw anchoring exposes the true jitter this rig will feed the
-triangulator. A static scene is assumed (sponge at rest), so the free-running
-cameras' capture-time offset does not enter.
+The same camera EMA as deployment is active. A static scene is assumed (sponge
+at rest), so the free-running cameras' capture-time offset does not enter.
 
 Run:
     conda run -n mujoco_env python -m real.tracking.stereo_check --frames 100
@@ -26,8 +23,9 @@ import cv2
 import numpy as np
 
 from real.vision.detect import make_detector
-from real.calib.extrinsics import base_cam_from_table, load_extrinsics, rt_to_mat
-from real.marker_spec import CUBE_TAG_ID, TABLE_TAG_ID, TAG_SIZE_MM
+from real.calib.extrinsics import rt_to_mat
+from real.calib.table_anchor import TableAnchorTracker
+from real.marker_spec import CUBE_TAG_ID, TABLE_TAG_IDS, TAG_SIZE_MM
 from real.vision.overlay import annotate_tags
 from real.vision.pose import PoseEstimator
 from real.vision.stereo import pixel_rays, triangulate_rays
@@ -47,15 +45,15 @@ def main():
                         help="directory to write the last annotated frame pair into")
     args = parser.parse_args()
 
-    T_base_table, _, _, _ = load_extrinsics()
     detector = make_detector(args.family)
-    wanted = {TABLE_TAG_ID, CUBE_TAG_ID}
+    wanted = set(TABLE_TAG_IDS) | {CUBE_TAG_ID}
     edge_nominal_m = TAG_SIZE_MM[CUBE_TAG_ID] / 1000.0
 
-    caps, mats, dists, estimators = {}, {}, {}, {}
+    caps, mats, dists, estimators, anchors = {}, {}, {}, {}, {}
     for name in CAMERA_NAMES:
         caps[name], mats[name], dists[name] = open_rig_camera(name)
         estimators[name] = PoseEstimator(mats[name], dists[name])
+        anchors[name] = TableAnchorTracker(mats[name], dists[name])
 
     seen = {name: {"table": 0, "cube": 0} for name in CAMERA_NAMES}
     tri_centers, gaps_center, gaps_corner = [], [], []
@@ -72,16 +70,17 @@ def main():
             dets = {d.id: d for d in detector.detect(gray) if d.id in wanted}
             frame_dets[name] = dets
             last[name] = (frame, dets)
-            for role, tag in (("table", TABLE_TAG_ID), ("cube", CUBE_TAG_ID)):
-                seen[name][role] += tag in dets
+            seen[name]["table"] += all(tag in dets for tag in TABLE_TAG_IDS)
+            seen[name]["cube"] += CUBE_TAG_ID in dets
         if not all(wanted <= set(frame_dets[name]) for name in CAMERA_NAMES):
             continue
 
         rays, pnp = {}, {}
         for name in CAMERA_NAMES:
             dets = frame_dets[name]
-            T_base_cam = base_cam_from_table(
-                T_base_table, *estimators[name].estimate(dets[TABLE_TAG_ID]))
+            if not anchors[name].observe(dets):
+                continue
+            T_base_cam = anchors[name].value()
             cam_pos[name].append(T_base_cam[:3, 3])
             T_base_cube = T_base_cam @ rt_to_mat(*estimators[name].estimate(dets[CUBE_TAG_ID]))
             pnp[name] = T_base_cube[:3, 3]
@@ -89,6 +88,8 @@ def main():
             pixels = np.vstack([corners, corners.mean(axis=0, keepdims=True)])
             rays[name] = pixel_rays(pixels, mats[name], dists[name], T_base_cam)
 
+        if len(rays) != len(CAMERA_NAMES):
+            continue
         points, gaps = triangulate_rays(*rays["main"], *rays["aux"])
         corners3d, center3d = points[:4], points[4]
         tri_centers.append(center3d)
@@ -105,7 +106,7 @@ def main():
     n = len(tri_centers)
     print(f"\nframes with full detections in both views: {n}/{args.frames}")
     for name in CAMERA_NAMES:
-        print(f"  {name}: table tag in {seen[name]['table']}/{args.frames}, "
+        print(f"  {name}: complete table pair in {seen[name]['table']}/{args.frames}, "
               f"cube tag in {seen[name]['cube']}/{args.frames}")
     if args.save_frames:
         os.makedirs(args.save_frames, exist_ok=True)

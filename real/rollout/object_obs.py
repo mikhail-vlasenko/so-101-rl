@@ -16,8 +16,9 @@ and serves the dual-channel object obs the policy trained on
   with the window's running average (M in the linear domain before the sqrt).
   The hull work never blocks the tick.
 
-Each camera re-anchors itself to the base frame per frame from the table tag
-(EMA'd, like the marker pipeline). The `--gui` debug overlay
+Each camera re-anchors itself to the base frame from a two-tag board solve
+(EMA'd, like the marker pipeline). A frame missing either anchor holds the last
+accepted pose. The `--gui` debug overlay
 (`debug_views()`) tints the mask, dots the live centroid, and projects the
 served √M ellipsoid into each view — the picture that makes failures visible.
 """
@@ -27,11 +28,9 @@ import time
 import cv2
 import numpy as np
 
-from real.calib.extrinsics import PoseEMA, base_cam_from_table, load_extrinsics
-from real.marker_spec import TABLE_TAG_ID
+from real.calib.table_anchor import TableAnchorTracker
 from real.tracking.hull_shape import hull_estimate
 from real.vision.detect import make_detector
-from real.vision.pose import PoseEstimator
 from real.vision.stereo import pixel_rays, triangulate_rays
 from src.shape_obs import (
     MARKER_AGE_CAP_S,
@@ -39,9 +38,6 @@ from src.shape_obs import (
     sqrtm_from_cov,
     sqrtm_from_upper,
 )
-
-# Same table-anchor smoothing as the marker pipeline.
-CAM_EMA_ALPHA = 0.05
 
 # Consecutive empty masks in a view before SAM3 re-acquires the object there.
 REPROMPT_AFTER_EMPTY = 15
@@ -80,10 +76,8 @@ class ObjectSource:
         self.prompt = prompt
         self.sam2_model = sam2_model
         self.keep_views = bool(keep_views)
-        self.T_base_table, _, _, _ = load_extrinsics()
         self.detector = make_detector(family)
-        self._estimators = {}
-        self._cam_ema = {name: PoseEMA(CAM_EMA_ALPHA) for name in self.cameras}
+        self._anchors = {}
         self._T_base_cam = {name: None for name in self.cameras}
         self._sam3 = None
         self._trackers = {}
@@ -126,8 +120,8 @@ class ObjectSource:
         for name in self.cameras:
             assert self.feeds[name].camera_matrix is not None, \
                 f"start the '{name}' CameraFeed before ObjectSource"
-            self._estimators[name] = PoseEstimator(self.feeds[name].camera_matrix,
-                                                   self.feeds[name].dist_coeffs)
+            self._anchors[name] = TableAnchorTracker(
+                self.feeds[name].camera_matrix, self.feeds[name].dist_coeffs)
         print(f"ObjectSource: prompting SAM3 with {self.prompt!r} ...", flush=True)
         self._sam3 = load_sam3()
         self._text_to_mask = text_to_mask
@@ -202,13 +196,11 @@ class ObjectSource:
     # --------------------------------------------------------------- workers
 
     def _anchor(self, name, frame):
-        """Update this camera's EMA'd base-frame anchoring from the table tag;
-        holds the last anchor when the tag is missed this frame."""
+        """Update from a valid two-tag solve; otherwise hold the camera EMA."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         dets = {d.id: d for d in self.detector.detect(gray)}
-        if TABLE_TAG_ID in dets:
-            self._T_base_cam[name] = self._cam_ema[name].update(base_cam_from_table(
-                self.T_base_table, *self._estimators[name].estimate(dets[TABLE_TAG_ID])))
+        self._anchors[name].observe(dets)
+        self._T_base_cam[name] = self._anchors[name].value()
         return self._T_base_cam[name]
 
     def _track_view(self, name, frame):

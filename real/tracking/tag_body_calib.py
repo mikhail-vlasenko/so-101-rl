@@ -79,14 +79,13 @@ from scipy.spatial.transform import Rotation
 
 from real.calib.extrinsics import (
     average_transforms,
-    base_cam_from_table,
-    load_extrinsics,
     mat_inv,
     mat_to_pos_quat,
     pos_quat_to_mat,
     rt_to_mat,
 )
-from real.marker_spec import TABLE_TAG_ID, TAG_SIZE_MM
+from real.calib.table_anchor import TableAnchorTracker
+from real.marker_spec import TABLE_TAG_IDS, TAG_SIZE_MM
 from real.vision.detect import Detection, make_detector
 from real.vision.overlay import (
     GREEN,
@@ -808,7 +807,7 @@ def _show_capture_view(viewer, frames, detections, accepted, angles, anchors, re
     for camera in CAMERA_NAMES:
         styles = {}
         for tag in detections[camera]:
-            if tag == TABLE_TAG_ID:
+            if tag in TABLE_TAG_IDS:
                 styles[tag] = TagStyle(f"table {tag}", TABLE_BLUE, 3)
             elif (camera, tag) in accepted:
                 styles[tag] = TagStyle(f"tag {tag} {angles[camera][tag]:.0f}deg OK",
@@ -842,13 +841,13 @@ def collect_placements(target_placements, family, tags, gui=True,
                        initial_placements=(), cached_mats=None, cached_dists=None,
                        cache_path=PLACEMENTS_PATH):
     """Auto-capture distinct stationary placements from the complete stereo rig."""
-    T_base_table, _, _, _ = load_extrinsics()
     detector = make_detector(family)
-    wanted = set(tags) | {TABLE_TAG_ID}
-    caps, mats, dists, estimators = {}, {}, {}, {}
+    wanted = set(tags) | set(TABLE_TAG_IDS)
+    caps, mats, dists, estimators, anchor_trackers = {}, {}, {}, {}, {}
     for camera in CAMERA_NAMES:
         caps[camera], mats[camera], dists[camera] = open_rig_camera(camera)
         estimators[camera] = PoseEstimator(mats[camera], dists[camera])
+        anchor_trackers[camera] = TableAnchorTracker(mats[camera], dists[camera])
     if cached_mats is not None:
         for camera in CAMERA_NAMES:
             if not np.array_equal(mats[camera], cached_mats[camera]):
@@ -878,11 +877,12 @@ def collect_placements(target_placements, family, tags, gui=True,
                     cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)) if d.id in wanted}
                 detections[camera] = found
                 angles[camera] = {}
-                if TABLE_TAG_ID in found:
-                    anchors[camera] = base_cam_from_table(
-                        T_base_table, *estimators[camera].estimate(found[TABLE_TAG_ID]))
+                anchor_trackers[camera].observe(found)
+                anchor = anchor_trackers[camera].value()
+                if anchor is not None:
+                    anchors[camera] = anchor
                 for tag, detection in found.items():
-                    if tag == TABLE_TAG_ID:
+                    if tag in TABLE_TAG_IDS:
                         continue
                     rvec, tvec = estimators[camera].estimate(detection)
                     angle = incidence_angle_deg(rvec, tvec)

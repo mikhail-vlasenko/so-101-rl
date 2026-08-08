@@ -9,8 +9,9 @@ pose in the base frame, `T_base_cam`.
 
 We never touch MuJoCo's OpenGL camera matrix here, so the OpenCV camera
 convention (+x right, +y down, +z into the scene) is the *only* convention in
-this module — no axis flip ever enters. `T_base_cam` is recovered live from the
-fixed table tag (`base_cam_from_table`), and any arm tag is then mapped into the
+this module — no axis flip ever enters. `T_base_cam` is recovered live by the
+two-tag board tracker (`real.calib.table_anchor`); `base_cam_from_table` is its
+single-square consistency primitive. Any arm tag is then mapped into the
 base frame as `mat_to_pos_rotvec(T_base_cam @ T_cam_tag)`, emitting the same
 `(pos, rotvec)` that `marker_world_poses` produces in sim so real and sim
 observations are byte-equal.
@@ -24,6 +25,8 @@ import cv2
 import numpy as np
 import yaml
 from scipy.spatial.transform import Rotation
+
+from real.marker_spec import TABLE_TAG_IDS
 
 EXTRINSICS_PATH = os.path.join(os.path.dirname(__file__), "extrinsics.yaml")
 
@@ -228,12 +231,14 @@ def transform_spread(mats, T_ref):
     return trans_mm, rot_deg
 
 
-def save_extrinsics(path, T_base_table, T_base_cam, focus_absolute,
+def save_extrinsics(path, table_anchor_poses, T_base_cam, focus_absolute,
                     n_samples, spread_mm, spread_deg, quarter_turns):
-    table_pos, table_quat = mat_to_pos_quat(T_base_table)
+    assert set(table_anchor_poses) == set(TABLE_TAG_IDS), (
+        f"table anchors must be exactly {TABLE_TAG_IDS}, got "
+        f"{tuple(sorted(table_anchor_poses))}")
     cam_pos, cam_quat = mat_to_pos_quat(T_base_cam)
     data = {
-        "t_base_table": {"pos": table_pos.tolist(), "quat": table_quat.tolist()},
+        "table_anchors": {},
         "t_base_cam_fixed": {"pos": cam_pos.tolist(), "quat": cam_quat.tolist()},
         # Per-arm-tag in-plane glue offset (k·90°), keyed by tag id; applied as
         # quarter_turn_mat(-k) to that tag's measured pose at rollout.
@@ -243,19 +248,42 @@ def save_extrinsics(path, T_base_table, T_base_cam, focus_absolute,
         "spread_mm": float(spread_mm),
         "spread_deg": float(spread_deg),
     }
+    for tag in TABLE_TAG_IDS:
+        pos, quat = mat_to_pos_quat(table_anchor_poses[tag])
+        data["table_anchors"][tag] = {
+            "pos": pos.tolist(), "quat": quat.tolist()}
     with open(path, "w") as f:
         yaml.safe_dump(data, f, default_flow_style=None, sort_keys=False)
 
 
-def load_extrinsics(path=EXTRINSICS_PATH):
-    """Load (T_base_table, T_base_cam_fixed, focus_absolute, quarter_turns).
+def table_anchor_poses_from_data(data):
+    """Decode the calibrated active anchor-board tag poses from YAML data."""
+    raw = data["table_anchors"]
+    anchors = {
+        int(tag): pos_quat_to_mat(value["pos"], value["quat"])
+        for tag, value in raw.items()
+    }
+    assert set(anchors) == set(TABLE_TAG_IDS), (
+        f"calibrated table anchors must be exactly {TABLE_TAG_IDS}, got "
+        f"{tuple(sorted(anchors))}")
+    return anchors
 
-    `focus_absolute` lets the consumer open the camera at the focus the intrinsics
-    (and these extrinsics) were calibrated at. `quarter_turns` maps tag id -> k.
+
+def load_table_anchor_poses(path=EXTRINSICS_PATH):
+    """Load ``{tag_id: T_base_tag}`` for the complete active anchor board."""
+    with open(path) as f:
+        return table_anchor_poses_from_data(yaml.safe_load(f))
+
+
+def load_extrinsics(path=EXTRINSICS_PATH):
+    """Load (table anchor poses, fixed main camera, focus, quarter turns).
+
+    Runtime anchoring passes the complete first item to the two-tag board solver;
+    there is intentionally no single-tag compatibility return.
     """
     with open(path) as f:
         data = yaml.safe_load(f)
-    T_base_table = pos_quat_to_mat(data["t_base_table"]["pos"], data["t_base_table"]["quat"])
+    anchors = table_anchor_poses_from_data(data)
     T_base_cam = pos_quat_to_mat(data["t_base_cam_fixed"]["pos"], data["t_base_cam_fixed"]["quat"])
     quarter_turns = {int(tag): int(k) for tag, k in data["quarter_turns"].items()}
-    return T_base_table, T_base_cam, int(data["focus_absolute"]), quarter_turns
+    return anchors, T_base_cam, int(data["focus_absolute"]), quarter_turns

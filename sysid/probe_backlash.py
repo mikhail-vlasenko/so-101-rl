@@ -59,7 +59,7 @@ from real.calib.calibrate_qpos import (
 )
 from real.calib.calibration import load_calibration
 from real.calib.extrinsics import load_extrinsics
-from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_ID
+from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_IDS
 from real.twin.constants import SERVO_POSITION_DEADZONE, SERVO_POSITION_KP
 from real.twin.mapping import JOINT_NAMES, load_joint_maps, raw_to_rad
 from real.twin.servo_io import ServoBus
@@ -261,11 +261,14 @@ def hysteresis_estimates(records, model, data, jm, qpos_bias, R_base_cam):
         q_plus = np.array(plus["qpos"]) - qpos_bias
         enc_delta = q_plus[j] - q_minus[j]
         tau = _gravity_torque(model, data, qposadr, q_minus, dofadrs[name])
-        table_drift = float("nan")
-        key = str(TABLE_TAG_ID)
-        if key in minus["tags"] and key in plus["tags"]:
-            table_drift = float(np.linalg.norm(
-                np.array(plus["tags"][key]) - np.array(minus["tags"][key]))) * 1000.0
+        table_drifts = []
+        for table_tag in TABLE_TAG_IDS:
+            key = str(table_tag)
+            if key in minus["tags"] and key in plus["tags"]:
+                table_drifts.append(np.linalg.norm(
+                    np.array(plus["tags"][key]) - np.array(minus["tags"][key])))
+        table_drift = (float(np.mean(table_drifts)) * 1000.0
+                       if table_drifts else float("nan"))
         for tag, sid in site_ids.items():
             key = str(tag)
             if key not in minus["tags"] or key not in plus["tags"]:

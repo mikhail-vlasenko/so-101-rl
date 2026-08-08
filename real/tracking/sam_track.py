@@ -34,10 +34,9 @@ import cv2
 import numpy as np
 
 from real.vision.detect import make_detector
-from real.calib.extrinsics import base_cam_from_table, load_extrinsics
-from real.marker_spec import CUBE_TAG_ID, TABLE_TAG_ID
+from real.calib.table_anchor import TableAnchorTracker
+from real.marker_spec import CUBE_TAG_ID, TABLE_TAG_IDS
 from real.vision.overlay import YELLOW, StereoViewer, TagStyle, annotate_tags
-from real.vision.pose import PoseEstimator
 from real.tracking.sam_seg import SAM2_MODELS, MaskTracker, load_sam3, mask_centroid, text_to_mask
 from real.vision.stereo import pixel_rays, triangulate_rays
 from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
@@ -75,14 +74,13 @@ def main():
                         help="directory to write the last annotated frame pair into")
     args = parser.parse_args()
 
-    T_base_table, _, _, _ = load_extrinsics()
     detector = make_detector(args.family)
-    wanted = {TABLE_TAG_ID, CUBE_TAG_ID}
+    wanted = set(TABLE_TAG_IDS) | {CUBE_TAG_ID}
 
-    caps, mats, dists, estimators, trackers = {}, {}, {}, {}, {}
+    caps, mats, dists, anchors, trackers = {}, {}, {}, {}, {}
     for name in CAMERA_NAMES:
         caps[name], mats[name], dists[name] = open_rig_camera(name)
-        estimators[name] = PoseEstimator(mats[name], dists[name])
+        anchors[name] = TableAnchorTracker(mats[name], dists[name])
 
     print(f"prompting SAM3 with {args.prompt!r} on both views...", flush=True)
     sam3 = load_sam3()
@@ -136,10 +134,10 @@ def main():
             if args.gui or args.save_frames:
                 views[name] = overlay(frame, mask, centroid,
                                       dets.get(CUBE_TAG_ID), f"{name} {args.prompt}")
-            if TABLE_TAG_ID not in dets:
+            anchors[name].observe(dets)
+            T_base_cam = anchors[name].value()
+            if T_base_cam is None:
                 continue
-            T_base_cam = base_cam_from_table(
-                T_base_table, *estimators[name].estimate(dets[TABLE_TAG_ID]))
             if centroid is not None:
                 _o, _d = pixel_rays(np.array([centroid]), mats[name], dists[name], T_base_cam)
                 rays_sam[name] = (_o, _d)

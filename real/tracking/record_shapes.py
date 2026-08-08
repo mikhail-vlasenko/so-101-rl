@@ -31,13 +31,11 @@ import numpy as np
 import yaml
 
 from real.calib.extrinsics import (
-    PoseEMA,
     average_transforms,
-    base_cam_from_table,
-    load_extrinsics,
     mat_to_pos_quat,
 )
-from real.marker_spec import SPONGE_TAG_IDS, TABLE_TAG_ID
+from real.calib.table_anchor import TableAnchorTracker
+from real.marker_spec import SPONGE_TAG_IDS, TABLE_TAG_IDS
 from real.tracking.tag_body_calib import SPONGE_TAGS_PATH, body_pose_from_tag, load_sponge_tags
 from real.vision.detect import make_detector
 from real.vision.overlay import (
@@ -56,9 +54,6 @@ from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
 from src.shape_obs import STATIC_DWELL_S, is_static
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-# Same table-anchor smoothing as the rollout pipeline (real/rollout/marker_obs.py).
-CAM_EMA_ALPHA = 0.05
 
 LIFT_CONFIG_PATH = REPO_ROOT / "conf" / "env" / "lift.yaml"
 
@@ -142,18 +137,18 @@ def main():
     frames_dir = out_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=False)
 
-    T_base_table, _, _, _ = load_extrinsics()
     half_extents, tag_transforms = load_sponge_tags()
     detector = make_detector(args.family)
-    wanted = set(SPONGE_TAG_IDS) | {TABLE_TAG_ID}
+    wanted = set(SPONGE_TAG_IDS) | set(TABLE_TAG_IDS)
 
-    caps, mats, dists, estimators, cam_ema = {}, {}, {}, {}, {}
+    caps, mats, dists, estimators, anchors = {}, {}, {}, {}, {}
     for name in CAMERA_NAMES:
         caps[name], mats[name], dists[name] = open_rig_camera(name)
         estimators[name] = PoseEstimator(mats[name], dists[name])
-        cam_ema[name] = PoseEMA(CAM_EMA_ALPHA)
+        anchors[name] = TableAnchorTracker(mats[name], dists[name])
     viewer = None if args.no_gui else StereoViewer("sponge shape dataset recorder")
-    tag_styles = {TABLE_TAG_ID: TagStyle(f"table {TABLE_TAG_ID}", TABLE_BLUE, 3)}
+    tag_styles = {tag: TagStyle(f"table {tag}", TABLE_BLUE, 3)
+                  for tag in TABLE_TAG_IDS}
     tag_styles.update({tag: TagStyle(f"sponge tag {tag}", GREEN, 3)
                        for tag in tag_transforms})
 
@@ -210,12 +205,8 @@ def main():
                                  "rvec": rvec.tolist(), "tvec": tvec.tolist()}
                 record["tags"][name] = tags
 
-                T_base_cam = None
-                if TABLE_TAG_ID in dets:
-                    T_base_cam = cam_ema[name].update(base_cam_from_table(
-                        T_base_table,
-                        np.array(tags[TABLE_TAG_ID]["rvec"]),
-                        np.array(tags[TABLE_TAG_ID]["tvec"])))
+                anchors[name].observe(dets)
+                T_base_cam = anchors[name].value()
                 if T_base_cam is None:
                     record["T_base_cam"][name] = None
                     record["body"][name] = None

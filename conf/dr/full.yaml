@@ -49,7 +49,7 @@ obs_noise:
 # error); live/precise are the cube channels' own systematic offsets (segmentation-mask /
 # hull-estimator geometry, PLACEHOLDERS like the noise sigmas above); marker_common_sigma
 # is a separate shift shared by ALL camera-derived positions — the real pipeline
-# re-anchors the cameras from one table tag every frame and EMAs it (real/marker_obs.py),
+# re-anchors the cameras from the two-tag table board and EMAs accepted pair solves,
 # so that anchor's calibration offset settles into a common-mode shift on finger, wrist,
 # and both cube channels alike. qpos biases are the small residual left after the real
 # rig subtracts the bulk calibration offset pre-policy — see calibration_plan.md.

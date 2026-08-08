@@ -4,13 +4,13 @@ Shared by the encoder-bias calibrator (`real/calib/calibrate_qpos.py`) and the r
 plot (`real/calib/plot_calib_residuals.py`). A "sample" is `(qpos[6], {tag_id: (rvec,
 tvec)})`: the joint angles at a captured pose and each tag's pose in the camera
 frame. From a spread of samples these helpers register the camera in the arm base
-frame, anchor the fixed table tag, and recover each arm tag's glue offset.
+frame, anchor the fixed two-tag table board, and recover each arm tag's glue offset.
 
 The camera measures every tag in its own frame; the only thing it can't know is how
 that frame relates to the arm base. The *arm* tags hand it over for free: MuJoCo FK
 already knows where `marker_finger` / `marker_wrist` sit in the base frame at any
 pose, so each frame yields `T_base_cam = T_base_armtag(FK) ∘ T_cam_armtag⁻¹`. Anchor
-that into the fixed table tag (`T_base_table = T_base_cam ∘ T_cam_table`) and average
+that into both fixed table tags, level their shared plane to base z=0, and average
 over poses. The registration is position-only (tag *centres*), so it is immune to the
 glue rotation and to solvePnP's rvec flips on the small arm tags — the failure modes
 that wreck an orientation bridge.
@@ -26,6 +26,7 @@ import json
 
 import mujoco
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from real.calib.extrinsics import (
     average_transforms,
@@ -34,7 +35,7 @@ from real.calib.extrinsics import (
     snap_inplane_offset,
     transform_spread,
 )
-from real.marker_spec import TABLE_TAG_ID
+from real.marker_spec import TABLE_TAG_IDS
 from src.base_env import TAG_CAM_NAME
 
 
@@ -137,11 +138,31 @@ def solve_camera(samples, model, data, qposadr, site_ids):
     return T_base_cam, rms * 1000.0, tags, err_mm
 
 
-def solve_table(samples, T_base_cam):
-    """Anchor the fixed table tag: T_base_table = T_base_cam ∘ T_cam_table, averaged
-    over poses. The candidates' spread is the table-detection repeatability (camera
-    and table are both fixed, so it should be tiny)."""
-    cands = np.array([T_base_cam @ rt_to_mat(*poses[TABLE_TAG_ID]) for _, poses in samples])
-    T_base_table = average_transforms(cands)
-    trans_mm, rot_deg = transform_spread(cands, T_base_table)
-    return T_base_table, trans_mm, rot_deg
+def solve_table_anchors(samples, T_base_cam):
+    """Calibrate both fixed table tags while enforcing the known table plane.
+
+    The camera/arm registration supplies each tag's base-frame centre and yaw.
+    Roll, pitch and centre z are physical table constraints instead: every tag
+    lies at z=0 with normal +z. This prevents planar PnP orientation bias from
+    tilting the base-frame ground plane. Returns ``(poses, translation_spread,
+    rotation_spread)`` with the repeatability arrays pooled across both tags.
+    """
+    anchors = {}
+    all_translation_mm = []
+    all_rotation_deg = []
+    for tag in TABLE_TAG_IDS:
+        cands = np.array([
+            T_base_cam @ rt_to_mat(*poses[tag]) for _, poses in samples])
+        raw = average_transforms(cands)
+        trans_mm, rot_deg = transform_spread(cands, raw)
+        all_translation_mm.extend(trans_mm)
+        all_rotation_deg.extend(rot_deg)
+
+        x_axis = raw[:3, 0]
+        yaw = np.arctan2(x_axis[1], x_axis[0])
+        leveled = np.eye(4)
+        leveled[:3, :3] = Rotation.from_euler("z", yaw).as_matrix()
+        leveled[:2, 3] = raw[:2, 3]
+        anchors[tag] = leveled
+    return (anchors, np.asarray(all_translation_mm),
+            np.asarray(all_rotation_deg))

@@ -8,12 +8,12 @@ by `real/calib/calibrate_qpos.py`), so the policy consumes *measured* tag
 poses in the exact `(xyz, axis-angle)` form it saw in sim
 (`src/base_env.py::marker_world_poses`).
 
-Per frame the fixed table tag re-anchors the camera (`base_cam_from_table`,
-EMA-smoothed), so a bumped camera self-corrects. Frames that miss the table
-tag coast on the last smoothed anchor — the camera is bolted down, so its
+Per frame the two fixed table tags jointly re-anchor the camera through an
+EMA-smoothed board solve, so a bumped camera self-corrects. Frames that miss
+either tag coast on the last smoothed anchor — the camera is bolted down, so its
 pose is a static property of the session, and an occluding sponge or arm must
 not stale every arm marker at once (only a session that has never seen the
-table tag has nothing to map through). A tag the camera can't see keeps its
+anchor pair has nothing to map through). A tag the camera can't see keeps its
 last measured pose while its age grows, the same hold-last-pose + age
 convention training used for undetected tags (src/base_env.py); a tag never
 seen this session reads all-zero with age pinned at MARKER_AGE_CAP_S.
@@ -29,26 +29,17 @@ import cv2
 import numpy as np
 
 from real.calib.extrinsics import (
-    PoseEMA,
-    base_cam_from_table,
     load_extrinsics,
     mat_to_pos_rotvec,
     quarter_turn_mat,
     rt_to_mat,
 )
-from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_ID
+from real.calib.table_anchor import TableAnchorTracker
+from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_IDS
 from real.rollout.frame_bus import CAPTURE_TO_READ_S
 from real.vision.detect import make_detector
 from real.vision.pose import PoseEstimator
 from src.base_env import MARKER_AGE_CAP_S, MARKER_SITE_NAMES, N_MARKERS
-
-# EMA weight for the re-anchored camera pose. The camera is bolted down (static
-# within a session), so smoothing base_cam_from_table across frames denoises the
-# per-frame table-tag detection jitter that otherwise moves every arm tag in
-# common. At 30 fps, 0.05 is a ~0.7 s time constant: heavy denoising while still
-# tracking a real bump within a couple of seconds.
-CAM_EMA_ALPHA = 0.05
-
 
 class CameraMarkerSource:
     """Frame-feed consumer → base-frame marker poses. start() → marker_poses() → stop().
@@ -59,13 +50,13 @@ class CameraMarkerSource:
     """
 
     def __init__(self, feed, family: str = "apriltag", on_frame=None):
-        self.T_base_table, _, _, self.quarter_turns = load_extrinsics()
+        _, _, _, self.quarter_turns = load_extrinsics()
         self.feed = feed
         self.detector = make_detector(family)
         # Obs slot order is MARKER_SITE_NAMES; map each slot to its physical tag id.
         site_to_tag = {site: tag for tag, site in ARM_TAG_TO_SITE.items()}
         self.slot_tags = [site_to_tag[name] for name in MARKER_SITE_NAMES]
-        self._wanted = set(ARM_TAG_TO_SITE) | {TABLE_TAG_ID}
+        self._wanted = set(ARM_TAG_TO_SITE) | set(TABLE_TAG_IDS)
         # Called from the consumer thread after every processed frame with
         # (t_recv, pos (N,3), rot (N,3), detect_ms) — base-frame poses,
         # undetected tags zeroed. Lets a recorder (sysid/probe_cam_latency.py)
@@ -83,9 +74,7 @@ class CameraMarkerSource:
         # never. Until it is fresh the camera can't be mapped to the base frame at
         # all (every pose is zeroed/held), so warmup() blocks on it.
         self._table_last_capture_t = -np.inf
-        # EMA state for the re-anchored camera pose (see CAM_EMA_ALPHA). Seeded
-        # by the first table-tag solve; touched only from the consumer thread.
-        self._cam_ema = PoseEMA(CAM_EMA_ALPHA)
+        self._anchor = None
         self._recv_t: float | None = None
         self._read_ms = float("nan")
         self._detect_ms = float("nan")
@@ -100,6 +89,8 @@ class CameraMarkerSource:
             "start the CameraFeed before the CameraMarkerSource"
         self.estimator = PoseEstimator(self.feed.camera_matrix,
                                        self.feed.dist_coeffs)
+        self._anchor = TableAnchorTracker(
+            self.feed.camera_matrix, self.feed.dist_coeffs)
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         # Block until the first frame is processed so a dead feed fails loud
@@ -123,16 +114,21 @@ class CameraMarkerSource:
                 _, read_ms = self.feed.stats()
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 t_det = time.monotonic()
-                poses = {d.id: self.estimator.estimate(d)
-                         for d in self.detector.detect(gray) if d.id in self._wanted}
+                detections = {d.id: d for d in self.detector.detect(gray)
+                              if d.id in self._wanted}
+                anchor_updated = self._anchor.observe(detections)
+                poses = {tag: self.estimator.estimate(detection)
+                         for tag, detection in detections.items()
+                         if tag in ARM_TAG_TO_SITE}
                 detect_ms = (time.monotonic() - t_det) * 1e3
-                pos, rot, detected = self._poses_to_base(poses)
+                pos, rot, detected = self._poses_to_base(
+                    poses, self._anchor.value())
                 t_recv = t_capture + CAPTURE_TO_READ_S
                 with self._lock:
                     self._pos[detected] = pos[detected]
                     self._rot[detected] = rot[detected]
                     self._last_capture_t[detected] = t_capture
-                    if TABLE_TAG_ID in poses:
+                    if anchor_updated:
                         self._table_last_capture_t = t_capture
                     self._recv_t = t_recv
                     self._read_ms = read_ms
@@ -142,7 +138,7 @@ class CameraMarkerSource:
         except Exception as exc:   # surface to the consumer thread; a dead feed
             self.error = exc       # must fail loud, not freeze the last poses
 
-    def _poses_to_base(self, poses: dict):
+    def _poses_to_base(self, poses: dict, T_base_cam):
         """Camera-frame tag poses -> raw per-frame base-frame
         (pos (N,3), rot (N,3), detected (N,) bool); undetected/un-anchored
         tags zeroed with detected=False. These are the per-frame values (used
@@ -151,16 +147,7 @@ class CameraMarkerSource:
         pos = np.zeros((N_MARKERS, 3))
         rot = np.zeros((N_MARKERS, 3))
         detected = np.zeros(N_MARKERS, dtype=bool)
-        if TABLE_TAG_ID in poses:
-            T_base_cam = self._cam_ema.update(
-                base_cam_from_table(self.T_base_table, *poses[TABLE_TAG_ID]))
-        elif self._cam_ema.seeded:
-            # The camera is bolted down, so its anchor is a static property of
-            # the session, not a per-frame measurement: coast on the smoothed
-            # value rather than letting the sponge or the arm covering the
-            # table tag stale every arm marker at once.
-            T_base_cam = self._cam_ema.value()
-        else:
+        if T_base_cam is None:
             return pos, rot, detected   # never anchored this session
         for i, tag in enumerate(self.slot_tags):
             if tag in poses:
@@ -206,8 +193,8 @@ class CameraMarkerSource:
         return time.monotonic() - recv_t, read_ms, detect_ms
 
     def table_age(self) -> float:
-        """Seconds since the table anchor tag (id TABLE_TAG_ID) was last
-        detected; inf if never seen this session. Re-raises a dead-thread
+        """Seconds since both table anchor tags last produced an accepted
+        board solve; inf if never accepted this session. Re-raises a dead-thread
         error."""
         if self.error is not None:
             raise self.error
@@ -216,7 +203,7 @@ class CameraMarkerSource:
         return time.monotonic() - last
 
     def warmup(self, timeout_s: float = 5.0, fresh_s: float = 0.25) -> float:
-        """Block until the table anchor tag is freshly detected (age <= fresh_s),
+        """Block until both table tags freshly produce an accepted board solve,
         so the episode starts with the camera actually anchored to the base frame
         instead of steering the arm on zeroed/held poses while the sensor and
         detector settle. Re-raises a dead-thread error; raises on timeout so a
@@ -229,8 +216,9 @@ class CameraMarkerSource:
                 return time.monotonic() - t0
             if time.monotonic() > deadline:
                 raise RuntimeError(
-                    f"table anchor tag (id {TABLE_TAG_ID}) not detected within "
-                    f"{timeout_s:.0f} s of warmup; check camera framing/focus.")
+                    f"table anchor tags {TABLE_TAG_IDS} did not produce a valid "
+                    f"pair within {timeout_s:.0f} s of warmup; check that both "
+                    "complete tags are visible and in focus.")
             time.sleep(0.02)
 
     def stop(self) -> None:

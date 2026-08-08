@@ -2,8 +2,9 @@
 
 The binocular pipeline (vision_multicam_longterm.md) triangulates *matched
 image points* across the two independently-anchored cameras — never dense
-stereo. Each camera is mapped into the base frame by its own live table-tag
-anchoring (`real.calib.extrinsics.base_cam_from_table`), so the two cameras need no
+stereo. Each camera is mapped into the base frame by its own EMA-smoothed
+two-tag board tracker (`real.calib.table_anchor.TableAnchorTracker`), so the two
+cameras need no
 stereo calibration and no rigid coupling: a pixel in either view back-projects
 to a base-frame ray, and a point seen in both views is the closest-approach
 midpoint of its two rays. The ray-pair gap is the cross-view consistency

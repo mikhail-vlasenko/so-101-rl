@@ -38,16 +38,19 @@ dense stereo model, PointNet nor deployed policy may depend on them.
    10–12 cm horizontal baseline, matched height/roll/pitch, approximately
    parallel optical axes and full common coverage of the workspace. At a 40 cm
    working distance this gives roughly 15–20° geometric view separation. The
-   current measured rig is 37.9 cm / ~52°: good silhouette diversity, but poor
-   dense correspondence and an unnecessarily large disparity range.
+   aligned rig now measures about 10.9 cm with sub-2° relative axes and passes
+   the raw workspace-coverage gates.
 
 3. **Use a fixed stereo calibration for relative geometry.** Rectification
    must never be driven by two independently jittering per-frame table-tag
    poses. A shared checkerboard calibration owns `T_aux_main` and the OpenCV
-   rectification matrices/maps. The table tag anchors the rigid stereo rig into
-   the arm base each frame; the fixed stereo transform places the other camera.
-   Both table detections may be fused as two estimates of the one rig pose, but
-   they do not alter the relative transform.
+   rectification matrices/maps. AprilTags 10 and 11 are solved together as one
+   leveled table board; only a valid two-tag observation updates the EMA'd rigid
+   rig pose in the arm base. A missing/rejected tag pair holds the last rig pose.
+   The fixed stereo transform then places the other camera and never changes in
+   response to anchor noise. Until that checkerboard transform exists, the live
+   code keeps one identical two-tag EMA per camera; the stereo-calibration stage
+   replaces those two outputs with the single rigid-rig pose.
 
 4. **Select the simplest stereo matcher that passes geometric gates.** Start
    with OpenCV StereoSGBM as the classical baseline and Fast-FoundationStereo
@@ -224,8 +227,8 @@ it now anchors one rigid rig instead of defining its stereo baseline.
 
 - Shared checkerboard reprojection RMS below 0.5 px per camera.
 - Rectified vertical correspondence p95 below 1 px throughout the workspace.
-- Relative pose remains stable when independently inferred from the table tags;
-  log disagreement rather than letting it perturb rectification.
+- The two-tag board's per-camera rig-pose estimates agree within calibrated
+  gates; log disagreement rather than letting it perturb rectification.
 - No workspace pose falls outside either valid rectified ROI.
 
 ## Stage 2 — offline dense-stereo feasibility gate

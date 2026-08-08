@@ -1,9 +1,9 @@
-"""Measure a camera's sim mount pose from the live table-tag anchoring.
+"""Measure a camera's sim mount pose from the live two-tag board anchoring.
 
 The sim scene (so101.xml `tag_cam_mount` / `tag_cam_aux_mount`) needs each
 camera's base-frame pose as a literal pos/quat. The real pipeline never stores
-one — every camera re-anchors itself per frame from the table tag
-(`base_cam_from_table`) — so this script simply takes that same measurement
+one — every camera re-anchors itself from accepted board observations — so this
+script simply takes that same measurement
 once, robust-averages it over N frames, converts the OpenCV camera frame
 (+x right, +y down, +z into the scene) to MuJoCo's camera convention (looks
 down -z, +y up; a 180-degree flip about the camera x-axis, pinned by
@@ -16,6 +16,7 @@ Usage:
     conda run -n mujoco_env python -m real.diagnostics.snapshot_cam_mount --camera main
 """
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -24,14 +25,12 @@ import numpy as np
 
 from real.calib.extrinsics import (
     average_transforms,
-    base_cam_from_table,
-    load_extrinsics,
     mat_to_pos_quat,
     transform_spread,
 )
-from real.marker_spec import TABLE_TAG_ID
+from real.calib.table_anchor import TableAnchorTracker, load_table_anchor_limits
+from real.marker_spec import TABLE_TAG_IDS
 from real.vision.detect import make_detector
-from real.vision.pose import PoseEstimator
 from real.vision.stereo_rig import open_rig_camera
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -63,16 +62,17 @@ def current_xml_mount(camera):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Snapshot a camera's sim mount pose from table-tag anchoring")
+        description="Snapshot a camera's sim mount pose from two-tag anchoring")
     parser.add_argument("--camera", choices=("main", "aux"), default="aux")
     parser.add_argument("--frames", type=int, default=100)
     parser.add_argument("--family", choices=("apriltag", "aruco"), default="apriltag")
     args = parser.parse_args()
 
-    T_base_table, _, _, _ = load_extrinsics()
     detector = make_detector(args.family)
     cap, camera_matrix, dist_coeffs = open_rig_camera(args.camera)
-    estimator = PoseEstimator(camera_matrix, dist_coeffs)
+    tracker = TableAnchorTracker(
+        camera_matrix, dist_coeffs,
+        limits=replace(load_table_anchor_limits(), ema_alpha=1.0))
 
     solves = []
     try:
@@ -82,15 +82,14 @@ def main():
                 raise RuntimeError(f"camera read failed on '{args.camera}'")
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             dets = {d.id: d for d in detector.detect(gray)}
-            if TABLE_TAG_ID in dets:
-                solves.append(base_cam_from_table(
-                    T_base_table, *estimator.estimate(dets[TABLE_TAG_ID])))
+            if tracker.observe(dets):
+                solves.append(tracker.value())
     finally:
         cap.release()
 
     if len(solves) < args.frames // 2:
         raise RuntimeError(
-            f"table tag (id {TABLE_TAG_ID}) seen in only {len(solves)}/"
+            f"table anchor pair {TABLE_TAG_IDS} accepted in only {len(solves)}/"
             f"{args.frames} frames; fix the '{args.camera}' framing first")
 
     T_base_cam = average_transforms(solves)

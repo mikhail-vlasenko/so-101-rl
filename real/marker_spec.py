@@ -33,7 +33,8 @@ TAG_SIZE_MM = {
 # Physical role per id, as glued on the rig. Detection keys tags by id and the
 # rollout maps id->obs slot, so this is the single source of truth for the
 # layout — keep it matching the arm. The finger/wrist sites in so101.xml carry
-# the same ids in their comments. Ids 11/12 are extra table tags.
+# the same ids in their comments. IDs 10 and 11 form the active table-anchor
+# board; id 12 is a spare and is deliberately not trusted by the anchor solver.
 #
 # The sponge's tags (id 1 on a largest face, plus the cube_eval set on its
 # other faces) are EVAL-ONLY: they provide ground truth for the shape-tracking
@@ -54,7 +55,7 @@ ROLES = {
 # the base-frame anchor for its tag; the rollout writes a measured tag into the
 # observation slot of its site. Keep the ids in sync with ROLES.
 ARM_TAG_TO_SITE = {0: "marker_finger", 2: "marker_wrist"}
-TABLE_TAG_ID = 10
+TABLE_TAG_IDS = (10, 11)
 CUBE_TAG_ID = 1
 # Every tag glued to the sponge (id 1 + the eval-only faces), the set the
 # dataset GT pipeline detects and tag_body_calib solves.
