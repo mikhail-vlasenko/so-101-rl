@@ -4,7 +4,11 @@ Train RL policies in MuJoCo for the SO-101 arm and run them on the real arm.
 Scene: `so101/scene.xml`, meshes from
 [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101).
 Long-term tasks and known sim-to-real gaps live in `TODO.md` — check it, and add
-follow-ups there instead of inlining them.
+follow-ups there instead of inlining them. Every entry must describe unresolved,
+actionable work: a concrete next step, investigation, or decision. Do not use it
+for completed work, measurements, conclusions, or project status; those belong
+in commit history or the relevant module/config documentation. Delete entries
+when the work is completed, abandoned, or superseded.
 
 Module docstrings and `conf/*.yaml` comments are the primary documentation. This
 file holds only cross-file contracts, gotchas, and commands — keep it that way.
