@@ -17,16 +17,20 @@ obs_noise:
   tag_px_noise: 0.1
   tag_depth_factor: 2.0
   live_sigma: 0.003
-  precise_sigma: 0.00534
+  precise_sigma: 0.0015
 
 obs_bias:
   qpos_sigma: 0.01
   marker_pos_sigma: 0.002
   marker_rot_sigma: 0.02
   live_sigma: 0.00401
-  precise_sigma: 0.00534
-  sqrtm_depth_sigma: 0.01276
+  precise_sigma: 0.0015
   marker_common_sigma: 0.0015
+
+synthetic_cloud:
+  point_noise_sigma_m: 0.0015
+  point_dropout_probability: 0.10
+  whole_view_loss_probability: 0.02
 
 # Same as dr=full: latency is measured hardware timing, not a difficulty knob.
 cam_latency:

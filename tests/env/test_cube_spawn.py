@@ -160,7 +160,7 @@ def test_marker_obs_match_site_poses(env):
     assert markers_visible(env.data, env.marker_site_ids, env.tag_cam).all()
     # Re-roll a camera detection of this posed state and rebuild the obs from it.
     env._ingest_frame(env.data.time, env._process_frame(env._capture_camera_state()))
-    obs = env._compute_obs()
+    obs = env._serve_obs(reset=False)
     marker_pos, marker_rot = marker_world_poses(env.data, env.marker_site_ids)
     np.testing.assert_allclose(obs[MARKER_FINGER_POS], marker_pos[0], atol=1e-6)
     np.testing.assert_allclose(obs[MARKER_FINGER_ROT], marker_rot[0], atol=1e-6)

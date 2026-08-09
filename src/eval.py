@@ -18,6 +18,7 @@ from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.checkpoints import resolve_model_path
+from src.bps import validate_checkpoint_bps
 from src.train import ENV_REGISTRY, _resolve_env, make_env, runtime_cfg_from_hydra
 
 ALGORITHM_CLASSES = {
@@ -49,6 +50,8 @@ def main(cfg: DictConfig):
     model = algo_cls.load(model_path)
 
     runtime_cfg = runtime_cfg_from_hydra(cfg)
+    if cfg.env_name != "reach":
+        validate_checkpoint_bps(model, runtime_cfg.bps_config)
     render_mode = "human" if cfg.render else None
     inner_env = make_env(env_cls, env_cfg, xml_path, render_mode=render_mode,
                          slow_factor=cfg.slow_factor,

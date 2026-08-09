@@ -3,8 +3,8 @@
 Bias is sampled once at reset() and held constant for the whole episode. It
 adds to qpos / marker poses / the cube channels in the observation. The
 per-tag marker biases are independent (each tag's own glue/pose-estimate
-error), the cube channels carry their own live/precise offsets plus a constant
-rotation of the estimated box axes, and a marker_common_sigma shift is shared
+error), the cube channels carry their own live/precise offsets, and a
+marker_common_sigma shift is shared
 by ALL camera-derived positions (the camera re-anchor / table calibration
 offset the real pipeline propagates everywhere). No qvel bias — velocity from
 differentiating biased qpos has zero DC offset. Reward path always reads
@@ -18,11 +18,7 @@ from hydra import compose, initialize
 
 from src.base_env import RuntimeEnvConfig
 from src.pickplace_env import SO101PickPlaceEnv
-from src.shape_obs import (
-    camera_depth_axis,
-    depth_spread_excess,
-    sqrtm_from_upper,
-)
+from src.base_env import state_dim_for
 
 
 SIGMAS = {
@@ -31,7 +27,6 @@ SIGMAS = {
     "marker_rot_sigma": 0.05,
     "live_sigma": 0.008,           # independent, live centroid
     "precise_sigma": 0.006,        # independent, precise center
-    "sqrtm_depth_sigma": 0.008,    # hull spread along the shared camera axis
     "marker_common_sigma": 0.004,  # shared shift on all camera positions
 }
 
@@ -53,9 +48,9 @@ MARKER_FINGER_ROT = slice(15, 18)
 MARKER_WRIST_POS = slice(18, 21)
 MARKER_WRIST_ROT = slice(21, 24)
 LIVE = slice(26, 29)
-CENTER = slice(30, 33)
-SQRTM = slice(33, 39)
-C2T = slice(40, 42)
+C2T = slice(30, 32)
+_STATE_DIM = state_dim_for(2, True)
+CENTER = slice(_STATE_DIM + 64, _STATE_DIM + 67)
 
 
 @pytest.fixture(scope="module")
@@ -181,36 +176,6 @@ def test_bias_magnitude_matches_sigmas(cfg):
                                SIGMAS["marker_rot_sigma"], rtol=0.15)
     np.testing.assert_allclose(live_diffs.std(axis=0).mean(), live_std, rtol=0.15)
     np.testing.assert_allclose(center_diffs.std(axis=0).mean(), center_std, rtol=0.15)
-
-
-def test_hull_depth_bias_inflates_only_along_the_shared_camera_axis(cfg):
-    """sqrtm_depth_sigma models the visual hull's error as spread added along
-    the axis the two views share — world-fixed, NOT a rotation of the sponge's
-    own axes. So the served √M must grow in exactly that direction and nowhere
-    else, which is what makes one scalar reproduce the size inflation and the
-    pose-dependent principal-axis error together."""
-    env_clean = _pickplace(cfg, obs_bias=None, marker_always_visible=True)
-    env_biased = _pickplace(cfg, obs_bias=SIGMAS, marker_always_visible=True)
-    inflated = 0
-    for i in range(10):
-        env_clean.reset(seed=i)
-        env_biased.reset(seed=i)
-        obs_c, *_ = env_clean.step(_zero_action())
-        obs_b, *_ = env_biased.step(_zero_action())
-        S_c = sqrtm_from_upper(obs_c[SQRTM])
-        S_b = sqrtm_from_upper(obs_b[SQRTM])
-        axis = camera_depth_axis([cam.pos for cam in env_biased.cube_cams],
-                                 env_biased._get_cube_pos())
-        M_c, M_b = S_c @ S_c, S_b @ S_b
-        # Tolerances are float32-scale: the obs round-trips through float32.
-        assert depth_spread_excess(M_b, M_c, axis) == pytest.approx(
-            env_biased._sqrtm_depth_spread, abs=1e-6)
-        # Nothing added perpendicular to it, in either perpendicular direction.
-        for perp in np.linalg.svd(axis.reshape(1, 3))[2][1:]:
-            assert depth_spread_excess(M_b, M_c, perp) \
-                < 0.01 * env_biased._sqrtm_depth_spread
-        inflated += env_biased._sqrtm_depth_spread > 0.0
-    assert inflated == 10, "sqrtm_depth_sigma > 0 must actually inflate"
 
 
 def test_qvel_unbiased(cfg):

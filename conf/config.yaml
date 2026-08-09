@@ -166,10 +166,11 @@ prev_actions_n: 1
 marker_include_rot: false
 
 # Lag taps served as observation history (src/obs_history.py): the policy
-# input carries the actor block at [t - tap] control ticks for each entry —
+# input carries the state block at [t - tap] control ticks for each entry —
 # geometric spacing per .claude/plans/obs_history_features.md, e.g.
 # [0, 4, 16, 48] ≈ 0/0.27/1.07/3.2 s at 15 Hz — while the privileged tail
-# stays a single copy. Must start at 0, strictly ascending. [0] = no history.
+# and current BPS block each stay a single copy. Must start at 0, strictly
+# ascending. [0] = no history.
 # Changes obs dim: it must match the checkpoint across resume/eval/real
 # rollout; migrate a checkpoint onto new taps with src/distill.py
 # (distill.teacher_obs=current) followed by the mandatory PPO fine-tune.
@@ -231,15 +232,17 @@ distill:
   # Which observation the teacher is queried on at each visited state:
   #   identical  — teacher sees the student's own obs (architecture-only change,
   #                e.g. wider net). Teacher and student obs spaces must match.
-  #   current    — teacher sees the single-frame [actor block | priv tail]
-  #                sliced out of the student's lag-tapped obs (tap 0 + tail) —
-  #                its own trained layout. The warm start for a history_taps
+  #   current    — teacher sees [tap-0 state | current BPS | priv tail]
+  #                sliced out of the student's lag-tapped obs — its own trained
+  #                single-frame layout. The warm start for a history_taps
   #                migration; the teacher must be a single-frame checkpoint.
   #   privileged — teacher sees the always-fresh-tag privileged view
   #                (SO101BaseEnv.privileged_obs), i.e. what a
   #                marker_always_visible=true policy sees, while the student
   #                trains on the camera obs with dropout/hold-last-pose. The
   #                teacher must be a single-frame checkpoint.
+  #   legacy_tag — teacher sees the final pre-BPS sponge-tag layout. This is
+  #                the only supported migration from a pre-BPS checkpoint.
   teacher_obs: identical
   net_arch: null         # student hidden widths; null = reuse cfg.train.net_arch
   iterations: 10         # DAgger rounds (collect -> aggregate -> regress)

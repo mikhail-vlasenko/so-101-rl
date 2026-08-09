@@ -4,9 +4,9 @@ Captures both rig cameras into `datasets/sponge_<stamp>/` — per-frame JPEGs,
 all sponge/table tag detections, the EMA'd per-camera `T_base_cam`, the GT
 sponge body pose (from any solved sponge tag, real/tracking/tag_body_calib.py)
 and timestamps — one JSON line per frame pair in `index.jsonl`. Masks are
-deliberately NOT recorded: they are computed offline by the estimator eval
-(real/tracking/eval_estimator.py), so the dataset stays estimator-agnostic and
-one recording session serves every candidate.
+deliberately NOT recorded: they are computed offline through the shared mask
+cache (real/tracking/shape_dataset.py), so the dataset stays estimator-agnostic
+and one recording session serves every candidate.
 
 Static/moving is auto-labeled from the GT body track with the same
 `is_static` gate the online pipeline uses (src/shape_obs.py). A live coverage

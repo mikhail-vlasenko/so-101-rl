@@ -1,6 +1,7 @@
 """Fixed BPS transform, metadata, and held-state contract."""
 
 import itertools
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from src.bps import (
     bps_fingerprint,
     encode_bps,
     load_bps_config,
+    validate_checkpoint_bps,
     voxel_first_indices,
 )
 
@@ -39,6 +41,17 @@ def test_config_owns_exact_lexicographic_basis_and_fingerprint():
     assert bps_fingerprint(configured) == bps_fingerprint(CONFIG)
     changed = BPSConfig(CONFIG.basis_axis_m, 0.081, 15)
     assert bps_fingerprint(changed) != bps_fingerprint(CONFIG)
+
+
+def test_checkpoint_fingerprint_rejects_missing_or_changed_contract():
+    valid = SimpleNamespace(policy_kwargs={"bps_fingerprint": bps_fingerprint(CONFIG)})
+    validate_checkpoint_bps(valid, CONFIG)
+    missing = SimpleNamespace(policy_kwargs={})
+    with pytest.raises(ValueError, match="BPS checkpoint mismatch"):
+        validate_checkpoint_bps(missing, CONFIG)
+    changed = BPSConfig(CONFIG.basis_axis_m, 0.081, 15)
+    with pytest.raises(ValueError, match="BPS checkpoint mismatch"):
+        validate_checkpoint_bps(valid, changed)
 
 
 def test_transform_is_exactly_point_order_invariant():

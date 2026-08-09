@@ -345,6 +345,30 @@ Tests:
 - distillation updates the actor under the new observation layout;
 - vectorized env throughput benchmark catches accidental per-step rendering.
 
+### Stage 4 result — complete
+
+The cube-policy layout is now `[state history | current BPS block | privileged
+tail]`. `src/base_env.py` computes the state, BPS and privileged widths from
+one layout contract; `ObsHistory` receives only the low-dimensional state, so
+the 64 distances, cloud center, age and valid fraction occur exactly once.
+The sim captures partial surface clouds only on scheduled camera snapshots,
+passes them through the shared voxel/BPS transform and publishes them through
+`BPSObsState` under the shared live/static gate.
+
+Normalization covers the bounded BPS values directly. PPO checkpoints persist
+the resolved BPS fingerprint and training resume, eval, distillation and real
+rollout loading reject a missing or mismatched fingerprint. Distillation
+supports BPS-identical/current/privileged teachers plus the one intentional
+pre-BPS bridge, `legacy_tag`; no rejected precise-observation checkpoint is a
+supported teacher.
+
+The rejected shape-tensor actor, critic-tail fields, bias configuration,
+normalization, online source, offline evaluator and visualization code were
+deleted. Generic dataset/mask helpers used by accepted dense stereo moved to
+`real.tracking.shape_dataset`. Until Stage 5 supplies the complete asynchronous
+dense worker, real camera mode fails explicitly; the FK rollout already builds
+the new state-history-plus-BPS observation and validates its checkpoint.
+
 ## Stage 5 — real rollout integration
 
 - Add one dense-stereo worker behind the existing `FrameBus`; cameras remain

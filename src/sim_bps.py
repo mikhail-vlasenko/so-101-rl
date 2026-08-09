@@ -12,8 +12,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import yaml
 
-from src.bps import BPSConfig, BPSMeasurement, encode_bps, voxel_first_indices
+from src.bps import (
+    CONFIG_PATH,
+    BPSConfig,
+    BPSMeasurement,
+    encode_bps,
+    voxel_first_indices,
+)
 from src.surface_cloud import (
     transform_box_surface_points_world,
     unit_box_surface_points,
@@ -39,6 +46,14 @@ class SyntheticCloudConfig:
                 raise ValueError(f"{name} must be in [0, 1]")
         if self.voxel_size_m <= 0.0:
             raise ValueError("voxel_size_m must be positive")
+
+
+def clean_synthetic_cloud_config() -> SyntheticCloudConfig:
+    """No-DR cloud settings with the repository-owned voxel size."""
+    with CONFIG_PATH.open() as stream:
+        voxel_size_m = float(
+            yaml.safe_load(stream)["dense_stereo_feasibility"]["voxel_size_m"])
+    return SyntheticCloudConfig(0.0, 0.0, 0.0, voxel_size_m)
 
 
 @dataclass(frozen=True)

@@ -1,9 +1,12 @@
 """Lag-tap observation history (.claude/plans/obs_history_features.md).
 
 Fixed history features instead of a recurrent policy: the policy input carries
-the actor block at a handful of past control ticks (geometrically spaced lags,
+the state block at a handful of past control ticks (geometrically spaced lags,
 conf/config.yaml:history_taps), so it can identify per-episode DR latents and
 remember events (a grasp that closed on nothing) without BPTT.
+
+Current BPS geometry and the critic-only privileged tail live outside this
+class and are appended exactly once after the tapped state blocks.
 
 One shared class serves both sides of the sim-to-real contract: SO101BaseEnv
 feeds it in reset/step and the real rollout scripts feed it from the same

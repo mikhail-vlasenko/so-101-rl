@@ -1,11 +1,11 @@
-"""Offline estimator dataset-mask caching and progress contracts."""
+"""Offline shape-dataset mask caching and progress contracts."""
 
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from real.tracking import eval_estimator, sam_seg
+from real.tracking import sam_seg, shape_dataset
 
 
 class _Progress:
@@ -69,10 +69,10 @@ def test_compute_masks_reports_progress_and_reuses_cache(tmp_path, monkeypatch,
     monkeypatch.setattr(sam_seg, "find_text_mask",
                         lambda model, frame, prompt: (mask, 0.9))
     monkeypatch.setattr(sam_seg, "MaskTracker", _Tracker)
-    monkeypatch.setattr(eval_estimator, "tqdm", _Progress)
+    monkeypatch.setattr(shape_dataset, "tqdm", _Progress)
     _Progress.instances.clear()
 
-    mask_dir = eval_estimator.compute_masks(
+    mask_dir = shape_dataset.compute_masks(
         tmp_path, records, meta, "sponge", "tiny")
 
     progress = _Progress.instances[0]
@@ -85,6 +85,6 @@ def test_compute_masks_reports_progress_and_reuses_cache(tmp_path, monkeypatch,
         raise AssertionError("loaded SAM despite a complete mask cache")
 
     monkeypatch.setattr(sam_seg, "load_sam3", fail_load)
-    assert eval_estimator.compute_masks(
+    assert shape_dataset.compute_masks(
         tmp_path, records, meta, "sponge", "tiny") == mask_dir
     assert "using 4 cached SAM masks" in capsys.readouterr().out

@@ -38,10 +38,9 @@ TAG_SIZE_MM = {
 #
 # The sponge's tags (id 1 on a largest face, plus the cube_eval set on its
 # other faces) are EVAL-ONLY: they provide ground truth for the shape-tracking
-# dataset (real/tracking/record_shapes.py -> eval_estimator.py) and for
-# rollout evaluation — never the policy obs path, which is tag-free (SAM
-# stereo, real/rollout/object_obs.py). The eval set is glued for a recording
-# session and peeled afterwards; its in-plane placement is solved by
+# dataset (real/tracking/record_shapes.py) and for rollout evaluation — never
+# the policy obs path, which is tag-free dense stereo. The eval set is glued
+# for a recording session and peeled afterwards; its in-plane placement is solved by
 # real/tracking/tag_body_calib.py into sponge_tags.yaml.
 ROLES = {
     0: "finger", 1: "cube", 2: "wrist",

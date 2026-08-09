@@ -19,7 +19,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.asymmetrize_checkpoint import _SpacesEnv, asymmetrize_model
 from src.base_env import RuntimeEnvConfig, priv_dim_for
-from src.shape_obs import box_sqrtm, sqrtm_upper
+from src.bps import bps_fingerprint
 from src.lift_env import SO101LiftEnv
 from src.networks import LayerNormActorCriticPolicy, TakeFirst
 from src.train import (
@@ -30,17 +30,15 @@ from src.train import (
 # relative to the tail start.
 CUBE_POS = slice(0, 3)
 CUBE_ROT = slice(3, 6)
-TRUE_SQRTM = slice(6, 12)
-CUBE_VEL = slice(12, 18)
-JAW_FLAGS = slice(18, 20)
-QPOS_BIAS = slice(20, 26)
-MARKER_POS_BIAS = slice(26, 32)
-LIVE_BIAS = slice(32, 35)
-PRECISE_BIAS = slice(35, 38)
-SQRTM_DEPTH = 38
-COMMON_BIAS = slice(39, 42)
-CAM_DELAY = 42
-HALF_EXTENTS = slice(43, 46)
+CUBE_VEL = slice(6, 12)
+JAW_FLAGS = slice(12, 14)
+QPOS_BIAS = slice(14, 20)
+MARKER_POS_BIAS = slice(20, 26)
+LIVE_BIAS = slice(26, 29)
+PRECISE_BIAS = slice(29, 32)
+COMMON_BIAS = slice(32, 35)
+CAM_DELAY = 35
+HALF_EXTENTS = slice(36, 39)
 
 
 @pytest.fixture(scope="module")
@@ -83,10 +81,6 @@ def test_priv_tail_carries_truth_and_latents(lift_cfg):
     np.testing.assert_allclose(
         tail[CUBE_VEL],
         env.data.qvel[env.cube_dofadr:env.cube_dofadr + 6], atol=1e-5)
-    np.testing.assert_allclose(
-        tail[TRUE_SQRTM],
-        sqrtm_upper(box_sqrtm(env.data.geom_xmat[env.cube_geom_id].reshape(3, 3),
-                              env.cube_half_extents)), atol=1e-6)
     assert set(np.unique(tail[JAW_FLAGS])) <= {0.0, 1.0}
     # DR latents: the episode's sampled biases, verbatim (nonzero under dr=full,
     # so these comparisons are meaningful).
@@ -96,7 +90,6 @@ def test_priv_tail_carries_truth_and_latents(lift_cfg):
                                env._marker_pos_bias.flatten(), atol=1e-7)
     np.testing.assert_allclose(tail[LIVE_BIAS], env._live_bias, atol=1e-7)
     np.testing.assert_allclose(tail[PRECISE_BIAS], env._precise_bias, atol=1e-7)
-    np.testing.assert_allclose(tail[SQRTM_DEPTH], env._sqrtm_depth_spread, atol=1e-6)
     np.testing.assert_allclose(tail[COMMON_BIAS], env._common_pos_bias, atol=1e-7)
     assert tail[CAM_DELAY] == pytest.approx(env._camera.pipeline_delay_s, abs=1e-6)
     assert 0.042 <= tail[CAM_DELAY] <= 0.052  # dr=full delay range
@@ -177,8 +170,15 @@ def _old_layout_model(lift_cfg, actor_dim):
     env = DummyVecEnv([lambda: _SpacesEnv(
         spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32),
         spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32))])
-    return PPO(LayerNormActorCriticPolicy, env, n_steps=8, batch_size=8,
-               policy_kwargs={"net_arch": [32, 32], "obs_norm": old_norm})
+    return PPO(
+        LayerNormActorCriticPolicy, env, n_steps=8, batch_size=8,
+        policy_kwargs={
+            "net_arch": [32, 32],
+            "obs_norm": old_norm,
+            "bps_fingerprint": bps_fingerprint(
+                runtime_cfg_from_hydra(lift_cfg).bps_config),
+        },
+    )
 
 
 def test_asymmetrize_preserves_function_and_resumes(lift_cfg, tmp_path):

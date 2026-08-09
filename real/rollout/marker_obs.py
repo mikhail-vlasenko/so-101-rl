@@ -18,9 +18,8 @@ last measured pose while its age grows, the same hold-last-pose + age
 convention training used for undetected tags (src/base_env.py); a tag never
 seen this session reads all-zero with age pinned at MARKER_AGE_CAP_S.
 
-This source serves the ARM tags and the table anchor only. The manipulated
-object is tracked tag-free by real/rollout/object_obs.ObjectSource on the
-same frame bus.
+This source serves the ARM tags and the table anchor only. The Stage 5 dense
+stereo worker will consume the same frame bus for the manipulated object.
 """
 import threading
 import time

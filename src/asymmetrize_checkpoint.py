@@ -31,9 +31,11 @@ from hydra import compose, initialize
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.base_env import priv_dim_for
+from src.bps import validate_checkpoint_bps
 from src.networks import ObsNorm, TakeFirst
 from src.train import (
     ALGORITHM_REGISTRY, actor_obs_dim_for, build_fresh_model, obs_norm_for,
+    runtime_cfg_from_hydra,
 )
 
 
@@ -126,6 +128,7 @@ def asymmetrize_model(old_model, cfg, tol: float = 1e-5, n_check: int = 256):
         "history_taps migration needs src.distill (distill.teacher_obs=current)"
     actor_dim = actor_obs_dim_for(cfg)
     assert actor_dim is not None, f"env {cfg.env_name} has no privileged tail"
+    validate_checkpoint_bps(old_model, runtime_cfg_from_hydra(cfg).bps_config)
     old_obs_dim = old_model.observation_space.shape[0]
     assert old_obs_dim == actor_dim, (
         f"checkpoint obs dim {old_obs_dim} must equal the target actor block "

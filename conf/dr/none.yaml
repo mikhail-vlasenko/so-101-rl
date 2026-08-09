@@ -19,8 +19,12 @@ obs_bias:
   marker_rot_sigma: 0.0
   live_sigma: 0.0
   precise_sigma: 0.0
-  sqrtm_depth_sigma: 0.0
   marker_common_sigma: 0.0
+
+synthetic_cloud:
+  point_noise_sigma_m: 0.0
+  point_dropout_probability: 0.0
+  whole_view_loss_probability: 0.0
 
 # Synchronous zero-latency camera: marker/cube obs are the current state.
 # (qvel is still the backward difference of qpos over the tick — that's the

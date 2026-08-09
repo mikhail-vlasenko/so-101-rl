@@ -25,9 +25,8 @@ hard half (the two 40x25 ends look identical) and are searched over.
 
 Of the 8 sign patterns, the 4 differing from the truth by an even number of
 flips fit identically — they are the box's 180-degree rotations, which relabel
-axes without moving a face — and are harmless: both the GT center and
-`box_sqrtm` are invariant under them. The odd 4 are reflections, not rigid
-motions, and lose by orders of magnitude.
+axes without moving a face — and are harmless for box-surface GT. The odd 4 are
+reflections, not rigid motions, and lose by orders of magnitude.
 
 How a wrong axis declaration behaves, measured on synthetic data: naming the
 wrong axis for the tag on a LARGE face is caught, because the bounds cannot
@@ -35,7 +34,7 @@ fit a 60x40-face tag onto a 40x25 one and the fit lands pinned at the edge
 with millimetres of residual. Swapping the two NARROW axes (60x25 vs 40x25) is
 caught by nothing — it fits to 0.000 mm with entirely plausible offsets — and
 it is the error that matters, since it pairs each axis with the wrong half
-extent and corrupts every GT shape tensor. Measure those two faces; do not
+extent and corrupts the GT box surface. Measure those two faces; do not
 infer them from the fit.
 
 Capture is placement-based. Move the sponge, release it, and hold still: the

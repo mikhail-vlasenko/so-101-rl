@@ -1,25 +1,14 @@
 """Roll out the trained lift policy on the real SO-101 arm.
 
-The cube obs is the tag-free dual-channel block (src/shape_obs.py): the live
-triangulated centroid + age and the static-refreshed precise center + √M +
-age. Its source follows --marker-source:
-
-- camera: the real sponge. A frame bus feeds both C922s to the AprilTag
-  marker pipeline (arm tags + table anchor, real/rollout/marker_obs.py) and
-  the SAM stereo object tracker (real/rollout/object_obs.py); the policy
-  chases the physical object, and success is dwell on the live centroid
-  height while the live channel is fresh. The viewer/stream draws the live
-  point and the √M ellipsoid where the policy believes them.
-- fk (default, dry-run): a lockstep MuJoCo sim cube driven by the real
-  encoders via contacts, run through the same visible-surface channel
-  helpers (src/base_env.py) and the same shared ObjectChannelDriver, so
-  dry-runs exercise the identical obs contract with no physical sponge.
+The cube obs is the tag-free live centroid plus one static-refreshed BPS block.
+The available FK source is a lockstep MuJoCo sponge driven by the real encoders
+via contacts and the same visible-surface/BPS helpers as training. Real-camera
+publication belongs to Stage 5; requesting the old camera mode fails explicitly
+until its dense-stereo worker exists.
 
 Usage:
     python -m real.rollout.rollout_lift                         # dry-run, latest checkpoint
     python -m real.rollout.rollout_lift --execute               # actually drive the servos
-    python -m real.rollout.rollout_lift --marker-source camera --execute   # real sponge
-    python -m real.rollout.rollout_lift --marker-source camera --gui       # mask/ellipse overlay
     python -m real.rollout.rollout_lift --model best --execute  # best_model.zip
     python -m real.rollout.rollout_lift --seed 0                # reproducible fk cube spawn
     python -m real.rollout.rollout_lift --slow 3 --execute      # 1/3 physical speed, no retraining
@@ -54,16 +43,18 @@ from src.base_env import (
     markers_visible,
     obs_dim_for,
     priv_dim_for,
+    state_dim_for,
     sample_cube_orientation,
     tag_cam_model,
 )
 from src.obs_history import ObsHistory
+from src.bps import BPS_DISTANCE_DIM, BPSObsState, load_bps_config
 from src.shape_obs import (
     STATIC_DWELL_S,
     VISIBLE_FRACTION_MIN,
     ObjectChannelDriver,
-    box_sqrtm,
 )
+from src.sim_bps import SyntheticBPSGenerator, clean_synthetic_cloud_config
 
 from .rollout_common import (
     ArmLoop,
@@ -74,8 +65,6 @@ from .rollout_common import (
 )
 
 from ..calib.calibration import load_calibration, load_compliance
-from .frame_bus import FrameBus
-from .marker_obs import CameraMarkerSource
 from ..twin.mapping import load_joint_maps
 from ..twin.servo_io import ServoBus
 
@@ -85,15 +74,8 @@ LOG_DIR = REPO_ROOT / "logs" / "ppo_lift"
 
 LIFT_TASK_ID = 0.0
 
-# Abort if the newest camera frame is older than this when the policy consumes
-# it. In-distribution staleness is <= ~90 ms (42-52 ms pipeline delay plus up
-# to one 33 ms frame interval — conf/dr/full.yaml); a frame this old means the
-# camera or capture thread stalled and the policy would be steering the arm on
-# frozen marker poses.
-MAX_MARKER_AGE_S = 0.25
-
-# Ages fed for freshly-measured channels under --marker-source fk: the FK
-# stand-in has no camera pipeline, so feed the middle of the training age
+# Ages fed for freshly measured FK arm-marker channels. The stand-in has no
+# camera pipeline, so feed the middle of the training age
 # distribution (42-52 ms delay + 0-33 ms frame wait — conf/dr/full.yaml).
 FK_FRESH_AGE_S = 0.06
 
@@ -102,14 +84,13 @@ FK_FRESH_AGE_S = 0.06
 # faking "above target height" (plan decision 9).
 CUBE_FRESH_DWELL_S = 0.15
 
-SQRTM_COLS = ("xx", "yy", "zz", "xy", "xz", "yz")
-
 
 class FkObjectSource:
-    """The fk twin of ObjectSource: the same visible-surface channel helpers
-    the training env uses (src/base_env.py), driven off the lockstep sim,
-    through the same shared ObjectChannelDriver — the identical obs contract
-    with no physical sponge and no cameras."""
+    """FK twin of the future real dense-stereo source.
+
+    It drives the training env's surface helpers from the lockstep sim and
+    publishes through the shared object/BPS state machines.
+    """
 
     def __init__(self, model, data, cube_geom_id, cube_body_id):
         self.model = model
@@ -119,7 +100,13 @@ class FkObjectSource:
         self.cams = (tag_cam_model(model, data),
                      tag_cam_model(model, data, TAG_CAM_AUX_NAME, "aux"))
         self.driver = ObjectChannelDriver()
+        self.bps_state = BPSObsState()
         self.half_extents = model.geom_size[cube_geom_id].copy()
+        self.bps_config = load_bps_config()
+        self.generator = SyntheticBPSGenerator(
+            self.bps_config, clean_synthetic_cloud_config(),
+        )
+        self.rng = np.random.default_rng(0)
 
     def boot(self):
         """Seed the pre-episode static evidence, like the env reset and the
@@ -151,13 +138,14 @@ class FkObjectSource:
         t = time.monotonic() - FK_FRESH_AGE_S
         self.driver.ingest_live(t, live)
         if self.driver.gate_open(vis_frac):
-            R = self.data.geom_xmat[self.cube_geom_id].reshape(3, 3)
-            self.driver.ingest_precise(
-                t, self.data.geom_xpos[self.cube_geom_id].copy(),
-                box_sqrtm(R, self.half_extents))
+            capture = self.generator.capture(
+                self.model, self.data, self.cams, self.cube_geom_id,
+                self.cube_body_id, self.half_extents, self.rng)
+            self.bps_state.ingest(t, None if capture is None else capture.measurement)
 
     def object_obs(self):
-        return self.driver.serve(time.monotonic())
+        now = time.monotonic()
+        return self.driver.serve(now), self.bps_state.serve(now)
 
 
 def sample_visible_fk_spawn(fk_object, data, cube_qposadr, rng, cube_low,
@@ -189,40 +177,25 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
     p.add_argument("--no-view", action="store_true",
                    help="Disable the MuJoCo passive viewer.")
     p.add_argument("--marker-source", default="fk", choices=["fk", "camera"],
-                   help="Where marker AND object observations come from: 'fk' "
-                        "(default) fills them from the lockstep sim; 'camera' "
-                        "feeds measured AprilTag poses (arm tags) plus the SAM "
-                        "stereo object channels from both C922s.")
-    p.add_argument("--family", default="apriltag", choices=["apriltag", "aruco"],
-                   help="Marker family for --marker-source camera.")
-    p.add_argument("--prompt", default="sponge",
-                   help="SAM3 text prompt for the object (camera source).")
-    p.add_argument("--sam2-model", default="tiny", choices=["tiny", "base+"],
-                   help="SAM2 tracker size (camera source).")
-    p.add_argument("--gui", action="store_true",
-                   help="Show the per-camera mask/centroid/ellipse overlay "
-                        "(camera source; q in the window is ignored — Ctrl-C "
-                        "stops the rollout).")
+                   help="Observation source. 'fk' is currently available; "
+                        "'camera' is reserved for the Stage 5 dense worker and "
+                        "fails explicitly until then.")
     return p.parse_args()
 
 
-def build_actor_frame(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
+def build_state_frame(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
                       marker_rot: np.ndarray, marker_age: np.ndarray,
-                      live: np.ndarray, live_age: float, center: np.ndarray,
-                      sqrtm6: np.ndarray, precise_age: float,
+                      live: np.ndarray, live_age: float,
                       prev_actions: np.ndarray,
                       marker_include_rot: bool) -> np.ndarray:
-    """Match SO101LiftEnv's single-frame actor block (base_env.obs_dim_for):
-    qpos+qvel+markers+marker_age+live(+age)+center+sqrtM(+age)+
-    [0,0,0,task_id]+prev_actions.
+    """Match one historical state frame in SO101LiftEnv.
 
-    Marker poses/ages come from the camera pipeline (--marker-source camera)
-    or the FK stand-in on the lockstep sim; the object channels from the
-    matching ObjectSource/FkObjectSource — held last measurements either way.
-    marker_include_rot mirrors the env: marker positions only when false.
+    Marker poses/ages and the live centroid come from the lockstep FK stand-in
+    and hold their last measurement. marker_include_rot mirrors the env:
+    marker positions only when false.
 
-    The caller feeds this frame through the shared ObsHistory (the identical
-    tap convention training used, src/obs_history.py) and appends the zeroed
+    The caller feeds this frame through the shared ObsHistory, then appends the
+    one current BPS block and the zeroed
     privileged tail: only the value function read those dims in training and
     the actor structurally slices them off (src/networks.TakeFirst), so at
     deployment they are never read.
@@ -236,9 +209,6 @@ def build_actor_frame(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray
                            marker_age.astype(np.float32),
                            live.astype(np.float32),
                            np.array([live_age], dtype=np.float32),
-                           center.astype(np.float32),
-                           sqrtm6.astype(np.float32),
-                           np.array([precise_age], dtype=np.float32),
                            extra,
                            prev_actions.flatten().astype(np.float32)]).astype(np.float32)
 
@@ -321,7 +291,7 @@ def print_latency_summary(rows: list[dict]) -> None:
     """Per-component latency breakdown over the rollout (ms). NaN-only components
     (e.g. camera stats under --marker-source fk) print 'n/a'."""
     keys = ["loop_ms", "predict_ms", "read_all_ms", "stream_ms", "window_ms",
-            "marker_age_ms", "cam_read_ms", "detect_ms", "sam_ms", "hull_ms"]
+            "marker_age_ms", "cam_read_ms", "detect_ms", "sam_ms", "dense_ms"]
     print("latency summary (ms):")
     for key in keys:
         v = np.array([r[key] for r in rows], dtype=float)
@@ -339,17 +309,18 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
               + [f"action_{n}" for n in JOINT_NAMES]
               + [f"qpos_{n}" for n in JOINT_NAMES]
               + ["ee_x", "ee_y", "ee_z", "cube_x", "cube_y", "cube_z", "grasped_sim"]
-              # marker obs the policy saw (camera or FK stand-in), the FK pose
-              # of the same tick's qpos, and the per-tag age fed to the policy
+              # marker obs the policy saw, the FK pose of the same tick's qpos,
+              # and the per-tag age fed to the policy
               + [f"mobs_{t}_{ax}" for t in tag_names for ax in "xyz"]
               + [f"mfk_{t}_{ax}" for t in tag_names for ax in "xyz"]
               + [f"mage_{t}_s" for t in tag_names]
-              # object channels the policy saw (live + precise + ages)
+              # object channels the policy saw
               + [f"live_{ax}" for ax in "xyz"] + ["live_age_s"]
+              + [f"bps_{i:02d}" for i in range(BPS_DISTANCE_DIM)]
               + [f"center_{ax}" for ax in "xyz"]
-              + [f"sqrtm_{c}" for c in SQRTM_COLS] + ["precise_age_s"]
+              + ["precise_age_s", "valid_fraction"]
               + ["loop_ms", "predict_ms", "read_all_ms", "stream_ms", "window_ms",
-                 "marker_age_ms", "cam_read_ms", "detect_ms", "sam_ms", "hull_ms"])
+                 "marker_age_ms", "cam_read_ms", "detect_ms", "sam_ms", "dense_ms"])
     with out_path.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
@@ -365,15 +336,16 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
                         *(f"{v:.4f}" for v in r["marker_age"]),
                         *(f"{v:.6f}" for v in r["live"]),
                         f"{r['live_age']:.4f}",
+                        *(f"{v:.6f}" for v in r["bps"]),
                         *(f"{v:.6f}" for v in r["center"]),
-                        *(f"{v:.6f}" for v in r["sqrtm"]),
                         f"{r['precise_age']:.4f}",
+                        f"{r['valid_fraction']:.6f}",
                         f"{r['loop_ms']:.2f}", f"{r['predict_ms']:.3f}",
                         f"{r['read_all_ms']:.2f}", f"{r['stream_ms']:.2f}",
                         f"{r['window_ms']:.2f}",
                         f"{r['marker_age_ms']:.2f}", f"{r['cam_read_ms']:.2f}",
                         f"{r['detect_ms']:.2f}", f"{r['sam_ms']:.2f}",
-                        f"{r['hull_ms']:.2f}"])
+                        f"{r['dense_ms']:.2f}"])
 
 
 def main() -> int:
@@ -385,6 +357,11 @@ def main() -> int:
     target_height = float(lift_cfg["target_height"])
 
     args = parse_args(lift_cfg)
+    if args.marker_source == "camera":
+        raise RuntimeError(
+            "camera object observations require the Stage 5 dense-stereo worker; "
+            "Stage 4 intentionally removed the rejected precise source"
+        )
 
     model = mujoco.MjModel.from_xml_path(args.xml)
     data = mujoco.MjData(model)
@@ -408,13 +385,18 @@ def main() -> int:
     assert cube_geom_id >= 0, "geom 'cube_geom' not found in model"
     cube_body_id = int(model.geom_bodyid[cube_geom_id])
 
-    policy = load_policy(args.model, LOG_DIR,
-                         len(history_taps) * obs_dim_for(prev_actions_n, marker_include_rot)
-                         + priv_dim_for(marker_include_rot))
+    bps_config = load_bps_config()
+    policy = load_policy(
+        args.model, LOG_DIR,
+        obs_dim_for(prev_actions_n, marker_include_rot, history_taps)
+        + priv_dim_for(marker_include_rot),
+        bps_config=bps_config,
+    )
     # Lag-tap history over the actor block, the same convention as training
     # (src/obs_history.py): seeded with the first tick's frame at boot — the
     # env's reset does the identical thing — then advanced once per tick.
-    history = ObsHistory(history_taps, obs_dim_for(prev_actions_n, marker_include_rot))
+    history = ObsHistory(history_taps,
+                         state_dim_for(prev_actions_n, marker_include_rot))
     priv_pad = np.zeros(priv_dim_for(marker_include_rot), dtype=np.float32)
 
     rng = np.random.default_rng(args.seed)
@@ -427,25 +409,11 @@ def main() -> int:
                    qpos_bias=load_calibration(), compliance=load_compliance())
     print(f"seed={args.seed} {loop.describe()}")
 
-    frame_bus = marker_source = object_source = None
-    fk_object = None
-    # Parked spawn placeholder for camera mode (the real sponge is drawn via
-    # the channel overlay, not a fake sim body).
-    cube_pos_init = np.array([1.0, 1.0, 0.05])
-    cube_quat_init = np.array([1.0, 0.0, 0.0, 0.0])
-    if args.marker_source == "camera":
-        frame_bus = FrameBus(["main", "aux"])
-        marker_source = CameraMarkerSource(frame_bus.feeds["main"], args.family)
-        # ObjectSource is constructed after the bus starts (it reads the
-        # feeds' intrinsics and current frames).
-        print(f"cube = SAM stereo channels (prompt {args.prompt!r})  "
-              f"target_height={target_height}")
-    else:
-        fk_object = FkObjectSource(model, data, cube_geom_id, cube_body_id)
-        cube_pos_init, cube_quat_init = sample_visible_fk_spawn(
-            fk_object, data, cube_qposadr, rng, cube_low, cube_high)
-        print(f"sim cube spawn: ({cube_pos_init[0]:+.3f}, {cube_pos_init[1]:+.3f}, "
-              f"{cube_pos_init[2]:+.3f})  target_height={target_height}")
+    fk_object = FkObjectSource(model, data, cube_geom_id, cube_body_id)
+    cube_pos_init, cube_quat_init = sample_visible_fk_spawn(
+        fk_object, data, cube_qposadr, rng, cube_low, cube_high)
+    print(f"sim cube spawn: ({cube_pos_init[0]:+.3f}, {cube_pos_init[1]:+.3f}, "
+          f"{cube_pos_init[2]:+.3f})  target_height={target_height}")
 
     bus.connect()
     stopped = install_sigint_flag()
@@ -459,31 +427,14 @@ def main() -> int:
     # the passive viewer too, so calibration drift and the policy's object
     # belief are visible. The stream draws them itself inside
     # publisher.publish; the viewer needs the helpers directly.
-    draw_markers = draw_channels = None
+    draw_channels = None
     if viewer is not None:
-        from panel.sim_stream import draw_detected_markers as draw_markers
         from panel.sim_stream import draw_object_channels as draw_channels
     log_rows: list[dict] = []
     try:
-        if frame_bus is not None:
-            frame_bus.start()
-            marker_source.start()
-            # Let the camera + detector settle before the arm moves: block until
-            # the table anchor tag is being detected, so the first obs is built on
-            # a camera actually mapped to the base frame, not zeroed/held poses.
-            waited = marker_source.warmup()
-            print(f"camera warmup: two-tag board anchored after {waited:.2f} s")
-            from .object_obs import ObjectSource
-            object_source = ObjectSource(frame_bus.feeds, prompt=args.prompt,
-                                         sam2_model=args.sam2_model,
-                                         family=args.family, keep_views=args.gui)
-            object_source.start()
-            print("object source: live fix acquired")
         loop.boot()
 
-        # Sync the sim arm to the real arm and place the cube. In camera mode
-        # the sim cube is parked out of the workspace — the real sponge is
-        # drawn via the live/ellipsoid overlay, not a fake sim body.
+        # Sync the sim arm to the real arm and place the FK sponge.
         data.qpos[qposadr] = loop.qpos
         data.qvel[joint_dofadr] = 0.0
         data.qpos[cube_qposadr:cube_qposadr + 3] = cube_pos_init
@@ -493,8 +444,7 @@ def main() -> int:
         if model.na > 0:
             data.act[:] = loop.qpos
         mujoco.mj_forward(model, data)
-        if fk_object is not None:
-            fk_object.boot()
+        fk_object.boot()
 
         dwell_count = 0
         step = 0
@@ -512,49 +462,27 @@ def main() -> int:
             prev_iter_t = iter_t
 
             # FK marker poses of the same qpos the obs uses (data is still
-            # pinned at loop.qpos from the previous tick). Logged next to the
-            # camera's measured poses: their difference is the live
-            # camera-vs-encoder-chain disagreement per tag.
+            # pinned at loop.qpos from the previous tick). The logged
+            # observation and FK pose are identical while this
+            # rollout exposes only the lockstep source.
             fk_pos_now, fk_rot_now = marker_world_poses(data, marker_site_ids)
-            if marker_source is not None:
-                # Measured AprilTag poses in the base frame, held at the last
-                # detection per tag with their age (real/rollout/marker_obs.py).
-                marker_pos, marker_rot, marker_age = marker_source.marker_poses()
-                live, live_age, center, sqrtm6, precise_age = object_source.object_obs()
-                # Latency of the newest frame, sampled the instant the policy
-                # consumes it — the whole-pipeline stall guard.
-                stale_s, cam_read_ms, detect_ms = marker_source.frame_stats()
-                if stale_s > MAX_MARKER_AGE_S:
-                    raise SystemExit(
-                        f"ABORT: marker frame is {stale_s * 1e3:.0f} ms old "
-                        f"(limit {MAX_MARKER_AGE_S * 1e3:.0f} ms); camera "
-                        f"pipeline stalled.")
-                marker_age_ms = stale_s * 1e3
-                obj_stats = object_source.stats()
-                sam_ms = float(np.nanmean(list(obj_stats["sam_ms"].values())))
-                hull_ms = obj_stats["hull_ms"]
-            else:
-                # Match training (base_env._compute_obs): a tag turned away
-                # from tag_cam holds its last visible pose, age keeps growing.
-                # The object channels go through the same shared driver.
-                now = time.monotonic()
-                vis = markers_visible(data, marker_site_ids, tag_cam)
-                fk_pos[vis] = fk_pos_now[vis]
-                fk_rot[vis] = fk_rot_now[vis]
-                fk_seen_t[vis] = now - FK_FRESH_AGE_S
-                marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
-                marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
-                fk_object.tick()
-                live, live_age, center, sqrtm6, precise_age = fk_object.object_obs()
-                marker_age_ms = cam_read_ms = detect_ms = float("nan")
-                sam_ms = hull_ms = float("nan")
+            now = time.monotonic()
+            vis = markers_visible(data, marker_site_ids, tag_cam)
+            fk_pos[vis] = fk_pos_now[vis]
+            fk_rot[vis] = fk_rot_now[vis]
+            fk_seen_t[vis] = now - FK_FRESH_AGE_S
+            marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
+            marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
+            fk_object.tick()
+            (live, live_age), bps_obs = fk_object.object_obs()
+            marker_age_ms = cam_read_ms = detect_ms = float("nan")
+            sam_ms = dense_ms = float("nan")
 
-            frame = build_actor_frame(loop.qpos, loop.qvel, marker_pos, marker_rot,
-                                      marker_age, live, live_age, center, sqrtm6,
-                                      precise_age, loop.prev_actions,
-                                      marker_include_rot)
+            frame = build_state_frame(loop.qpos, loop.qvel, marker_pos, marker_rot,
+                                      marker_age, live, live_age,
+                                      loop.prev_actions, marker_include_rot)
             tapped = history.reset(frame) if step == 0 else history.push(frame)
-            obs = np.concatenate([tapped, priv_pad])
+            obs = np.concatenate([tapped, bps_obs.flat(), priv_pad])
             t_pred = time.perf_counter()
             raw_action, _ = policy.predict(obs, deterministic=True)
             predict_ms = (time.perf_counter() - t_pred) * 1e3
@@ -576,10 +504,9 @@ def main() -> int:
             if publisher is not None:
                 publisher.publish(
                     data,
-                    marker_pos if marker_source is not None else None,
-                    marker_rot if marker_source is not None else None,
+                    None, None,
                     marker_include_rot,
-                    object_channels=(live, center, sqrtm6))
+                    object_channels=(live, bps_obs.center_base))
 
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
             ee_pos = data.site_xpos[ee_site_id].copy()
@@ -589,7 +516,7 @@ def main() -> int:
             grasped_sim = ee_live < 0.05 and gripper_val < 0.3
             # Success = dwell on the live centroid height, counted only while
             # the live channel is fresh — a frozen held value must not fake a
-            # lift (plan decision 9; identical logic in both modes).
+            # lift (plan decision 9).
             if live_age < CUBE_FRESH_DWELL_S and live[2] >= target_height:
                 dwell_count += 1
             else:
@@ -601,48 +528,32 @@ def main() -> int:
                 "marker_obs": marker_pos.copy(), "marker_fk": fk_pos_now.copy(),
                 "marker_age": marker_age.copy(),
                 "live": live.copy(), "live_age": live_age,
-                "center": center.copy(), "sqrtm": sqrtm6.copy(),
-                "precise_age": precise_age,
+                "bps": bps_obs.distances.copy(),
+                "center": bps_obs.center_base.copy(),
+                "precise_age": bps_obs.age_s,
+                "valid_fraction": bps_obs.valid_fraction,
                 "loop_ms": loop_ms, "predict_ms": predict_ms,
                 "read_all_ms": loop.last_read_ms, "stream_ms": loop.last_stream_ms,
                 "window_ms": loop.last_window_ms,
                 "marker_age_ms": marker_age_ms, "cam_read_ms": cam_read_ms,
-                "detect_ms": detect_ms, "sam_ms": sam_ms, "hull_ms": hull_ms,
+                "detect_ms": detect_ms, "sam_ms": sam_ms, "dense_ms": dense_ms,
             })
 
             if viewer is not None:
                 viewer.user_scn.ngeom = 0
-                if marker_source is not None:
-                    draw_markers(viewer.user_scn, marker_pos, marker_rot,
-                                 marker_include_rot)
-                draw_channels(viewer.user_scn, live, center, sqrtm6)
+                draw_channels(viewer.user_scn, live, bps_obs.center_base)
                 viewer.sync()
                 if not viewer.is_running():
                     print("Viewer closed; stopping rollout.")
                     break
 
-            if args.gui and object_source is not None:
-                views = object_source.debug_views()
-                if views:
-                    import cv2
-                    both = cv2.resize(np.hstack([views[n] for n in sorted(views)]),
-                                      None, fx=0.5, fy=0.5)
-                    cv2.imshow("object channels", both)
-                    cv2.waitKey(1)
-
             if step % 15 == 0:
                 print(f"step={step:3d}  ee-live={ee_live:.3f}m  "
                       f"live_z={live[2]:.3f}m  ages live={live_age:.2f}s "
-                      f"precise={precise_age:.2f}s  grasped_sim={int(grasped_sim)}")
+                      f"precise={bps_obs.age_s:.2f}s  grasped_sim={int(grasped_sim)}")
                 lat = (f"          lat[ms]: loop={loop_ms:.0f} predict={predict_ms:.2f} "
                        f"read_all={loop.last_read_ms:.0f} stream={loop.last_stream_ms:.0f} "
                        f"window={loop.last_window_ms:.0f}")
-                if marker_source is not None:
-                    lat += (f" | cam age={marker_age_ms:.0f} "
-                            f"read={cam_read_ms:.0f} detect={detect_ms:.0f} "
-                            f"sam={sam_ms:.0f} hull={hull_ms:.0f}")
-                    cam_fk_mm = np.linalg.norm(marker_pos - fk_pos_now, axis=1) * 1e3
-                    lat += " | cam-fk[mm]=" + "/".join(f"{v:.0f}" for v in cam_fk_mm)
                 print(lat)
             step += 1
 
@@ -654,12 +565,6 @@ def main() -> int:
             if not stopped["flag"]:
                 print(f"TIMEOUT at step {step}")
     finally:
-        if object_source is not None:
-            object_source.stop()
-        if marker_source is not None:
-            marker_source.stop()
-        if frame_bus is not None:
-            frame_bus.stop()
         bus.close()
         if viewer is not None:
             viewer.close()

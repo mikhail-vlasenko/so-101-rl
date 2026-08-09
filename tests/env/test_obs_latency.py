@@ -200,9 +200,7 @@ def test_default_config_has_cam_latency(cfg):
 
 
 def test_synchronous_camera_markers_are_fresh(cfg):
-    """cam_latency=None: marker and cube-channel obs equal the current true
-    state every step (the dr=none curriculum contract; always-visible serves
-    the live channel at the true center)."""
+    """Synchronous arm markers/live/BPS all have zero capture age."""
     env = _pickplace(cfg, cam_latency=None, marker_always_visible=True)
     env.reset(seed=0)
     for _ in range(5):
@@ -214,8 +212,9 @@ def test_synchronous_camera_markers_are_fresh(cfg):
         true_center = env.data.geom_xpos[env.cube_geom_id]
         np.testing.assert_allclose(obs[20:23], true_center, atol=1e-6)  # live
         np.testing.assert_allclose(obs[23], 0.0, atol=1e-6)             # live age
-        np.testing.assert_allclose(obs[24:27], true_center, atol=1e-6)  # center
-        np.testing.assert_allclose(obs[33], 0.0, atol=1e-6)             # precise age
+        center = obs[env.state_dim + 64:env.state_dim + 67]
+        assert np.linalg.norm(center - true_center) < 0.02
+        np.testing.assert_allclose(obs[env.state_dim + 67], 0.0, atol=1e-6)
 
 
 def test_delayed_camera_markers_lag_current_state(cfg):

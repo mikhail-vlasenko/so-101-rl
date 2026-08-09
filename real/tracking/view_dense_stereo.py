@@ -45,14 +45,38 @@ from real.tracking.eval_dense_stereo import (
     static_windows,
     visible_windows,
 )
-from real.tracking.eval_estimator import gt_pose, load_dataset
+from real.tracking.shape_dataset import gt_pose, load_dataset
 from real.tracking.record_shapes import load_workspace_bounds
-from real.tracking.view_object_estimate import make_view_model
 
 
 WINDOW_NAME = "frozen StereoSGBM diagnostic"
 POINT_RADIUS_M = 0.0015
 GT_COLOR = (80, 230, 80)
+
+
+def make_view_model(half_extents):
+    """Minimal table scene for the evaluation-only tag-GT box and cloud."""
+    hx, hy, hz = np.asarray(half_extents, dtype=np.float64)
+    xml = f"""
+    <mujoco model="dense_stereo_comparison">
+      <visual><global azimuth="150" elevation="-25"/></visual>
+      <worldbody>
+        <light pos="0 0 2" dir="0 0 -1" directional="true"/>
+        <geom name="table" type="plane" size="1 1 0.02" rgba="0.25 0.3 0.35 1"/>
+        <body name="tag_gt" pos="0 0 -1">
+          <freejoint name="tag_gt_joint"/>
+          <geom name="tag_gt_box" type="box" size="{hx} {hy} {hz}"
+                contype="0" conaffinity="0" rgba="0.1 1 0.1 0.22"/>
+        </body>
+      </worldbody>
+    </mujoco>
+    """
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    joint = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "tag_gt_joint")
+    geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "tag_gt_box")
+    assert joint >= 0 and geom >= 0
+    return model, data, int(model.jnt_qposadr[joint]), geom
 
 
 def confidence_map(disparity: np.ndarray, reverse: np.ndarray,

@@ -10,7 +10,8 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
-from src.base_env import RuntimeEnvConfig, obs_dim_for
+from src.base_env import RuntimeEnvConfig, obs_dim_for, state_dim_for
+from src.bps import BPSConfig, bps_fingerprint, validate_checkpoint_bps
 from src.callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EpisodeLengthCallback,
     EvalStatsCallback, EvalStatsTracker, FloorContactCallback, GraspCallback,
@@ -22,6 +23,7 @@ from src.obs_norm import build_obs_norm, build_reach_obs_norm
 from src.lift_env import SO101LiftEnv
 from src.pickplace_env import SO101PickPlaceEnv
 from src.reach_env import SO101ReachEnv
+from src.sim_bps import SyntheticCloudConfig
 
 
 def make_lr_schedule(name: str, initial_lr: float, min_lr: float):
@@ -118,6 +120,19 @@ def runtime_cfg_from_hydra(cfg: DictConfig) -> RuntimeEnvConfig:
         prev_actions_n=int(cfg.prev_actions_n),
         cube_size_jitter=float(cfg.cube_size_jitter),
         history_taps=tuple(int(t) for t in cfg.history_taps),
+        bps_config=BPSConfig(
+            basis_axis_m=tuple(float(v) for v in cfg.bps.basis_axis_m),
+            distance_cap_m=float(cfg.bps.distance_cap_m),
+            synthetic_surface_grid_size=int(cfg.bps.synthetic_surface_grid_size),
+        ),
+        synthetic_cloud=SyntheticCloudConfig(
+            point_noise_sigma_m=float(cfg.synthetic_cloud.point_noise_sigma_m),
+            point_dropout_probability=float(
+                cfg.synthetic_cloud.point_dropout_probability),
+            whole_view_loss_probability=float(
+                cfg.synthetic_cloud.whole_view_loss_probability),
+            voxel_size_m=float(cfg.dense_stereo_feasibility.voxel_size_m),
+        ),
     )
 
 
@@ -159,10 +174,8 @@ def env_specs(cfg, orig_dir, runtime_cfg: RuntimeEnvConfig, n_envs: int):
 
 def obs_norm_for(cfg, n_substeps: int) -> tuple:
     """Tiled (center, scale) lists for the policy's fixed ObsNorm, matching the
-    configured env layout and history taps: the actor block's constants repeat
-    once per tap, the privileged tail's appear once at the end — mirroring the
-    env's [actor block per tap | priv tail] layout (each tap is a past copy of
-    the same physical quantities, so it keeps the same constants). Single
+    configured env layout and history taps: state-frame constants repeat once
+    per tap, while the current BPS block and privileged tail appear once. Single
     source shared by training and distillation so a distilled student's input
     normalization is identical to a trained one (the constants ship inside the
     checkpoint)."""
@@ -175,18 +188,20 @@ def obs_norm_for(cfg, n_substeps: int) -> tuple:
         int(cfg.prev_actions_n), bool(cfg.marker_include_rot),
         float(cfg.action_scale), n_substeps)
     n_taps = len(cfg.history_taps)
-    actor_dim = obs_dim_for(int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
-    return (obs_center[:actor_dim].tolist() * n_taps + obs_center[actor_dim:].tolist(),
-            obs_scale[:actor_dim].tolist() * n_taps + obs_scale[actor_dim:].tolist())
+    state_dim = state_dim_for(int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+    return (
+        obs_center[:state_dim].tolist() * n_taps
+        + obs_center[state_dim:].tolist(),
+        obs_scale[:state_dim].tolist() * n_taps
+        + obs_scale[state_dim:].tolist(),
+    )
 
 
 def actor_obs_dim_for(cfg) -> int | None:
     """Actor input width for the asymmetric critic (src/networks.TakeFirst).
 
-    The cube envs' observation is [actor block per history tap | privileged
-    tail] (base_env.obs_dim_for / priv_dim_for, src/obs_history.py) and only
-    the critic may read the tail; the actor's slice covers every tapped actor
-    block — the history is actor input, the tail never is. None for reach,
+    The cube envs' observation is [state history | current BPS | privileged
+    tail]. The actor's slice covers history and BPS; the tail never does. None for reach,
     which has no privileged tail (symmetric nets) and no history-tap wiring."""
     if cfg.env_name == "reach":
         assert list(cfg.history_taps) == [0], \
@@ -195,8 +210,8 @@ def actor_obs_dim_for(cfg) -> int | None:
     assert cfg.algorithm == "ppo", \
         "the asymmetric-critic obs layout is wired for PPO only (the SAC actor " \
         "would consume the privileged tail)"
-    return len(cfg.history_taps) * obs_dim_for(int(cfg.prev_actions_n),
-                                               bool(cfg.marker_include_rot))
+    return obs_dim_for(int(cfg.prev_actions_n), bool(cfg.marker_include_rot),
+                       tuple(int(t) for t in cfg.history_taps))
 
 
 def build_fresh_model(cfg, env, obs_norm, net_arch, seed, *, actor_obs_dim,
@@ -215,6 +230,8 @@ def build_fresh_model(cfg, env, obs_norm, net_arch, seed, *, actor_obs_dim,
     # symmetric layout, actor_obs_dim None) omits the key so SAC stays valid.
     if actor_obs_dim is not None:
         policy_kwargs["actor_obs_dim"] = int(actor_obs_dim)
+        runtime_cfg = runtime_cfg_from_hydra(cfg)
+        policy_kwargs["bps_fingerprint"] = bps_fingerprint(runtime_cfg.bps_config)
     return algo_cls(
         policy_cls,
         env,
@@ -327,6 +344,8 @@ def train(cfg: DictConfig):
             tensorboard_log=os.path.join(orig_dir, "logs"),
             **overrides,
         )
+        if cfg.env_name != "reach":
+            validate_checkpoint_bps(model, runtime_cfg.bps_config)
     else:
         model = build_fresh_model(
             cfg, env, obs_norm, list(cfg.train.net_arch), seed,

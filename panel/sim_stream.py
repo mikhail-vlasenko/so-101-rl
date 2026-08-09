@@ -17,7 +17,6 @@ import mujoco
 import numpy as np
 
 from panel.streamer import FrameBox, JpegStreamer
-from src.shape_obs import sqrtm_from_upper
 
 WIDTH, HEIGHT = 960, 720
 JPEG_QUALITY = 92
@@ -72,48 +71,29 @@ def draw_detected_markers(scn: mujoco.MjvScene, marker_pos: np.ndarray,
         scn.ngeom += 1
 
 
-# Object-channel overlay (tag-free cube obs, src/shape_obs.py): the live
-# triangulated centroid as a cyan ball, the precise channel as an orange
-# ellipsoid ({d: d^T M^-1 d <= 3}, the box-equivalent spread) at the served
-# center — the policy's two views of the sponge, drawn where it believes them.
+# Object-channel overlay: live centroid in cyan and the held dense-cloud center
+# in orange. The BPS distance vector is policy input, not invertible geometry;
+# diagnostics that retain the source cloud draw that cloud directly.
 LIVE_POINT_RGBA = (0.0, 0.9, 0.9, 0.9)
-PRECISE_ELLIPSOID_RGBA = (1.0, 0.55, 0.1, 0.45)
+PRECISE_CENTER_RGBA = (1.0, 0.55, 0.1, 0.9)
 _LIVE_BALL_RADIUS = np.array([0.008, 0.0, 0.0])
 
 
-def draw_sqrtm_ellipsoid(scn: mujoco.MjvScene, center: np.ndarray,
-                         sqrtm6: np.ndarray, rgba) -> None:
-    """Append the box-equivalent ellipsoid represented by one √M channel.
-
-    Its semi-axes are √3 times √M's eigenvalues, so a true box tensor touches
-    the corresponding box at every face center. A caller-selected color lets
-    diagnostics overlay ground truth and an observation using identical
-    geometry; rollout views use the standard orange below.
-    """
-    if not np.any(sqrtm6) or scn.ngeom >= scn.maxgeom:
-        return
-    w, V = np.linalg.eigh(sqrtm_from_upper(sqrtm6))
-    if np.linalg.det(V) < 0:  # mjvGeom.mat must be a proper rotation
-        V[:, 0] = -V[:, 0]
-    mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_ELLIPSOID,
-                        np.sqrt(3.0) * np.clip(w, 1e-4, None),
-                        np.asarray(center, np.float64), V.T.flatten(),
-                        np.asarray(rgba, np.float32))
-    scn.ngeom += 1
-
-
 def draw_object_channels(scn: mujoco.MjvScene, live: np.ndarray,
-                         center: np.ndarray, sqrtm6: np.ndarray) -> None:
-    """Append the object channels' decorative geoms to a built scene: the live
-    centroid ball and the √M ellipsoid (semi-axes √3·eigenvalues along the
-    eigenvectors). Channels never measured are all-zero and skipped."""
+                         center: np.ndarray) -> None:
+    """Append live-centroid and held dense-cloud-center spheres."""
     if np.any(live) and scn.ngeom < scn.maxgeom:
         mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
                             _LIVE_BALL_RADIUS, np.asarray(live, np.float64),
                             np.eye(3).flatten(),
                             np.asarray(LIVE_POINT_RGBA, np.float32))
         scn.ngeom += 1
-    draw_sqrtm_ellipsoid(scn, center, sqrtm6, PRECISE_ELLIPSOID_RGBA)
+    if np.any(center) and scn.ngeom < scn.maxgeom:
+        mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
+                            _LIVE_BALL_RADIUS, np.asarray(center, np.float64),
+                            np.eye(3).flatten(),
+                            np.asarray(PRECISE_CENTER_RGBA, np.float32))
+        scn.ngeom += 1
 
 
 class SimStreamPublisher:
@@ -141,7 +121,7 @@ class SimStreamPublisher:
                 marker_include_rot: bool = False,
                 object_channels: tuple | None = None) -> None:
         """`object_channels` optionally draws the tag-free cube obs as
-        (live (3,), center (3,), sqrtm6 (6,)) — see draw_object_channels."""
+        ``(live (3,), dense cloud center (3,))``."""
         self._renderer.update_scene(data, camera=self._camera)
         if marker_pos is not None:
             draw_detected_markers(self._renderer.scene, marker_pos, marker_rot,

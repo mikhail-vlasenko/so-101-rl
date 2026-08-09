@@ -10,13 +10,13 @@ Unresolved, actionable work only. Not a changelog or project-status document.
   baseline and overlapping views. After installation, re-run stereo alignment,
   checkerboard calibration, the table-anchor reference capture, and both
   `real.diagnostics.snapshot_cam_mount` camera snapshots.
-- **Integrate the validated BPS block into the policy observation.** Follow
-  Stage 4 of the [dense-stereo BPS plan](.claude/plans/dense_stereo_bps.md):
-  replace the precise center/√M actor channel with one current/held BPS block,
-  update dimensions and normalization, persist/validate the basis fingerprint
-  in checkpoints, and extend distillation and rollout loading explicitly.
-- **Pickplace `ObjectSource` rollout.** `rollout_lift` consumes the dual
-  channels; after the dense-stereo observation interface lands, add the
+- **Integrate the dense-stereo worker into real rollouts.** Follow Stage 5 of
+  the [dense-stereo BPS plan](.claude/plans/dense_stereo_bps.md): publish
+  static-gated BPS measurements behind `FrameBus`, validate stereo-rig movement
+  at startup, expose dense latency/validity telemetry, and re-enable camera mode
+  in `real.rollout.rollout_lift` only after the complete source is available.
+- **Pickplace dense-stereo rollout.** After the dense worker re-enables camera
+  mode in `rollout_lift`, add the
   equivalent pickplace source with a real-table target, ring pose, and
   phase-aware termination on `ArmLoop`.
 - **Delete the legacy tag remnants when the legacy teacher retires.** The

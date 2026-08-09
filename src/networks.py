@@ -150,9 +150,13 @@ class LayerNormActorCriticPolicy(ActorCriticPolicy):
     checkpoints restore the slice with the weights."""
 
     def __init__(self, *args, obs_norm: tuple | None = None,
-                 actor_obs_dim: int | None = None, **kwargs):
+                 actor_obs_dim: int | None = None,
+                 bps_fingerprint: str | None = None, **kwargs):
         self._obs_norm = obs_norm
         self._actor_obs_dim = actor_obs_dim
+        # Persisted through policy_kwargs. Runtime loaders validate it before
+        # inference or resume; the network itself never interprets the value.
+        self.bps_fingerprint = bps_fingerprint
         super().__init__(*args, **kwargs)
 
     def _build_mlp_extractor(self) -> None:

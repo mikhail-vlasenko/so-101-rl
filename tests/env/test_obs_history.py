@@ -6,7 +6,7 @@ rollout scripts is invisible at deploy — the policy just silently reads
 shifted history — so these tests pin the shared convention both sides use:
 tap ordering (newest first), reset padding with the boot frame, ring
 wraparound past the deepest lag, and the env layout
-[actor block per tap | single privileged tail].
+[state block per tap | current BPS block | single privileged tail].
 """
 
 from dataclasses import replace
@@ -17,6 +17,7 @@ from hydra import compose, initialize
 
 from src.lift_env import SO101LiftEnv
 from src.obs_history import ObsHistory
+from src.bps import BPS_OBS_DIM
 from src.train import runtime_cfg_from_hydra
 
 
@@ -90,14 +91,15 @@ def test_env_serves_tapped_actor_blocks_and_single_tail():
         cfg = compose(config_name="config", overrides=["env=lift"])
     env1 = _lift_env(cfg, (0,))
     envN = _lift_env(cfg, TAPS)
-    a_dim = env1.obs_dim
-    assert envN.observation_space.shape == (a_dim * len(TAPS) + envN.priv_dim,)
+    state_dim = env1.state_dim
+    assert envN.observation_space.shape == (state_dim * len(TAPS) + BPS_OBS_DIM
+                                             + envN.priv_dim,)
 
     obs1, _ = env1.reset(seed=5)
     obsN, _ = envN.reset(seed=5)
-    frames = [obs1[:a_dim]]
+    frames = [obs1[:state_dim]]
     np.testing.assert_array_equal(
-        obsN, np.concatenate([np.tile(frames[0], len(TAPS)), obs1[a_dim:]]))
+        obsN, np.concatenate([np.tile(frames[0], len(TAPS)), obs1[state_dim:]]))
 
     rng = np.random.default_rng(0)
     for i in range(1, 3 * (TAPS[-1] + 1)):
@@ -105,9 +107,9 @@ def test_env_serves_tapped_actor_blocks_and_single_tail():
         obs1, _, term1, trunc1, _ = env1.step(action)
         obsN, _, termN, truncN, _ = envN.step(action)
         assert (term1, trunc1) == (termN, truncN)
-        frames.append(obs1[:a_dim])
+        frames.append(obs1[:state_dim])
         expected = np.concatenate(
-            [frames[max(0, i - t)] for t in TAPS] + [obs1[a_dim:]])
+            [frames[max(0, i - t)] for t in TAPS] + [obs1[state_dim:]])
         np.testing.assert_array_equal(obsN, expected)
         if term1 or trunc1:
             break

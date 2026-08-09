@@ -24,30 +24,16 @@ obs_noise:
   # temporal split.
   tag_px_noise: 0.2        # px,    effective solvePnP corner error, arm marker tags
   tag_depth_factor: 2.0    #        depth-error amplification over the image-plane baseline
-  # Tag-free cube channels (src/base_env.py dual-view pipeline): isotropic —
-  # two-view triangulation has no solvePnP depth pathology. Seeded from
-  # datasets/sponge_20260725_213859 (19 static windows, hull estimator) via the
-  # "implied knobs" report of real/tracking/eval_estimator.py; these values also
-  # define that eval's acceptance envelope (2σ), so re-seeding and re-scoring the
-  # same dataset is circular — a re-seeded knob is a measurement, not a pass.
-  # live_sigma is the exception and stays a PLACEHOLDER: that dataset's static
-  # windows measured 0.05 mm, but they are unoccluded and motionless, which is the
-  # one regime where the live channel is trivially good. Its real noise comes from
-  # partial occlusion and motion blur, so it needs the occlusion sweep the 2-minute
-  # smoke recording never had. Under-randomizing it is the dangerous direction:
-  # 0.003 is a guess held deliberately above the measurement.
+  # Tag-free cube positions are isotropic: stereo triangulation has no solvePnP
+  # depth pathology. Dense-surface noise/dropout is configured separately below.
   live_sigma: 0.003        # m,    per-frame triangulated visible-centroid jitter
-  precise_sigma: 0.00534   # m,    per-refresh hull-center error; one dataset cannot
-                           #       split constant-per-episode from redrawn-per-refresh,
-                           #       so this and obs_bias.precise_sigma each carry half
-                           #       (in quadrature) of the measured 7.5 mm total
+  precise_sigma: 0.003     # m,    per-refresh dense-cloud center error
 
 # Per-episode constant bias added to observations (calibration drift / mounting offset).
 # Sampled once on reset, held constant for the whole episode. No qvel bias — velocity from
 # differentiating biased qpos has zero DC offset, so a velocity bias is non-physical.
 # marker_pos_sigma is per-tag independent (each tag's own glue placement / pose-estimate
-# error); live/precise are the cube channels' own systematic offsets (segmentation-mask /
-# hull-estimator geometry, PLACEHOLDERS like the noise sigmas above); marker_common_sigma
+# error); live/precise are the cube channels' own systematic offsets; marker_common_sigma
 # is a separate shift shared by ALL camera-derived positions — the real pipeline
 # re-anchors the cameras from the two-tag table board and EMAs accepted pair solves,
 # so that anchor's calibration offset settles into a common-mode shift on finger, wrist,
@@ -63,13 +49,14 @@ obs_bias:
                              #       toward the cameras) is geometry the sim already
                              #       reproduces by sampling the visible surface, so
                              #       randomizing it here too would double-count it
-  precise_sigma: 0.00534     # m,    systematic hull-center offset — see the noise twin
-  sqrtm_depth_sigma: 0.01276 # m,    spread the visual hull adds along the axis the two
-                             #       views cannot resolve (src/base_env._hull_sqrtm); a
-                             #       half-normal, since a hull only ever adds volume.
-                             #       Measured 60% above the 0.008 guess: with the rig's
-                             #       ~20 cm baseline this is the hull's dominant error
+  precise_sigma: 0.003       # m,    systematic dense-cloud center offset
   marker_common_sigma: 0.0015 # m,   shared shift on all tags (table calib; ~extrinsics.yaml spread_mm 2.28)
+
+# Synthetic dense-stereo degradation, applied only on scheduled captures.
+synthetic_cloud:
+  point_noise_sigma_m: 0.003
+  point_dropout_probability: 0.25
+  whole_view_loss_probability: 0.05
 
 # Observation latency (sim2real): only camera-derived obs (markers, cube) lag.
 # Encoder reads are ~2 ms on the bus — effectively fresh at a 66.7 ms tick — so
@@ -108,7 +95,7 @@ marker_dropout:
 # Per-episode sponge resize (physical DR, not vision): each of the box's three
 # full side lengths is jittered by an independent uniform +/- cube_size_jitter
 # (resampled every reset), so the policy sees a range of sponge sizes — and,
-# through the true √M in the obs, must actually read the episode's shape. The
+# through the BPS distances, must actually read the episode's shape. The
 # nominal 6x4x2.5 cm box is the center; draws that would break the strict
 # long>mid>short face ordering (required by sample_cube_orientation) are
 # reject-sampled. Applies to every cube env (lift + pickplace) since it's the

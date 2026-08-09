@@ -22,10 +22,9 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
 - `conf/` — Hydra config. `config.yaml` owns all hyperparameters; groups: `env`
   (reach/lift/pickplace/multitask), `dr` + `shaping` (curriculum stages)
 - `real/` — `vision/` (camera + marker detection/pose primitives), `calib/`
-  (calibration stack), `tracking/` (stereo/SAM tracking, the shape dataset +
-  estimator eval + visual hull), `rollout/` (rollout scripts,
-  `rollout_common.py` core, `frame_bus.py` camera fan-out, `object_obs.py` SAM
-  object channels), `diagnostics/` (one-off reads), `twin/` (digital twin,
+  (calibration stack), `tracking/` (stereo/SAM tracking, shape dataset + dense
+  evaluation), `rollout/` (rollout scripts, `rollout_common.py` core,
+  `frame_bus.py` camera fan-out), `diagnostics/` (one-off reads), `twin/` (digital twin,
   `python -m real.twin.digital_twin`); `marker_spec.py` stays at the top — the
   tag/marker source of truth every subpackage reads
 - `sysid/` — real-vs-sim dynamics fitting (record → replay → analyze → fit) and
@@ -36,12 +35,12 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
 
 ## Contracts and gotchas
 
-- **Observation**: `[actor block per history tap | privileged tail]`; the tail is
+- **Observation**: `[state block per history tap | current BPS block | privileged tail]`; the tail is
   critic-only and zero-padded on the real arm (layout doc:
   `src/base_env.obs_dim_for` / `priv_dim_for`). The policy sees AprilTag poses for
   the arm markers and the tag-free dual-channel cube obs (live triangulated
-  centroid + static-refreshed center/√M, `src/shape_obs.py`; real source = SAM
-  stereo, `real/rollout/object_obs.py`), never GT state; a hidden tag or channel
+  centroid + one current/held dense-surface BPS block,
+  `src/{shape_obs,bps}.py`), never GT state; a hidden tag or channel
   holds its last value while its age channel grows. The sponge's tag id 1 is
   EVAL-ONLY (dataset GT / legacy distillation), never on the obs path.
 - **Checkpoint compatibility**: anything that changes obs dim (`history_taps`,
@@ -50,7 +49,8 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
   and always follow distillation with a short PPO fine-tune (`resume=`).
 - **Camera poses**: the real pipeline never stores one — every camera re-anchors
   per frame from the table tag, coasting on the last EMA'd anchor while the tag
-  is occluded (`real/rollout/{marker_obs,object_obs}.py`). The sim mounts
+  is occluded (`real/rollout/marker_obs.py`; the dense worker follows the same
+  anchor contract). The sim mounts
   (`so101.xml` `tag_cam_mount` / `tag_cam_aux_mount`) are snapshots of that
   anchoring, so **re-run `real.diagnostics.snapshot_cam_mount --camera <main|aux>`
   after any remount** — otherwise sim visibility, spawn rejection and the fk twin
@@ -66,8 +66,9 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
 - **Sim/real twins**: some behavior is implemented twice and must stay identical —
   marker hold-last-pose/age (`src/base_env.py` ↔ `real/rollout/marker_obs.py`),
   `ObsHistory` feeding, `action_to_target`. Change one side, change the other;
-  contract tests in `tests/` pin them. The cube channels are single-sourced
-  instead: both sides drive `src/shape_obs.ObjectChannelDriver` — never fork it
+  contract tests in `tests/` pin them. The cube channels are single-sourced:
+  both sides drive `src/shape_obs.ObjectChannelDriver` and
+  `src/bps.BPSObsState` — never fork them
   (pinned by `tests/real/test_object_twin.py`).
 - `src/units.py` is the single source of the action → rad → servo-raw chain; never
   hand-derive the raw clamp.

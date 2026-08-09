@@ -30,7 +30,7 @@ def test_make_env_can_map_runtime_cfg():
         "cam_latency": None,
         "obs_bias": {"qpos_sigma": 0.0, "marker_pos_sigma": 0.0,
                      "marker_rot_sigma": 0.0, "live_sigma": 0.0, "precise_sigma": 0.0,
-                     "sqrtm_depth_sigma": 0.0, "marker_common_sigma": 0.0},
+                     "marker_common_sigma": 0.0},
         "marker_dropout": {"near": 0.0, "far": 0.0},
         "marker_always_visible": True,
         "marker_include_rot": False,

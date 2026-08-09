@@ -28,6 +28,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from stable_baselines3 import PPO
 
+from src.bps import BPSConfig, validate_checkpoint_bps
 from src.checkpoints import resolve_model_path
 from src.units import action_to_target, max_joint_speed_rad_s, max_raw_delta_per_step
 
@@ -98,7 +99,8 @@ def add_common_args(p: argparse.ArgumentParser, default_xml: Path,
                         "(http://host:PORT/stream); used by the web panel.")
 
 
-def load_policy(model_arg: str, log_dir: Path, expected_obs: int) -> PPO:
+def load_policy(model_arg: str, log_dir: Path, expected_obs: int,
+                bps_config: BPSConfig | None = None) -> PPO:
     """Resolve and load a checkpoint, failing loud on an obs-dim mismatch."""
     model_path = resolve_model_path(model_arg, str(log_dir))
     print(f"loading model: {model_path}")
@@ -110,6 +112,8 @@ def load_policy(model_arg: str, log_dir: Path, expected_obs: int) -> PPO:
         f"Obs dim mismatch: model expects {policy.observation_space.shape}, "
         f"env produces {expected_obs}-dim."
     )
+    if bps_config is not None:
+        validate_checkpoint_bps(policy, bps_config)
     return policy
 
 

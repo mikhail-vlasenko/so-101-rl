@@ -41,7 +41,6 @@ from omegaconf import OmegaConf
 
 from real.rollout.rollout_common import load_policy
 from real.rollout.rollout_lift import (
-    SQRTM_COLS,
     FkObjectSource,
     sample_visible_fk_spawn,
 )
@@ -54,10 +53,12 @@ from src.base_env import (
     markers_visible,
     obs_dim_for,
     priv_dim_for,
+    state_dim_for,
     tag_cam_model,
 )
 from src.lift_env import SO101LiftEnv
 from src.obs_history import ObsHistory
+from src.bps import BPS_DISTANCE_DIM, load_bps_config
 from src.train import make_env, runtime_cfg_from_hydra
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -84,13 +85,10 @@ def load_rollout(csv_path: Path) -> dict:
         "qpos": df[[f"qpos_{n}" for n in JOINT_NAMES]].to_numpy(),
         "ee": df[["ee_x", "ee_y", "ee_z"]].to_numpy(),
         "cube": df[["cube_x", "cube_y", "cube_z"]].to_numpy(),
-        # Object channels exactly as the policy saw them — the [live(3),
-        # live_age(1), center(3), sqrtM(6), precise_age(1)] slice of the
-        # actor block, in obs order.
-        "obj": df[[f"live_{ax}" for ax in "xyz"] + ["live_age_s"]
+        "live": df[[f"live_{ax}" for ax in "xyz"] + ["live_age_s"]].to_numpy(),
+        "bps": df[[f"bps_{i:02d}" for i in range(BPS_DISTANCE_DIM)]
                   + [f"center_{ax}" for ax in "xyz"]
-                  + [f"sqrtm_{c}" for c in SQRTM_COLS]
-                  + ["precise_age_s"]].to_numpy(),
+                  + ["precise_age_s", "valid_fraction"]].to_numpy(),
         "marker_age_s": df["marker_age_ms"].to_numpy() * 1e-3,
     }
 
@@ -181,7 +179,7 @@ def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float,
     cam = tag_cam_model(model, data)
 
     n = len(rec["actions"])
-    history = ObsHistory(history_taps, obs_dim_for(1, False))
+    history = ObsHistory(history_taps, state_dim_for(1, False))
     held_pos = np.zeros((N_MARKERS, 3))
     held_age = np.full(N_MARKERS, MARKER_AGE_CAP_S)
     seen = np.zeros(N_MARKERS, dtype=bool)
@@ -209,14 +207,15 @@ def run_obsdiff(model: mujoco.MjModel, policy, rec: dict, control_dt: float,
         # real/rollout_lift.build_actor_frame.
         frame = np.concatenate([
             q, qvel, held_pos.flatten(), held_age,
-            rec["obj"][k - 1],
+            rec["live"][k - 1],
             np.array([0.0, 0.0, 0.0, LIFT_TASK_ID]),
             rec["actions"][k - 1],
         ]).astype(np.float32)
         tapped = history.reset(frame) if k == 2 else history.push(frame)
         # Privileged pad: critic-only dims, never read by the actor
         # (real/rollout/rollout_lift.py does the same).
-        obs = np.concatenate([tapped, np.zeros(priv_dim_for(False), dtype=np.float32)])
+        obs = np.concatenate([tapped, rec["bps"][k - 1],
+                              np.zeros(priv_dim_for(False), dtype=np.float32)])
         action, _ = policy.predict(obs, deterministic=True)
         pred[k] = np.clip(action, -1.0, 1.0)
     return {"pred": pred, "fk_markers": fk_markers}
@@ -332,8 +331,9 @@ def main() -> int:
 
     history_taps = tuple(int(t) for t in cfg.history_taps)
     policy = load_policy(args.model, LOG_DIR,
-                         len(history_taps) * obs_dim_for(prev_actions_n, marker_include_rot)
-                         + priv_dim_for(marker_include_rot))
+                         obs_dim_for(prev_actions_n, marker_include_rot, history_taps)
+                         + priv_dim_for(marker_include_rot),
+                         bps_config=load_bps_config())
 
     xml_path = str(REPO_ROOT / SO101LiftEnv.XML_PATH)
     # Open-loop replay ignores observations entirely -> fully clean env.

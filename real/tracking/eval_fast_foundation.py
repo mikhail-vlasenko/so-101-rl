@@ -56,7 +56,7 @@ from real.tracking.eval_dense_stereo import (
     validate_recorded_camera_placement,
     visible_windows,
 )
-from real.tracking.eval_estimator import load_dataset
+from real.tracking.shape_dataset import load_dataset
 from real.tracking.record_shapes import load_workspace_bounds
 
 

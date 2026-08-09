@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "conf" / "config.yaml"
 BPS_DISTANCE_DIM = 64
 BPS_AGE_CAP_S = MARKER_AGE_CAP_S
+BPS_OBS_DIM = BPS_DISTANCE_DIM + 3 + 1 + 1
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,16 @@ class BPSConfig:
     basis_axis_m: tuple[float, float, float, float]
     distance_cap_m: float
     synthetic_surface_grid_size: int
+
+    def __post_init__(self):
+        axis = self.basis_axis_m
+        if len(axis) != 4 or tuple(sorted(axis)) != axis or len(set(axis)) != 4:
+            raise ValueError(
+                "bps.basis_axis_m must contain four strictly increasing values")
+        if self.distance_cap_m <= 0.0:
+            raise ValueError("bps.distance_cap_m must be positive")
+        if self.synthetic_surface_grid_size < 2:
+            raise ValueError("bps.synthetic_surface_grid_size must be at least 2")
 
 
 @dataclass(frozen=True)
@@ -57,6 +68,16 @@ class BPSObservation:
     age_s: float
     valid_fraction: float
 
+    def flat(self) -> np.ndarray:
+        """Policy block: distances, center, age, valid fraction."""
+        block = np.concatenate((
+            self.distances,
+            self.center_base,
+            np.array([self.age_s, self.valid_fraction], dtype=np.float32),
+        )).astype(np.float32)
+        assert block.shape == (BPS_OBS_DIM,)
+        return block
+
 
 def load_bps_config(path: Path = CONFIG_PATH) -> BPSConfig:
     """Load and validate the resolved values that define the BPS contract."""
@@ -68,12 +89,6 @@ def load_bps_config(path: Path = CONFIG_PATH) -> BPSConfig:
         distance_cap_m=float(data["distance_cap_m"]),
         synthetic_surface_grid_size=int(data["synthetic_surface_grid_size"]),
     )
-    if len(axis) != 4 or tuple(sorted(axis)) != axis or len(set(axis)) != 4:
-        raise ValueError("bps.basis_axis_m must contain four strictly increasing values")
-    if config.distance_cap_m <= 0.0:
-        raise ValueError("bps.distance_cap_m must be positive")
-    if config.synthetic_surface_grid_size < 2:
-        raise ValueError("bps.synthetic_surface_grid_size must be at least 2")
     return config
 
 
@@ -99,6 +114,23 @@ def bps_fingerprint(config: BPSConfig) -> str:
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def checkpoint_bps_fingerprint(model) -> str | None:
+    """Return the BPS identity persisted in an SB3 policy checkpoint."""
+    return model.policy_kwargs.get("bps_fingerprint")
+
+
+def validate_checkpoint_bps(model, config: BPSConfig) -> None:
+    """Fail loudly if a policy was built for a different BPS contract."""
+    expected = bps_fingerprint(config)
+    actual = checkpoint_bps_fingerprint(model)
+    if actual != expected:
+        raise ValueError(
+            "BPS checkpoint mismatch: policy has "
+            f"{actual!r}, runtime requires {expected!r}. Distill the policy "
+            "onto the current observation layout; do not edit the checkpoint."
+        )
 
 
 def voxel_first_indices(points: np.ndarray, voxel_size_m: float) -> np.ndarray:

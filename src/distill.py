@@ -11,13 +11,13 @@ student's own deployment DR. DAgger — not plain behavior cloning — because t
 covariate shift that BC suffers is worst exactly in the states the still-bad
 student visits, which is where it needs the teacher's supervision.
 
-Three regimes, selected by `distill.teacher_obs` (conf/config.yaml):
+Four regimes, selected by `distill.teacher_obs` (conf/config.yaml):
 
   identical  — the teacher sees the student's own observation (architecture-only
                change, e.g. a wider net). Requires matching obs spaces.
-  current    — the teacher sees the single-frame [actor block | priv tail]
-               sliced out of the student's lag-tapped observation (tap 0 plus
-               the tail — exactly its own trained layout). The warm start for
+  current    — the teacher sees [tap-0 state | current BPS | priv tail]
+               sliced out of the student's lag-tapped observation — exactly
+               its own trained single-frame layout. The warm start for
                a history_taps migration: the student clones the memoryless
                teacher, its history inputs start useless and get trained
                toward zero weight, and the mandatory PPO fine-tune learns to
@@ -28,6 +28,8 @@ Three regimes, selected by `distill.teacher_obs` (conf/config.yaml):
                dropout and hold-last-pose. Here imitation *actively teaches* the
                student to infer the hidden tag pose from its own obs. Requires
                a single-frame teacher (the privileged view is single-frame).
+  legacy_tag — the final sponge-AprilTag teacher sees its trained single-frame
+               layout. This is the only supported pre-BPS migration bridge.
 
 The value function is distilled alongside the actor: a warm actor paired with a
 fresh critic is the classic PPO-resume trap — the noisy critic yields garbage
@@ -59,7 +61,13 @@ from omegaconf import DictConfig, OmegaConf
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
-from src.base_env import obs_dim_for, priv_dim_for
+from src.base_env import (
+    legacy_tag_actor_dim_for,
+    obs_dim_for,
+    priv_dim_for,
+    state_dim_for,
+)
+from src.bps import BPS_OBS_DIM, validate_checkpoint_bps
 from src.train import (
     ALGORITHM_REGISTRY, actor_obs_dim_for, build_fresh_model, env_specs,
     obs_norm_for, runtime_cfg_from_hydra,
@@ -111,24 +119,27 @@ def _policy_outputs(policy, obs_np, device):
     return mean.cpu().numpy(), value.cpu().numpy()
 
 
-def _teacher_obs(venv, student_obs, teacher_obs_mode, single_actor_dim, priv_dim):
+def _teacher_obs(venv, student_obs, teacher_obs_mode, state_dim, priv_dim):
     """The observation to query the teacher on at the current (pre-step) state:
-    the student's own obs (identical), the single-frame [actor block | priv
-    tail] sliced out of the student's lag-tapped obs (current — tap 0 leads the
-    obs, the tail ends it), or the always-fresh privileged view pulled from
-    each subprocess env (privileged). Aligned with student_obs because both
-    read the env before the upcoming step."""
+    the student's own obs (identical), [tap-0 state | current BPS | tail]
+    sliced out of the student's lag-tapped obs (current), or the always-fresh
+    privileged view pulled from each subprocess env (privileged). Aligned with
+    student_obs because both read the env before the upcoming step."""
     if teacher_obs_mode == "identical":
         return student_obs
     if teacher_obs_mode == "current":
         return np.concatenate(
-            [student_obs[:, :single_actor_dim],
+            [student_obs[:, :state_dim],
+             student_obs[:, student_obs.shape[1] - priv_dim - BPS_OBS_DIM:
+                         student_obs.shape[1] - priv_dim],
              student_obs[:, student_obs.shape[1] - priv_dim:]], axis=1)
-    return np.stack(venv.env_method("privileged_obs")).astype(np.float32)
+    method = "legacy_tag_obs" if teacher_obs_mode == "legacy_tag" \
+        else "privileged_obs"
+    return np.stack(venv.env_method(method)).astype(np.float32)
 
 
 def collect(venv, teacher, student, buf, n_steps, beta, teacher_obs_mode,
-            single_actor_dim, priv_dim, device, rng):
+            state_dim, priv_dim, device, rng):
     """One DAgger round: roll the env for n_steps ticks under a per-env
     Bernoulli(beta) teacher/student action mix, labeling each visited state with
     the teacher's action+value on its teacher-obs. Stores the *student's* obs as
@@ -137,7 +148,7 @@ def collect(venv, teacher, student, buf, n_steps, beta, teacher_obs_mode,
     n_loops = int(np.ceil(n_steps / n_envs))
     obs = venv.reset()
     for _ in range(n_loops):
-        t_obs = _teacher_obs(venv, obs, teacher_obs_mode, single_actor_dim, priv_dim)
+        t_obs = _teacher_obs(venv, obs, teacher_obs_mode, state_dim, priv_dim)
         t_mean, t_value = _policy_outputs(teacher.policy, t_obs, device)
         buf.add(obs.astype(np.float32), t_mean, t_value)
 
@@ -181,7 +192,7 @@ def regress(student, buf, epochs, batch_size, vf_coef, optimizer, device, rng):
 
 
 def eval_policy(eval_venv, policy, n_episodes, is_teacher, teacher_obs_mode,
-                single_actor_dim, priv_dim, seed):
+                state_dim, priv_dim, seed):
     """Roll out n_episodes deterministically on a single-env vec env and return
     (mean_return, success_rate). The teacher is fed its teacher-obs so both
     policies are scored on the same task under the same DR — a distillation bug
@@ -193,7 +204,7 @@ def eval_policy(eval_venv, policy, n_episodes, is_teacher, teacher_obs_mode,
     while len(returns) < n_episodes:
         if is_teacher:
             pol_obs = _teacher_obs(eval_venv, obs, teacher_obs_mode,
-                                   single_actor_dim, priv_dim)
+                                   state_dim, priv_dim)
         else:
             pol_obs = obs
         action, _ = policy.predict(pol_obs, deterministic=True)
@@ -217,8 +228,9 @@ def distill(cfg: DictConfig, orig_dir: str):
     dcfg = cfg.distill
     assert dcfg.teacher is not None, "distill.teacher (path to teacher .zip) is required"
     teacher_obs_mode = dcfg.teacher_obs
-    assert teacher_obs_mode in ("identical", "current", "privileged"), \
-        f"distill.teacher_obs must be 'identical', 'current' or 'privileged', " \
+    assert teacher_obs_mode in ("identical", "current", "privileged", "legacy_tag"), \
+        f"distill.teacher_obs must be 'identical', 'current', 'privileged' " \
+        f"or 'legacy_tag', " \
         f"got {teacher_obs_mode!r}"
 
     # Single-frame layout dims for the teacher views that slice or bypass the
@@ -227,11 +239,15 @@ def distill(cfg: DictConfig, orig_dir: str):
     if cfg.env_name == "reach":
         assert teacher_obs_mode == "identical", \
             "reach has no tag/privileged pipeline; only identical distillation applies"
-        single_actor_dim = priv_dim = None
+        single_actor_dim = state_dim = priv_dim = legacy_actor_dim = None
     else:
         single_actor_dim = obs_dim_for(int(cfg.prev_actions_n),
                                        bool(cfg.marker_include_rot))
+        state_dim = state_dim_for(int(cfg.prev_actions_n),
+                                  bool(cfg.marker_include_rot))
         priv_dim = priv_dim_for(bool(cfg.marker_include_rot))
+        legacy_actor_dim = legacy_tag_actor_dim_for(
+            int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
 
     algo_cls, _, _ = ALGORITHM_REGISTRY[cfg.algorithm]
     seed = int(cfg.seed) if cfg.seed is not None else None
@@ -259,6 +275,8 @@ def distill(cfg: DictConfig, orig_dir: str):
         teacher_path = os.path.join(orig_dir, teacher_path)
     teacher = algo_cls.load(teacher_path, device=device)
     teacher.policy.set_training_mode(False)
+    if cfg.env_name != "reach" and teacher_obs_mode != "legacy_tag":
+        validate_checkpoint_bps(teacher, runtime_cfg.bps_config)
 
     student_obs_dim = student.observation_space.shape[0]
     teacher_obs_dim = teacher.observation_space.shape[0]
@@ -266,6 +284,10 @@ def distill(cfg: DictConfig, orig_dir: str):
         assert teacher_obs_dim == student_obs_dim, (
             f"identical distillation needs matching obs dims, "
             f"teacher {teacher_obs_dim} != student {student_obs_dim}")
+    elif teacher_obs_mode == "legacy_tag":
+        assert teacher_obs_dim == legacy_actor_dim + priv_dim, (
+            "legacy_tag distillation needs the final single-frame tag layout: "
+            f"teacher {teacher_obs_dim} != {legacy_actor_dim} + {priv_dim}")
     else:
         # current slices the tap-0 actor block + priv tail out of the student
         # obs; privileged pulls the always-fresh single-frame view from the
@@ -300,7 +322,7 @@ def distill(cfg: DictConfig, orig_dir: str):
                          job_type="distill")
 
     t_return, t_success = eval_policy(eval_venv, teacher, n_eval, True,
-                                      teacher_obs_mode, single_actor_dim,
+                                      teacher_obs_mode, state_dim,
                                       priv_dim, eval_seed)
     print(f"teacher eval: return={t_return:.2f} success={t_success:.3f}")
 
@@ -310,12 +332,12 @@ def distill(cfg: DictConfig, orig_dir: str):
                 float(dcfg.beta_start) + (float(dcfg.beta_end) - float(dcfg.beta_start))
                 * it / (iterations - 1))
         collect(vec_env, teacher, student, buf, int(dcfg.steps_per_iter), beta,
-                teacher_obs_mode, single_actor_dim, priv_dim, device, rng)
+                teacher_obs_mode, state_dim, priv_dim, device, rng)
         action_mse, value_mse = regress(student, buf, int(dcfg.epochs),
                                         int(dcfg.batch_size), float(dcfg.vf_coef),
                                         optimizer, device, rng)
         s_return, s_success = eval_policy(eval_venv, student, n_eval, False,
-                                          teacher_obs_mode, single_actor_dim,
+                                          teacher_obs_mode, state_dim,
                                           priv_dim, eval_seed)
         print(f"iter {it + 1}/{iterations}  beta={beta:.2f}  "
               f"buffer={len(buf)}  action_mse={action_mse:.4f}  "

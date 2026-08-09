@@ -1,6 +1,6 @@
 """Tests for per-sample Gaussian observation noise (sim2real domain randomization).
 
-Noise is applied at the source values: qpos per step (SO101BaseEnv._compute_obs),
+Noise is applied at the source values: qpos per served policy observation,
 marker poses and the cube channels per camera frame (_process_frame, frozen at
 capture). Derived task obs (e.g. pickplace's cube_to_target) must inherit the
 noise via the noisy live centroid rather than re-noising independently. There is
@@ -15,11 +15,10 @@ import pytest
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
-from src.base_env import RuntimeEnvConfig, markers_visible, priv_dim_for
+from src.base_env import RuntimeEnvConfig, markers_visible, obs_dim_for, priv_dim_for, state_dim_for
 from src.lift_env import SO101LiftEnv
 from src.marker_noise import pos_noise_sigmas
 from src.pickplace_env import SO101PickPlaceEnv
-from src.shape_obs import sqrtm_from_upper
 
 
 # The obs_noise block conf/dr/full.yaml carries — the deployment DR default the
@@ -30,7 +29,7 @@ DEFAULT_OBS_NOISE = {
     "tag_px_noise": 0.2,
     "tag_depth_factor": 2.0,
     "live_sigma": 0.003,
-    "precise_sigma": 0.00534,
+    "precise_sigma": 0.003,
 }
 
 # Behavioral tests use distinct values per knob so the per-channel oracles
@@ -46,21 +45,21 @@ SIGMAS = {
 
 # Actor-block layout (marker_include_rot=True, prev_actions_n=2):
 # [qpos(6), qvel(6), markers(2*6), marker_age(2), live(3), live_age(1),
-#  center(3), sqrtM(6), precise_age(1), task_extra(4), prev_actions(2*6)];
-# the privileged tail (priv_dim_for) follows.
+#  task_extra(4), prev_actions(2*6), BPS(64), center(3), age, valid_fraction];
+# the privileged tail follows.
 QPOS = slice(0, 6)
 QVEL = slice(6, 12)
 MARKER_AGE = slice(24, 26)
 LIVE = slice(26, 29)
 LIVE_AGE = 29
-CENTER = slice(30, 33)
-SQRTM = slice(33, 39)
-PRECISE_AGE = 39
-C2T = slice(40, 42)
-RING_H = 42
-TASK_ID = 43
-PREV_ACTIONS = slice(44, 56)
-OBS_DIM = 56 + priv_dim_for(True)
+C2T = slice(30, 32)
+RING_H = 32
+TASK_ID = 33
+PREV_ACTIONS = slice(34, 46)
+_STATE_DIM = state_dim_for(2, True)
+CENTER = slice(_STATE_DIM + 64, _STATE_DIM + 67)
+PRECISE_AGE = CENTER.stop
+OBS_DIM = obs_dim_for(2, True) + priv_dim_for(True)
 
 
 @pytest.fixture(scope="module")
@@ -225,24 +224,6 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
     np.testing.assert_allclose(qvel_diffs.std(axis=0).mean(), qvel_sigma, rtol=0.1)
 
 
-def test_shape_carries_no_per_refresh_noise(cfg):
-    """There is deliberately no per-refresh √M noise knob. On the rig a
-    stationary sponge's shape estimate moved under 0.05 mm across 129
-    refreshes, two orders of magnitude below the bias it carries, so the
-    estimator's shape error is modelled as a per-episode bias
-    (obs_bias.sqrtm_depth_sigma, tests/env/test_obs_bias.py), not jitter —
-    obs_noise must leave the served shape untouched. `precise_sigma` still
-    noises the precise channel's CENTER per refresh; only the shape is exempt."""
-    env_clean = _pickplace(cfg, obs_noise=None)
-    env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
-    for i in range(10):
-        env_clean.reset(seed=i)
-        env_noisy.reset(seed=i)
-        oc, *_ = env_clean.step(_zero_action())
-        on, *_ = env_noisy.step(_zero_action())
-        np.testing.assert_allclose(on[SQRTM], oc[SQRTM], atol=1e-12)
-
-
 def test_depth_noise_dominates_lateral(cfg):
     """The whole point of the anisotropy: along the camera ray the position noise
     is many times larger than in the image plane."""
@@ -272,7 +253,7 @@ def test_noise_does_not_corrupt_true_state(cfg):
     env = _pickplace(cfg, obs_noise=SIGMAS)
     env.reset(seed=0)
     pre_cube = env._get_cube_pos().copy()
-    env.step(_zero_action())  # this calls _compute_obs which adds noise
+    env.step(_zero_action())  # serving the observation adds encoder noise
     post_cube = env._get_cube_pos()
     # _get_cube_pos reads from self.data — must remain physically meaningful (unchanged
     # apart from physics; with zero action and 1 step, cube hardly moves).

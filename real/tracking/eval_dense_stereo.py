@@ -18,7 +18,7 @@ Run:
     conda run --no-capture-output -n mujoco_env python -m \
         real.tracking.eval_dense_stereo --dataset datasets/sponge_<stamp>
 
-The SAM masks are shared with ``eval_estimator`` and resume from its cache. Use
+The SAM masks use the shared resumable dataset cache. Use
 ``--prepare-only`` to build masks/rectified inputs without running the grid.
 ``--max-frames`` is a smoke-test aid and cannot produce an acceptance result.
 """
@@ -56,7 +56,7 @@ from real.tracking.dense_stereo import (
     sgbm_disparities,
     voxel_downsample,
 )
-from real.tracking.eval_estimator import compute_masks, gt_pose, load_dataset, load_mask
+from real.tracking.shape_dataset import compute_masks, gt_pose, load_dataset, load_mask
 from real.tracking.record_shapes import CausalMeanPosition, load_workspace_bounds
 from src.shape_obs import STATIC_DWELL_S, VISIBLE_FRACTION_MIN, is_static
 

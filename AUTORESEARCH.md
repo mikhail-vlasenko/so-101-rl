@@ -122,8 +122,8 @@ If the fetch fails or a metric is missing, check `tail -50 run.log`.
   three crutch flags on, `seed=0`, 25 minutes. These *define* the experiment;
   changing them changes the question, and turning a crutch on that is already on
   is the only cheat available at this stage.
-- `src/shape_obs.py` — single-sourced with the real pipeline
-  (`real/rollout/object_obs.py`), pinned by `tests/real/test_object_twin.py`.
+- `src/{shape_obs,bps}.py` — single-sourced live/static and precise hold state,
+  pinned by `tests/real/test_object_twin.py`.
   Never fork it. If the object-channel *semantics* genuinely need to change, that
   is a repo-level decision, not an experiment.
 - `conf/dr/*.yaml` cube sigmas — measured from the sponge dataset
@@ -162,12 +162,12 @@ Do NOT chase the metric by making the sim easier to transfer from:
   that is not the cube center, and `_detect_grasp` is GT-based while the policy
   aims with a biased estimate. Check whether the shaping gradient still points at
   a graspable pose.
-- The privileged tail nearly doubled (46 dims of DR latents and GT state) while
-  the actor block grew by 18. If the critic can trivially predict returns from GT
-  cube state, the advantage signal the actor sees may have gone quiet — worth
-  measuring before tuning anything else.
-- `sqrtM` (6 dims) and the two age channels are constant-ish under `dr=none`; dead
-  or near-constant input columns still consume network capacity and normalization.
+- The critic receives 39 dims of GT state and DR latents beyond the 103-dim
+  default actor input. If it can trivially predict returns from GT cube state,
+  the advantage signal the actor sees may have gone quiet — worth measuring
+  before tuning anything else.
+- The 64 BPS distances are clean under `dr=none`; verify ablations show the
+  policy uses them before spending capacity on a wider network.
 - Exploration: entropy, action noise, or a shorter `max_steps` at stage 1 so the
   policy sees more resets per unit of experience.
 - LR / batch / `n_epochs`: the previous loop found `3e-4` unstable for fine-tuning

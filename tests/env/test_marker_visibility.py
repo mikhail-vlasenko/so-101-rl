@@ -170,11 +170,11 @@ def test_wrist_roll_sweep_flips_finger_visibility(env):
     for roll in np.linspace(lo, hi, 25):
         env.data.qpos[env.joint_qposadr[roll_idx]] = roll
         mujoco.mj_forward(env.model, env.data)
-        # Detection is rolled separately from _compute_obs; refresh it for this pose.
+        # Detection is rolled separately from observation serving; refresh it for this pose.
         _refresh_detection(env)
         visible = markers_visible(env.data, env.marker_site_ids, env.tag_cam)
         seen.add(bool(visible[0]))
-        obs = env._compute_obs()
+        obs = env._serve_obs(reset=False)
         finger_slice = obs[MARKER_OBS_START:MARKER_OBS_START + 6]
         pos, rot = marker_world_poses(env.data, env.marker_site_ids)
         if visible[0]:
@@ -195,7 +195,7 @@ def test_hidden_marker_holds_last_measurement():
              "live_sigma": 0.003, "precise_sigma": 0.003}
     bias = {"qpos_sigma": 0.01, "marker_pos_sigma": 0.005,
             "marker_rot_sigma": 0.02, "live_sigma": 0.005, "precise_sigma": 0.005,
-            "sqrtm_depth_sigma": 0.008, "marker_common_sigma": 0.003}
+            "marker_common_sigma": 0.003}
     env = SO101LiftEnv(env_cfg=_cfg(),
                        cfg=RuntimeEnvConfig(obs_noise=noise, obs_bias=bias,
                                             marker_include_rot=True))
@@ -300,7 +300,7 @@ def test_marker_always_visible_disables_staleness():
         env.data.qpos[env.joint_qposadr[roll_idx]] = roll
         mujoco.mj_forward(env.model, env.data)
         assert _refresh_detection(env).detected.all()
-        obs = env._compute_obs()
+        obs = env._serve_obs(reset=False)
         pos, rot = marker_world_poses(env.data, env.marker_site_ids)
         expected = np.hstack([pos, rot]).flatten()
         np.testing.assert_allclose(obs[MARKER_OBS_START:MARKER_OBS_START + 6 * N_MARKERS],

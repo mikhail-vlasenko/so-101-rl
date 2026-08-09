@@ -7,6 +7,6 @@ fastapi
 uvicorn
 watchfiles  # fast file watcher for `python -m panel --reload`
 transformers  # SAM3 text prompting + SAM2 streaming mask tracking (real/sam_seg.py)
-tqdm  # resumable offline dataset mask progress (real/tracking/eval_estimator.py)
+tqdm  # resumable offline dataset mask progress (real/tracking/shape_dataset.py)
 # transformers' fast image/video processors also need torchvision; install the build
 # matching the env's torch: pip install torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128

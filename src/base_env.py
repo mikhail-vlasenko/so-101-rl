@@ -13,6 +13,13 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from src.camera_sim import CameraSim
+from src.bps import (
+    BPS_OBS_DIM,
+    BPSConfig,
+    BPSMeasurement,
+    BPSObsState,
+    load_bps_config,
+)
 from src.marker_noise import CameraIntrinsics, anisotropic_pos_noise, load_camera_intrinsics
 from src.obs_history import ObsHistory
 from src.servo_profile import ServoProfile
@@ -22,10 +29,11 @@ from src.shape_obs import (
     VISIBLE_FRACTION_MIN,
     ObjectChannelDriver,
     ObjectObsState,
-    box_sqrtm,
-    camera_depth_axis,
-    sqrtm_from_cov,
-    sqrtm_upper,
+)
+from src.sim_bps import (
+    SyntheticBPSGenerator,
+    SyntheticCloudConfig,
+    clean_synthetic_cloud_config,
 )
 from src.surface_cloud import (
     OCCLUDER_GEOMGROUP as _OCCLUDER_GEOMGROUP,
@@ -36,14 +44,12 @@ from src.units import action_to_target
 from real.marker_spec import ARM_TAG_TO_SITE, TAG_SIZE_MM
 
 
-def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
-    """Actor block: qpos(6) + qvel(6) + markers(2*M) + marker_age(2) + live(3)
-    + live_age(1) + center(3) + sqrtM(6) + precise_age(1) + extra(4) +
-    prev_actions(N*6). The full env observation is [this actor block per
-    history tap | priv_dim_for privileged tail] (src/obs_history.py; one block
-    per entry of conf/config.yaml:history_taps); only the critic may read the
-    tail (asymmetric critic — the actor structurally slices it off, see
-    src/networks.TakeFirst).
+def state_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
+    """Width of one historical actor-state frame.
+
+    The frame contains qpos/qvel, arm marker poses/ages, the fast live object
+    centroid/age, task extras, and previous actions.  The current BPS block is
+    deliberately outside this frame so history taps never duplicate it.
 
     Each marker contributes its world xyz (M=3); when marker_include_rot is true it
     also contributes a world rotation vector (axis-angle, +3 dims, M=6) — the same
@@ -53,34 +59,39 @@ def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
     latency when freshly detected, growing while the tag is undetected and its
     last pose is held.
 
-    The cube is observed tag-free through the two-camera object channels
-    (src/shape_obs.py): `live` is the triangulated centroid of the two views'
-    visible-surface centroids with its own age — fast, biased toward the
-    visible surface, gone stale when either camera loses the object; `center`
-    + `sqrtM` (upper triangle, shape_obs.SQRTM_UPPER_ORDER) are the estimated
-    body center and shape tensor, refreshed only while the object is static
-    and well visible, with `precise_age` growing in between. Both channels
-    hold their last measurement exactly like the markers.
+    The live centroid is biased toward the visible surface and goes stale when
+    either camera loses the object.  The precise visible surface is represented
+    by :mod:`src.bps` and appended exactly once after all state taps.
     """
     marker_dim = 6 if marker_include_rot else 3
-    # 12 = qpos(6) + qvel(6); 18 = live(3) + live_age(1) + center(3) +
-    # sqrtM(6) + precise_age(1) + extra(4)
-    return 12 + N_MARKERS * marker_dim + N_MARKERS + 18 + prev_actions_n * 6
+    return 12 + N_MARKERS * marker_dim + N_MARKERS + 8 + prev_actions_n * 6
+
+
+def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False,
+                history_taps: tuple[int, ...] = (0,)) -> int:
+    """Actor width for ``[state history | current BPS block]``."""
+    return (len(history_taps) * state_dim_for(prev_actions_n, marker_include_rot)
+            + BPS_OBS_DIM)
+
+
+def legacy_tag_actor_dim_for(prev_actions_n: int,
+                             marker_include_rot: bool = False) -> int:
+    """Single-frame actor width of the last deployable tag-observation teacher."""
+    marker_dim = 6 if marker_include_rot else 3
+    return 12 + N_MARKERS * marker_dim + N_MARKERS + 11 + prev_actions_n * 6
 
 
 def priv_dim_for(marker_include_rot: bool = False) -> int:
     """Privileged tail appended after the actor block (asymmetric critic):
-    true cube pose (3+3, world pos + axis-angle) + true √M (6, upper triangle)
-    + cube velocity (6, free-joint qvel) + jaw contact flags (2) + the
+    true cube pose (3+3, world pos + axis-angle), cube velocity (6,
+    free-joint qvel), jaw contact flags (2), and the
     episode's sampled DR latents: qpos bias (6), per-tag marker pos bias
     (2*3), marker rot bias (2*3, only when the rot obs it perturbs is in the
-    actor block), live centroid bias (3), precise center bias (3), hull depth
-    inflation (1), common-mode pos bias (3), camera pipeline delay (1),
+    actor block), live centroid bias (3), precise center bias (3), common-mode
+    pos bias (3), camera pipeline delay (1),
     sponge half extents (3). Contents built by
     SO101BaseEnv._priv_tail; normalization constants in src/obs_norm.py."""
-    # 3+3+6+6+2 cube pose/sqrtM/vel + jaws; 6 qpos bias; 3+3+1 live/precise
-    # bias + hull depth inflation; 3 common bias; 1 cam delay; 3 half extents
-    dim = 20 + 6 + N_MARKERS * 3 + 7 + 3 + 1 + 3
+    dim = 14 + 6 + N_MARKERS * 3 + 6 + 3 + 1 + 3
     if marker_include_rot:
         dim += N_MARKERS * 3
     return dim
@@ -133,6 +144,8 @@ class RuntimeEnvConfig:
     prev_actions_n: int = 2
     cube_size_jitter: float = 0.0
     history_taps: tuple = (0,)
+    bps_config: BPSConfig | None = None
+    synthetic_cloud: SyntheticCloudConfig | None = None
 
 
 def marker_world_poses(data, site_ids):
@@ -269,19 +282,19 @@ class CamState(NamedTuple):
     marker_rot: np.ndarray     # (N_MARKERS, 3) axis-angle
     marker_normal: np.ndarray  # (N_MARKERS, 3) outward tag normals
     cube_center: np.ndarray    # (3,) GT box center
-    cube_rot_mat: np.ndarray   # (3, 3) GT box world rotation
     cube_vis_frac: np.ndarray  # (2,) per-camera visible fraction (main, aux)
     cube_vis_centroid: np.ndarray  # (2, 3) per-camera visible-point centroid
     cube_seen: np.ndarray      # (2,) bool — any surface point visible per camera
+    bps_measurement: BPSMeasurement | None
 
 
 class CamFrame(NamedTuple):
     """One processed detection: dropout, bias, and noise frozen at capture time.
     marker_pos/rot entries are only meaningful where detected, live only when
     live_detected — _ingest_frame folds the detected ones into the held state
-    the obs serves. precise_center/sqrtm are always present (GT + frozen
-    noise); whether they refresh the precise channel is the ingest-time static
-    gate's call."""
+    the obs serves. The synthetic BPS measurement was resolved against the
+    captured world and is held here until the frame becomes available; the
+    ingest-time static gate decides whether it refreshes the precise state."""
     marker_pos: np.ndarray  # (N_MARKERS, 3)
     marker_rot: np.ndarray  # (N_MARKERS, 3)
     detected: np.ndarray    # (N_MARKERS,) bool
@@ -290,8 +303,7 @@ class CamFrame(NamedTuple):
     live_priv: np.ndarray   # (3,) privileged live: GT center, same bias/noise
     live_detected: bool
     vis_frac: np.ndarray    # (2,) per-camera visible fraction at capture
-    precise_center: np.ndarray  # (3,)
-    precise_sqrtm: np.ndarray   # (3, 3)
+    bps_measurement: BPSMeasurement | None
 
 
 # Resting orientations of the box: which body axis is vertical (with sign) and
@@ -528,8 +540,8 @@ class SO101ArmEnv(gym.Env):
 class SO101BaseEnv(SO101ArmEnv):
     """Base class for the cube-manipulation tasks: adds the AprilTag marker
     pipeline (hold-last-pose ages, DR noise/bias/latency/dropout), the
-    tag-free dual-view cube channels (live centroid + static-gated precise
-    center/√M, src/shape_obs.py) and the cube-centric reset/step skeleton on
+    tag-free dual-view cube channels (live centroid + static-gated BPS visible
+    surface) and the cube-centric reset/step skeleton on
     top of SO101ArmEnv."""
 
     TASK_ID: float  # 0.0 = lift, 1.0 = pickplace
@@ -547,11 +559,9 @@ class SO101BaseEnv(SO101ArmEnv):
         # depth-vs-lateral split. The cube channels use isotropic sigmas —
         # live_sigma per frame on the triangulated centroid (two-view
         # triangulation has no solvePnP depth pathology) and precise_sigma per
-        # refresh on the estimated center. There is deliberately no per-refresh
-        # √M noise: on the rig a stationary sponge's shape estimate moved under
-        # 0.05 mm across 129 refreshes — two orders of magnitude below the bias
-        # it carries — so the estimator's shape error is modelled as bias
-        # (obs_bias.sqrtm_depth_sigma), not jitter. The camera
+        # refresh on the dense cloud center. BPS surface corruption is modeled
+        # by SyntheticCloudConfig rather than by perturbing encoded distances.
+        # The camera
         # re-anchor's common-mode error is per-episode only
         # (obs_bias.marker_common_sigma): the real pipeline EMAs the static
         # camera pose (real/rollout/marker_obs.py), leaving no meaningful per-frame
@@ -575,13 +585,12 @@ class SO101BaseEnv(SO101ArmEnv):
         # once the control period is known.
         self.cam_latency = cfg.cam_latency
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
-        # live_sigma, precise_sigma, sqrtm_depth_sigma, marker_common_sigma; or
+        # live_sigma, precise_sigma, marker_common_sigma; or
         # None. The per-tag marker biases are sampled independently (each tag's
         # own glue/pose-estimate error). The cube channels get per-episode
         # biases of their own: live_sigma the systematic visible-surface/
-        # segmentation offset, precise_sigma the estimator's center offset,
-        # sqrtm_depth_sigma the spread the visual hull adds along the axis the
-        # two views cannot resolve (_hull_sqrtm). marker_common_sigma adds a separate
+        # segmentation offset and precise_sigma the dense-cloud center offset.
+        # marker_common_sigma adds a separate
         # shared shift applied to every camera-derived position (the camera
         # re-anchor / table calibration offset, correlated across tags and the
         # cube channels alike) — see _common_pos_bias.
@@ -591,23 +600,24 @@ class SO101BaseEnv(SO101ArmEnv):
         self._marker_rot_bias = np.zeros((N_MARKERS, 3))
         self._live_bias = np.zeros(3)
         self._precise_bias = np.zeros(3)
-        # Per-episode magnitude (m) of the spread the hull estimator adds along
-        # the unresolved depth axis — see _hull_sqrtm.
-        self._sqrtm_depth_spread = 0.0
         # Common-mode shift shared by every tag (arm markers + cube) for the whole
         # episode: the real pipeline re-anchors the camera from one table tag
         # (real/rollout/marker_obs.py), so its calibration/detection error moves all tags
         # together, not independently. Drawn in reset from obs_bias.
         self._common_pos_bias = np.zeros(3)
-        # Actor block width; the full observation appends the privileged tail
-        # (asymmetric critic — see _priv_tail).
-        self.obs_dim = obs_dim_for(self.prev_actions_n, self.marker_include_rot)
+        self.bps_config = cfg.bps_config or load_bps_config()
+        cloud_config = cfg.synthetic_cloud or clean_synthetic_cloud_config()
+        self._bps_generator = SyntheticBPSGenerator(self.bps_config, cloud_config)
+
+        # The actor sees tapped state frames followed by one current BPS block.
+        self.state_dim = state_dim_for(self.prev_actions_n, self.marker_include_rot)
+        self.obs_dim = obs_dim_for(self.prev_actions_n, self.marker_include_rot,
+                                   cfg.history_taps)
         self.priv_dim = priv_dim_for(self.marker_include_rot)
         # Lag-tap history (src/obs_history.py): the served observation is the
-        # actor block at each configured tick lag, then a single copy of the
-        # privileged tail — the tail's latents are per-episode constants, so
-        # tapping them would add nothing. (0,) = plain single-frame obs.
-        self._history = ObsHistory(cfg.history_taps, self.obs_dim)
+        # state frame at each configured tick lag. The current BPS block and
+        # privileged tail are appended once after the history.
+        self._history = ObsHistory(cfg.history_taps, self.state_dim)
 
         self.marker_site_ids = []
         for name in MARKER_SITE_NAMES:
@@ -704,16 +714,15 @@ class SO101BaseEnv(SO101ArmEnv):
         self._held_marker_pos = np.zeros((N_MARKERS, 3))
         self._held_marker_rot = np.zeros((N_MARKERS, 3))
         self._marker_last_capture_t = np.full(N_MARKERS, -np.inf)
-        # Dual-channel cube state: the shared driver (src/shape_obs.py — the
-        # exact code the real rollout drives) owns the live/precise hold-last
-        # state, the static-gate history, and the refresh gate.
+        # The live driver owns the shared hold/age/static gate. BPSObsState owns
+        # the one current/held dense-surface block outside observation history.
         self._obj = ObjectChannelDriver()
+        self._bps_state = BPSObsState()
         # Privileged (always-fresh) mirror of the held state: every frame
         # overwrites it regardless of detection, so it serves exactly what a
         # marker_always_visible=true policy sees — same frames, same
         # noise/bias/latency, no dropout, no hold-last-pose and no static
-        # gate (live = GT center + the frame's bias/noise; precise refreshed
-        # every frame). Read only by privileged_obs() (the distillation
+        # gate (live = GT center + the frame's bias/noise). Read only by privileged_obs() (the distillation
         # teacher view, src/distill.py); never fed to this env's own policy.
         # Needs no reset beyond the fresh objects: _ingest_frame overwrites
         # all of it unconditionally, starting with the reset frame.
@@ -726,7 +735,7 @@ class SO101BaseEnv(SO101ArmEnv):
 
         self._parse_config(task_cfg)
 
-        obs_high = np.full(self.obs_dim * self._history.n_taps + self.priv_dim,
+        obs_high = np.full(self.obs_dim + self.priv_dim,
                            np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
@@ -755,35 +764,16 @@ class SO101BaseEnv(SO101ArmEnv):
             if centroid is not None:
                 vis_centroid[i] = centroid
                 seen[i] = True
+        bps_capture = self._bps_generator.capture(
+            self.model, self.data, self.cube_cams, self.cube_geom_id,
+            self.cube_body_id, self.cube_half_extents, self.np_random)
         return CamState(marker_pos=marker_pos, marker_rot=marker_rot,
                         marker_normal=marker_world_normals(self.data, self.marker_site_ids),
                         cube_center=self.data.geom_xpos[self.cube_geom_id].copy(),
-                        cube_rot_mat=self.data.geom_xmat[self.cube_geom_id]
-                        .reshape(3, 3).copy(),
                         cube_vis_frac=vis_frac, cube_vis_centroid=vis_centroid,
-                        cube_seen=seen)
-
-    def _hull_sqrtm(self, R, center):
-        """√M as the two-view hull estimator reports it: the box's true second
-        moment plus the spread the estimator adds along the depth axis it
-        cannot resolve (`camera_depth_axis`), scaled by this episode's
-        `obs_bias.sqrtm_depth_sigma` draw.
-
-        The error is modelled as added mass along a WORLD-fixed direction, not
-        as a rotation of the box's own axes, because that is what a silhouette
-        intersection does: measured on the rig, the estimator's error tensor
-        stays within 8 degrees of the camera bisector across every sponge yaw
-        while the box turns underneath it. One scalar therefore reproduces the
-        size inflation, the compressed anisotropy AND the pose-dependent
-        principal-axis error together — M_true rotates with the sponge while
-        the added term does not, so a box lying along the depth axis inflates
-        in length while one lying across it has its *other* axis inflated.
-        """
-        M = (R * (self.cube_half_extents ** 2 / 3.0)) @ R.T
-        if self._sqrtm_depth_spread > 0.0:
-            d = camera_depth_axis([cam.pos for cam in self.cube_cams], center)
-            M = M + self._sqrtm_depth_spread ** 2 * np.outer(d, d)
-        return sqrtm_from_cov(M)
+                        cube_seen=seen,
+                        bps_measurement=(None if bps_capture is None
+                                         else bps_capture.measurement))
 
     def _process_frame(self, state: CamState) -> CamFrame:
         """One simulated detection of a captured world state: roll the per-frame
@@ -827,8 +817,7 @@ class SO101BaseEnv(SO101ArmEnv):
         # bias/noise (what the marker_always_visible crutch serves).
         live_meas = state.cube_vis_centroid.mean(axis=0)
         live_priv = state.cube_center.copy()
-        precise_center = state.cube_center.copy()
-        R = state.cube_rot_mat
+        bps_measurement = state.bps_measurement
         live_err = np.zeros(3)
         if self.obs_bias is not None:
             # _common_pos_bias hits the arm markers and both cube channels
@@ -837,7 +826,13 @@ class SO101BaseEnv(SO101ArmEnv):
             marker_pos = marker_pos + self._marker_pos_bias + self._common_pos_bias
             marker_rot = marker_rot + self._marker_rot_bias
             live_err = live_err + self._live_bias + self._common_pos_bias
-            precise_center = precise_center + self._precise_bias + self._common_pos_bias
+            if bps_measurement is not None:
+                bps_measurement = BPSMeasurement(
+                    distances=bps_measurement.distances,
+                    center_base=(bps_measurement.center_base + self._precise_bias
+                                 + self._common_pos_bias),
+                    valid_fraction=bps_measurement.valid_fraction,
+                )
         if self.obs_noise is not None:
             rng = self.np_random
             px = self.obs_noise["tag_px_noise"]
@@ -853,8 +848,13 @@ class SO101BaseEnv(SO101ArmEnv):
             marker_rot = marker_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
                                                  size=marker_rot.shape)
             live_err = live_err + rng.normal(0, self.obs_noise["live_sigma"], size=3)
-            precise_center = precise_center + rng.normal(
-                0, self.obs_noise["precise_sigma"], size=3)
+            if bps_measurement is not None:
+                bps_measurement = BPSMeasurement(
+                    distances=bps_measurement.distances,
+                    center_base=(bps_measurement.center_base + rng.normal(
+                        0, self.obs_noise["precise_sigma"], size=3)),
+                    valid_fraction=bps_measurement.valid_fraction,
+                )
         if self.marker_always_visible:
             # Easy-mode crutch: the live channel reads the (noisy) true center,
             # sidestepping the visible-surface bias and any occlusion.
@@ -871,16 +871,14 @@ class SO101BaseEnv(SO101ArmEnv):
                         live_priv=live_priv + live_err,
                         live_detected=live_detected,
                         vis_frac=state.cube_vis_frac.copy(),
-                        precise_center=precise_center,
-                        precise_sqrtm=self._hull_sqrtm(R, state.cube_center))
+                        bps_measurement=bps_measurement)
 
     def _ingest_frame(self, capture_t, frame: CamFrame):
         """Consume one camera frame: it becomes the current frame (render tint,
         hidden metrics), each detected marker's measurement overwrites the
         held pose the obs serves, a detected live measurement refreshes the
-        live channel and extends the static-gate history, and the precise
-        channel refreshes when the gate passes — the same per-frame update the
-        real pipeline applies (real/rollout/marker_obs.py + object_obs.py)."""
+        live channel and extends the static-gate history, and the BPS state
+        refreshes when the gate passes."""
         self._cam_frame = frame
         det = frame.detected
         self._held_marker_pos[det] = frame.marker_pos[det]
@@ -890,17 +888,13 @@ class SO101BaseEnv(SO101ArmEnv):
 
         if frame.live_detected:
             self._obj.ingest_live(capture_t, frame.live, gate_point=frame.live_gate)
-            # Precise refresh gate: static (gate-history track) + well visible
-            # in both views. The crutch refreshes unconditionally.
+            # Dense refresh gate: static live track + both-view visibility.
             if self.marker_always_visible or self._obj.gate_open(frame.vis_frac):
-                self._obj.ingest_precise(capture_t, frame.precise_center,
-                                         frame.precise_sqrtm)
+                self._bps_state.ingest(capture_t, frame.bps_measurement)
         elif self.marker_always_visible:
-            # Crutch with an undetectable live geometry still serves fresh
-            # channels (live = noisy GT center, precise refreshed).
+            # Crutch with undetectable live geometry still serves noisy GT.
             self._obj.state.ingest_live(capture_t, frame.live)
-            self._obj.ingest_precise(capture_t, frame.precise_center,
-                                     frame.precise_sqrtm)
+            self._bps_state.ingest(capture_t, frame.bps_measurement)
         # Live-channel indicator on the legacy tag site: green while both
         # cameras measure the object, red while the live channel is stale.
         # Visual only — never read by obs.
@@ -916,8 +910,6 @@ class SO101BaseEnv(SO101ArmEnv):
         self._held_marker_rot_priv[:] = frame.marker_rot
         self._marker_last_capture_t_priv[:] = capture_t
         self._obj_state_priv.ingest_live(capture_t, frame.live_priv)
-        self._obj_state_priv.ingest_precise(capture_t, frame.precise_center,
-                                            frame.precise_sqrtm)
 
     def _get_cube_pos(self):
         return self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3].copy()
@@ -937,7 +929,7 @@ class SO101BaseEnv(SO101ArmEnv):
         real/rollout_common.ArmLoop. Advances _prev_qpos_obs and caches the
         result in _last_encoder_obs so a paired privileged_obs() reuses the
         identical read — the student and teacher views must differ only in the
-        tag channels. Call exactly once per tick (from _compute_obs)."""
+        tag channels. Call exactly once per served policy observation."""
         qpos = self.data.qpos[self.joint_qposadr].copy()
         if self.obs_bias is not None:
             qpos = qpos + self._qpos_bias
@@ -959,7 +951,7 @@ class SO101BaseEnv(SO101ArmEnv):
     def _tag_obs(self, held_pos, held_rot, marker_last_t):
         """(markers, marker_age) from a held-tag source: the arm markers' obs
         slice and their age channels. Shared by the student view
-        (_compute_obs, hold-last-pose state) and the privileged teacher view
+        (_serve_obs, hold-last-pose state) and the privileged teacher view
         (privileged_obs, always-fresh mirror)."""
         if self.marker_include_rot:
             # hstack interleaves per marker: [pos_finger, rot_finger, pos_wrist, rot_wrist]
@@ -982,75 +974,110 @@ class SO101BaseEnv(SO101ArmEnv):
         whose DR knob is off stay at their zero init — truthfully "no error".
         marker_dropout near/far are run constants, not per-episode samples, so
         they carry no information and are not included."""
+        return self._build_priv_tail(self._live_bias, self._precise_bias)
+
+    def _build_priv_tail(self, live_bias, precise_bias):
+        """Build the shared tail layout with the supplied object-bias slots."""
         cube_quat = self.data.qpos[self.cube_qpos_idx + 3:self.cube_qpos_idx + 7]
         cube_rot = np.empty(3)
         mujoco.mju_quat2Vel(cube_rot, cube_quat, 1.0)
-        true_sqrtm = sqrtm_upper(box_sqrtm(
-            self.data.geom_xmat[self.cube_geom_id].reshape(3, 3),
-            self.cube_half_extents))
         # Free-joint qvel: linear (world frame) + angular (body frame).
         cube_vel = self.data.qvel[self.cube_dofadr:self.cube_dofadr + 6]
         fixed_contact, moving_contact = self._jaw_contact_flags()
-        parts = [self._get_cube_pos(), cube_rot, true_sqrtm, cube_vel,
+        parts = [self._get_cube_pos(), cube_rot, cube_vel,
                  [float(fixed_contact), float(moving_contact)],
                  self._qpos_bias, self._marker_pos_bias.flatten()]
         if self.marker_include_rot:
             parts.append(self._marker_rot_bias.flatten())
-        parts.extend([self._live_bias, self._precise_bias,
-                      [self._sqrtm_depth_spread], self._common_pos_bias,
+        parts.extend([live_bias, precise_bias, self._common_pos_bias,
                       [self._camera.pipeline_delay_s], self.cube_half_extents])
         return np.concatenate(parts)
 
-    def _compute_obs(self):
-        """Build the policy observation: [actor block | privileged tail].
+    def _compute_state_obs(self):
+        """Build one actor-state frame (the part repeated through history).
+
         qpos/qvel take the encoder path (fresh; qvel differenced like
         real/rollout_common.ArmLoop); markers serve the held per-tag
-        detections with their ages; the cube channels serve the shared
-        dual-channel state (src/shape_obs.py); the tail is critic-only ground
-        truth (_priv_tail)."""
+        detections with their ages; the live object channel uses the shared
+        hold/age state. The BPS block and privileged tail are separate."""
         qpos, qvel = self._encoder_obs()
         markers, marker_age = self._tag_obs(
             self._held_marker_pos, self._held_marker_rot,
             self._marker_last_capture_t)
-        live, live_age, center, sqrtm6, precise_age = \
-            self._obj.serve(self.data.time)
+        live, live_age = self._obj.serve(self.data.time)
         return np.concatenate([qpos, qvel, markers, marker_age,
-                               live, [live_age], center, sqrtm6, [precise_age],
-                               self._obs_extra(live),
-                               self._prev_actions.flatten(),
-                               self._priv_tail()]).astype(np.float32)
+                               live, [live_age], self._obs_extra(live),
+                               self._prev_actions.flatten()]).astype(np.float32)
 
     def _serve_obs(self, reset: bool):
-        """The observation the env actually returns: this tick's single-frame
-        [actor block | priv tail] from _compute_obs, with the actor block fed
-        through the lag-tap history — [actor(t) | actor(t-tap) ... | priv
-        tail]. On reset the boot frame seeds the whole buffer (no history
-        exists yet; the real rollout scripts boot the same way)."""
-        full = self._compute_obs()
-        actor, priv = full[:self.obs_dim], full[self.obs_dim:]
-        tapped = self._history.reset(actor) if reset else self._history.push(actor)
-        return np.concatenate([tapped, priv])
+        """Return ``[state taps | current BPS | privileged tail]``.
+
+        On reset the boot state seeds every history slot; BPS and the tail are
+        each served once at the current instant.
+        """
+        state = self._compute_state_obs()
+        tapped = self._history.reset(state) if reset else self._history.push(state)
+        return np.concatenate([
+            tapped,
+            self._bps_state.serve(self.data.time).flat(),
+            self._priv_tail(),
+        ]).astype(np.float32)
 
     def privileged_obs(self):
         """The observation a marker_always_visible=true policy would see on the
         current state: every tag pose fresh (the always-updated privileged
         mirror, no hold-last-pose and no dropout), sharing the paired
-        _compute_obs's encoder read, task extras, and prev-actions so the two
+        policy observation's encoder read, task extras, and prev-actions so the two
         views differ only in the tag channels. The distillation teacher view
-        (src/distill.py). Call once, immediately after the tick's _compute_obs."""
+        (src/distill.py). Call once, immediately after the tick's policy observation."""
         assert self._last_encoder_obs is not None, \
-            "privileged_obs() needs a _compute_obs earlier this tick"
+            "privileged_obs() needs a policy observation earlier this tick"
         qpos, qvel = self._last_encoder_obs
         markers, marker_age = self._tag_obs(
             self._held_marker_pos_priv, self._held_marker_rot_priv,
             self._marker_last_capture_t_priv)
-        live, live_age, center, sqrtm6, precise_age = \
-            self._obj_state_priv.serve(self.data.time)
+        live, live_age = self._obj_state_priv.serve(self.data.time)
         return np.concatenate([qpos, qvel, markers, marker_age,
-                               live, [live_age], center, sqrtm6, [precise_age],
+                               live, [live_age],
                                self._obs_extra(live),
                                self._prev_actions.flatten(),
+                               self._bps_state.serve(self.data.time).flat(),
                                self._priv_tail()]).astype(np.float32)
+
+    def legacy_tag_obs(self):
+        """Fresh single-frame observation for tag-policy distillation only.
+
+        This is the one supported migration bridge from the last sponge-tag
+        teacher. The deployed BPS actor never calls it, and the sponge tag
+        remains evaluation-only everywhere else.
+        """
+        assert self._last_encoder_obs is not None, \
+            "legacy_tag_obs() needs a policy observation earlier this tick"
+        qpos, qvel = self._last_encoder_obs
+        markers, marker_age = self._tag_obs(
+            self._held_marker_pos_priv, self._held_marker_rot_priv,
+            self._marker_last_capture_t_priv)
+        (cube_tag_pos,), (cube_tag_rot,) = marker_world_poses(
+            self.data, [self.cube_tag_site_id])
+        cube_age = float(np.clip(
+            self.data.time - np.max(self._marker_last_capture_t_priv),
+            0.0, MARKER_AGE_CAP_S))
+        return np.concatenate([
+            qpos, qvel, markers, marker_age,
+            cube_tag_pos, cube_tag_rot, [cube_age],
+            self._obs_extra(cube_tag_pos), self._prev_actions.flatten(),
+            self._legacy_tag_priv_tail(),
+        ]).astype(np.float32)
+
+    def _legacy_tag_priv_tail(self):
+        """Exact critic-tail semantics of the final tag-observation teacher.
+
+        The retired cube-tag position/rotation bias slots are zero because the
+        migration bridge reads the evaluation tag directly. Keeping those slots
+        distinct from the new live/BPS center biases prevents an old teacher's
+        critic from receiving unrelated latent values.
+        """
+        return self._build_priv_tail(np.zeros(3), np.zeros(3))
 
     def _jaw_contact_flags(self):
         """(fixed, moving): whether each gripper jaw currently touches the cube."""
@@ -1309,10 +1336,6 @@ class SO101BaseEnv(SO101ArmEnv):
                                                size=(N_MARKERS, 3))
             self._live_bias = rng.normal(0, self.obs_bias["live_sigma"], size=3)
             self._precise_bias = rng.normal(0, self.obs_bias["precise_sigma"], size=3)
-            # One-signed: a silhouette intersection can only ever ADD volume,
-            # so the hull's depth spread is a magnitude, not a signed offset.
-            self._sqrtm_depth_spread = abs(
-                rng.normal(0, self.obs_bias["sqrtm_depth_sigma"]))
             # Shared across all camera-derived positions (see _common_pos_bias
             # init): one draw the whole episode, added to every marker and both
             # cube channels in _process_frame.
@@ -1322,6 +1345,7 @@ class SO101BaseEnv(SO101ArmEnv):
         self._held_marker_rot[:] = 0.0
         self._marker_last_capture_t[:] = -np.inf
         self._obj = ObjectChannelDriver()
+        self._bps_state = BPSObsState()
         self._obj_state_priv = ObjectObsState()
         capture_t, frame = self._camera.reset(self.np_random, self.data.time,
                                               self._capture_camera_state(),
@@ -1386,7 +1410,7 @@ class SO101BaseEnv(SO101ArmEnv):
             self._ingest_frame(capture_t, frame)
         self._markers_hidden_total += N_MARKERS - int(self._cam_frame.detected.sum())
         self._live_hidden_total += not self._cam_frame.live_detected
-        self._precise_age_sum += self._obj.serve(self.data.time)[4]
+        self._precise_age_sum += self._bps_state.serve(self.data.time).age_s
 
         truncated = self.step_count >= self.max_steps
         if terminated or truncated:
@@ -1404,7 +1428,7 @@ class SO101BaseEnv(SO101ArmEnv):
                 self._markers_hidden_total / (self.step_count * N_MARKERS)
             # Fraction of steps the live channel had no both-view measurement,
             # and the mean served precise-channel age — the two health signals
-            # of the dual-channel cube obs.
+            # of the live-plus-BPS cube observation.
             info["live_hidden_ratio"] = self._live_hidden_total / self.step_count
             info["precise_age_mean"] = self._precise_age_sum / self.step_count
             self._on_episode_end(info)

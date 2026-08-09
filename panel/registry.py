@@ -163,27 +163,17 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ScriptSpec(
         id="rollout_lift", title="Rollout: lift", page="real",
         module="real.rollout.rollout_lift", arg_style="argparse",
-        description="Lift policy on the real arm. Marker source 'camera' tracks "
-                    "the real sponge tag-free (SAM stereo dual channels); 'fk' "
-                    "uses a lockstep sim cube through the same channel logic. "
-                    "Dry-run unless Execute is checked.",
+        description="Lift policy on the real arm with the lockstep FK+BPS "
+                    "object source. Real camera mode remains withheld until the "
+                    "Stage 5 dense worker is complete. Dry-run unless Execute is checked.",
         args=(
             ArgSpec("--model", "str", "Model (latest / best / path)", default="latest",
                     checkpoint_picker="ppo_lift"),
             *_arm_loop_args(),
             ArgSpec("--seed", "int", "Cube spawn seed"),
             ArgSpec("--no-view", "flag", "Disable native MuJoCo viewer"),
-            ArgSpec("--marker-source", "choice", "Marker obs source", default="fk",
-                    choices=("fk", "camera")),
-            ArgSpec("--family", "choice", "Marker family (camera source)", default="apriltag",
-                    choices=("apriltag", "aruco")),
-            ArgSpec("--prompt", "str", "SAM3 text prompt (camera source)",
-                    default="sponge"),
-            ArgSpec("--sam2-model", "choice", "SAM2 tracker size (camera source)",
-                    default="tiny", choices=("tiny", "base+")),
-            ArgSpec("--gui", "flag", "Mask/ellipse overlay windows (camera source)"),
         ),
-        resources=(Resource.SERIAL, Resource.CAMERA),
+        resources=(Resource.SERIAL,),
         supports_stream=True,
         stream_extra_args=("--no-view",),
     ),
@@ -279,24 +269,6 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         native_gui=True,
     ),
     ScriptSpec(
-        id="view_object_estimate", title="View sponge observation", page="camera",
-        module="real.tracking.view_object_estimate", arg_style="argparse",
-        description="Live MuJoCo + stereo-camera comparison of calibrated sponge-tag "
-                    "ground truth against the tag-free SAM live centroid and held "
-                    "visual-hull center/sqrtM observation.",
-        args=(
-            ArgSpec("--prompt", "str", "SAM3 text prompt", default="sponge"),
-            ArgSpec("--sam2-model", "choice", "SAM2 tracker size", default="tiny",
-                    choices=("tiny", "base+")),
-            ArgSpec("--family", "choice", "Marker family", default="apriltag",
-                    choices=("apriltag", "aruco")),
-            ArgSpec("--frames", "int", "Frame limit (0 runs until closed)", default="0"),
-            ArgSpec("--no-camera-view", "flag", "Show only the MuJoCo window"),
-        ),
-        resources=(Resource.CAMERA,),
-        native_gui=True,
-    ),
-    ScriptSpec(
         id="align_stereo_rig", title="Align stereo camera mount", page="camera",
         module="real.calib.align_stereo_rig", arg_style="argparse",
         description="Measure baseline/orientation and configured-workspace margins "
@@ -365,8 +337,8 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         id="record_shapes", title="Record shape dataset", page="camera",
         module="real.tracking.record_shapes", arg_style="argparse",
         description="Record dual-camera frames + tag GT + static labels into "
-                    "datasets/sponge_<stamp>/ for offline estimator evaluation "
-                    "(masks computed later by eval_estimator). Opens the shared "
+                    "datasets/sponge_<stamp>/ for offline stereo evaluation "
+                    "(SAM masks are cached on demand). Opens the shared "
                     "annotated stereo status viewer by default.",
         args=(
             ArgSpec("--minutes", "float", "Recording length (minutes)", default="10"),
