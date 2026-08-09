@@ -414,6 +414,29 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         ),
     ),
     ScriptSpec(
+        id="view_dense_stereo", title="View dense stereo", page="camera",
+        module="real.tracking.view_dense_stereo", arg_style="argparse",
+        description="Inspect the frozen StereoSGBM disparity, confidence and "
+                    "filtered cloud against tag-derived GT on synchronized "
+                    "offline dataset frames.",
+        args=(
+            ArgSpec("--dataset", "str", "Prepared tagged sponge dataset directory"),
+            ArgSpec("--calibration", "str", "Accepted stereo calibration YAML"),
+            ArgSpec("--sam2-model", "choice", "Cached SAM2 tracker size",
+                    default="tiny", choices=("tiny", "base+")),
+            ArgSpec("--source", "choice", "Stereo input imagery",
+                    default="inpainted", choices=("inpainted", "raw")),
+            ArgSpec("--split", "choice", "Placement split", default="held-out",
+                    choices=("held-out", "development")),
+            ArgSpec("--frame-k", "int", "Starting recorded frame number"),
+            ArgSpec("--fps", "float", "Playback rate", default="10"),
+            ArgSpec("--display-scale", "float", "OpenCV mosaic scale",
+                    default="0.65"),
+            ArgSpec("--no-mujoco", "flag", "Disable the 3D cloud window"),
+        ),
+        native_gui=True,
+    ),
+    ScriptSpec(
         id="focus_picker", title="Focus picker", page="camera",
         module="real.calib.focus_picker", arg_style="argparse",
         description="Interactively pick the pinned focus_absolute value (native cv2 window).",

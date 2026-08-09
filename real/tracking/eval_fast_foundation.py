@@ -197,7 +197,8 @@ def evaluate_fast(records, indices, root, source, config, candidate,
             workspace_xy)
 
     return evaluate_results(
-        records, indices, result_for_index, source, half_extents, workspace_xy)
+        records, indices, result_for_index, source, half_extents, workspace_xy,
+        preprocessor)
 
 
 def main():

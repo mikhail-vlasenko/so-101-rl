@@ -8,6 +8,12 @@ and tunes a small configured StereoSGBM grid on whole development placements.
 Only after the winning candidate is frozen does it evaluate held-out placement
 windows and compare tag-inpainted against raw-tag imagery.
 
+The final report includes surface error, camera-depth bias/scatter, visible
+surface coverage, static temporal jitter, correspondence rejection, point
+counts by pose slice, scoped matcher/filter latency, and dataset-level
+disappearance/held-age behavior. Inspect its synchronized clouds with
+``real.tracking.view_dense_stereo``.
+
 Run:
     conda run --no-capture-output -n mujoco_env python -m \
         real.tracking.eval_dense_stereo --dataset datasets/sponge_<stamp>
@@ -268,6 +274,86 @@ def visible_windows(root: Path, records: list[dict], windows: list[list[int]],
                 root, records, window, min_mask_area_px))]
 
 
+def _record_time(record: dict) -> float:
+    return float(np.mean([record["t"][name] for name in record["t"]]))
+
+
+def visibility_sequence_report(root: Path, records: list[dict],
+                               static_labels: list[bool],
+                               min_mask_area_px: int) -> dict:
+    """Describe disappearance, reacquisition and held-cloud age in one session."""
+    visible = []
+    for record in records:
+        areas = []
+        for name in ("main", "aux"):
+            path = _cache_image_path(root, "masks", record, name, "png")
+            mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                raise RuntimeError(f"missing prepared mask {path}")
+            areas.append(int(np.count_nonzero(mask)))
+        visible.append(all(area >= min_mask_area_px for area in areas))
+
+    times = np.asarray([_record_time(record) for record in records])
+    disappearance_starts = []
+    reacquisitions = []
+    seen_visible = False
+    for index, is_visible in enumerate(visible):
+        if is_visible:
+            if seen_visible and index > 0 and not visible[index - 1]:
+                reacquisitions.append(index)
+            seen_visible = True
+        elif seen_visible and index > 0 and visible[index - 1]:
+            disappearance_starts.append(index)
+
+    complete_gaps = []
+    refresh_delays = []
+    unrecovered = 0
+    for reacquired in reacquisitions:
+        start = reacquired - 1
+        while start > 0 and not visible[start - 1]:
+            start -= 1
+        complete_gaps.append(float(times[reacquired] - times[start]))
+        refresh = next((index for index in range(reacquired, len(records))
+                        if visible[index] and static_labels[index]), None)
+        if refresh is None:
+            unrecovered += 1
+        else:
+            refresh_delays.append(float(times[refresh] - times[reacquired]))
+
+    held_ages = []
+    last_refresh = None
+    for index, (is_visible, is_static_label) in enumerate(
+            zip(visible, static_labels)):
+        if is_visible and is_static_label:
+            last_refresh = times[index]
+        if last_refresh is not None:
+            held_ages.append(float(times[index] - last_refresh))
+
+    def duration_summary(values):
+        array = np.asarray(values, dtype=np.float64)
+        return {
+            "count": int(array.size),
+            "median": float(np.median(array)) if array.size else None,
+            "max": float(np.max(array)) if array.size else None,
+        }
+
+    held = np.asarray(held_ages, dtype=np.float64)
+    return {
+        "both_views_visible_fraction": float(np.mean(visible)),
+        "disappearance_events": len(disappearance_starts),
+        "reacquisition_events": len(reacquisitions),
+        "complete_disappearance_duration_s": duration_summary(complete_gaps),
+        "static_refresh_delay_after_reacquisition_s": {
+            **duration_summary(refresh_delays),
+            "unrecovered_events": unrecovered,
+        },
+        "held_cloud_age_s": {
+            "p95": float(np.percentile(held, 95)) if held.size else None,
+            "max": float(np.max(held)) if held.size else None,
+        },
+    }
+
+
 def rectified_workspace_depths(records: list[dict], indices: list[int],
                                preprocessor: StereoPreprocessor,
                                half_extents: np.ndarray) -> np.ndarray:
@@ -294,6 +380,64 @@ def box_signed_distance(points_base: np.ndarray, center: np.ndarray,
     outside = np.linalg.norm(np.maximum(q, 0.0), axis=1)
     inside = np.minimum(np.max(q, axis=1), 0.0)
     return outside + inside
+
+
+def closest_box_surface(points_base: np.ndarray, center: np.ndarray,
+                        rotation: np.ndarray,
+                        half_extents: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Closest cuboid-surface points and stable face IDs in the base frame."""
+    points = np.asarray(points_base, dtype=np.float64).reshape(-1, 3)
+    local = (points - center) @ rotation
+    closest_local = np.clip(local, -half_extents, half_extents)
+    inside = np.all(np.abs(local) <= half_extents, axis=1)
+    if np.any(inside):
+        inside_indices = np.flatnonzero(inside)
+        axes = np.argmin(half_extents - np.abs(local[inside]), axis=1)
+        signs = np.where(local[inside_indices, axes] >= 0.0, 1.0, -1.0)
+        closest_local[inside_indices, axes] = signs * half_extents[axes]
+    face_axes = np.argmin(
+        np.abs(np.abs(closest_local) - half_extents), axis=1)
+    rows = np.arange(points.shape[0])
+    face_signs = closest_local[rows, face_axes] >= 0.0
+    face_ids = 2 * face_axes + face_signs.astype(np.int64)
+    return closest_local @ rotation.T + center, face_ids
+
+
+def box_surface_coverage(points_base: np.ndarray, center: np.ndarray,
+                         rotation: np.ndarray, half_extents: np.ndarray,
+                         cell_size_m: float) -> tuple[float, float]:
+    """Approximate cuboid area observed by points using fixed surface cells."""
+    if cell_size_m <= 0.0:
+        raise ValueError("surface cell size must be positive")
+    points = np.asarray(points_base, dtype=np.float64).reshape(-1, 3)
+    if points.shape[0] == 0:
+        return 0.0, 0.0
+    closest, faces = closest_box_surface(
+        points, center, rotation, half_extents)
+    local = (closest - center) @ rotation
+    covered_area = 0.0
+    total_area = 0.0
+    for face in range(6):
+        axis = face // 2
+        tangent = [value for value in range(3) if value != axis]
+        widths = 2.0 * half_extents[tangent]
+        counts = np.ceil(widths / cell_size_m).astype(int)
+        cell_areas = np.empty((counts[0], counts[1]), dtype=np.float64)
+        for row in range(counts[0]):
+            height = min(cell_size_m, widths[0] - row * cell_size_m)
+            for column in range(counts[1]):
+                width = min(cell_size_m, widths[1] - column * cell_size_m)
+                cell_areas[row, column] = height * width
+        total_area += float(cell_areas.sum())
+        selected = local[faces == face][:, tangent]
+        if selected.shape[0] == 0:
+            continue
+        bins = np.floor(
+            (selected + half_extents[tangent]) / cell_size_m).astype(int)
+        bins = np.clip(bins, 0, counts - 1)
+        unique = np.unique(bins, axis=0)
+        covered_area += float(cell_areas[unique[:, 0], unique[:, 1]].sum())
+    return covered_area / total_area, covered_area
 
 
 def _frame_slice(record: dict, workspace_low: np.ndarray,
@@ -380,19 +524,23 @@ def evaluate_candidate(records: list[dict], indices: list[int], root: Path,
                        minimum: int, count: int,
                        preprocessor: StereoPreprocessor,
                        half_extents: np.ndarray,
-                       workspace_xy: tuple[np.ndarray, np.ndarray]):
+                       workspace_xy: tuple[np.ndarray, np.ndarray],
+                       windows: list[list[int]] | None = None):
     def result_for_index(index):
         return run_frame(
             root, records[index], source, candidate, minimum, count,
             preprocessor, workspace_xy)
 
     return evaluate_results(
-        records, indices, result_for_index, source, half_extents, workspace_xy)
+        records, indices, result_for_index, source, half_extents, workspace_xy,
+        preprocessor, windows)
 
 
 def evaluate_results(records: list[dict], indices: list[int], result_for_index,
                      label: str, half_extents: np.ndarray,
-                     workspace_xy: tuple[np.ndarray, np.ndarray]):
+                     workspace_xy: tuple[np.ndarray, np.ndarray],
+                     preprocessor: StereoPreprocessor,
+                     windows: list[list[int]] | None = None):
     """Backend-independent tag-GT aggregation over frozen frame results."""
     absolute_errors = []
     outside_catastrophic = 0
@@ -400,14 +548,38 @@ def evaluate_results(records: list[dict], indices: list[int], result_for_index,
     frame_counts = []
     rejected = []
     latencies = []
+    depth_residuals = []
+    coverage_fractions = []
+    coverage_areas = []
     slices: dict[str, list[int]] = {}
+    slice_coverage: dict[str, list[float]] = {}
     per_frame = []
+    window_for_index = {
+        index: window_id
+        for window_id, window in enumerate(windows or ())
+        for index in window
+    }
+    window_signed_medians: dict[int, list[float]] = {}
     for progress, index in enumerate(indices, 1):
         record = records[index]
         result = result_for_index(index)
         center, rotation = gt_pose(record)
         signed = box_signed_distance(
             result["points"], center, rotation, half_extents)
+        surface, _ = closest_box_surface(
+            result["points"], center, rotation, half_extents)
+        main = _anchor_transform(record, "main")
+        if main is not None and surface.shape[0]:
+            T_base_rectified = T_base_rectified_main(
+                main, preprocessor.rectification)
+            depth_axis = T_base_rectified[:3, 2]
+            depth_residuals.append(
+                (result["points"] - surface) @ depth_axis)
+        coverage_fraction, coverage_area = box_surface_coverage(
+            result["points"], center, rotation, half_extents,
+            preprocessor.config.voxel_size_m)
+        coverage_fractions.append(coverage_fraction)
+        coverage_areas.append(coverage_area)
         absolute_errors.append(np.abs(signed))
         outside_catastrophic += int(np.count_nonzero(signed > 0.02))
         total_points += signed.size
@@ -417,22 +589,37 @@ def evaluate_results(records: list[dict], indices: list[int], result_for_index,
         latencies.append(result["stereo_ms"] + result["filter_ms"])
         slice_name = _frame_slice(record, *workspace_xy)
         slices.setdefault(slice_name, []).append(signed.size)
+        slice_coverage.setdefault(slice_name, []).append(coverage_fraction)
+        if index in window_for_index and signed.size:
+            window_signed_medians.setdefault(
+                window_for_index[index], []).append(float(np.median(signed)))
         per_frame.append({
             "k": int(record["k"]),
             "slice": slice_name,
             "valid_points": int(signed.size),
             "left_mask_pixels": int(result["left_mask_pixels"]),
+            "surface_coverage_fraction": float(coverage_fraction),
         })
         if progress % 50 == 0:
             print(f"  {label} {progress}/{len(indices)}", flush=True)
     errors = (np.concatenate(absolute_errors) if absolute_errors
               else np.empty(0, dtype=np.float64))
     counts_array = np.asarray(frame_counts)
+    depth_errors = (np.concatenate(depth_residuals) if depth_residuals
+                    else np.empty(0, dtype=np.float64))
+    coverage_array = np.asarray(coverage_fractions, dtype=np.float64)
+    coverage_area_array = np.asarray(coverage_areas, dtype=np.float64)
+    window_jitter = np.asarray([
+        np.std(values) for values in window_signed_medians.values()
+        if len(values) >= 2
+    ], dtype=np.float64)
     slice_report = {
         name: {
             "frames": len(values),
             "median_valid_points": float(np.median(values)),
             "min_valid_points": int(np.min(values)),
+            "median_surface_coverage_fraction": float(
+                np.median(slice_coverage[name])),
         }
         for name, values in sorted(slices.items())
     }
@@ -445,6 +632,31 @@ def evaluate_results(records: list[dict], indices: list[int], result_for_index,
             if errors.size else math.inf,
             "p95": float(np.percentile(errors, 95) * 1000.0)
             if errors.size else math.inf,
+        },
+        "camera_depth_residual_mm": {
+            "bias_mean": float(np.mean(depth_errors) * 1000.0)
+            if depth_errors.size else math.nan,
+            "bias_median": float(np.median(depth_errors) * 1000.0)
+            if depth_errors.size else math.nan,
+            "scatter_std": float(np.std(depth_errors) * 1000.0)
+            if depth_errors.size else math.nan,
+            "p95_absolute": float(np.percentile(np.abs(depth_errors), 95) * 1000.0)
+            if depth_errors.size else math.nan,
+        },
+        "surface_coverage": {
+            "fraction_median": float(np.median(coverage_array))
+            if coverage_array.size else 0.0,
+            "fraction_p05": float(np.percentile(coverage_array, 5))
+            if coverage_array.size else 0.0,
+            "area_cm2_median": float(np.median(coverage_area_array) * 1e4)
+            if coverage_area_array.size else 0.0,
+        },
+        "static_point_to_surface_jitter_mm": {
+            "windows": int(window_jitter.size),
+            "median": float(np.median(window_jitter) * 1000.0)
+            if window_jitter.size else math.nan,
+            "p95": float(np.percentile(window_jitter, 95) * 1000.0)
+            if window_jitter.size else math.nan,
         },
         "catastrophic_outside_fraction": (
             outside_catastrophic / max(total_points, 1)),
@@ -460,6 +672,7 @@ def evaluate_results(records: list[dict], indices: list[int], result_for_index,
             "median": float(np.median(latencies)),
             "p95": float(np.percentile(latencies, 95)),
         },
+        "latency_scope": "cached_rectified_pair_to_filtered_voxel_cloud",
         "slices": slice_report,
         "worst_frames": sorted(
             per_frame, key=lambda item: (item["valid_points"], item["k"]))[:12],
@@ -592,10 +805,12 @@ def main():
 
     held_inpainted = evaluate_candidate(
         records, held_out_indices, root, "inpainted", winner,
-        minimum, count, preprocessor, half_extents, workspace_xy)
+        minimum, count, preprocessor, half_extents, workspace_xy,
+        visible_held_out_windows)
     held_raw = evaluate_candidate(
         records, held_out_indices, root, "raw", winner,
-        minimum, count, preprocessor, half_extents, workspace_xy)
+        minimum, count, preprocessor, half_extents, workspace_xy,
+        visible_held_out_windows)
     gates = {
         "median_surface_error": held_inpainted["surface_error_mm"]["median"] <= 3.0,
         "p95_surface_error": held_inpainted["surface_error_mm"]["p95"] <= 8.0,
@@ -615,6 +830,8 @@ def main():
         "development": development_reports,
         "held_out_tag_inpainted": held_inpainted,
         "held_out_raw_tag": held_raw,
+        "dataset_sequence": visibility_sequence_report(
+            root, records, labels, config.min_mask_area_px),
         "gates": gates,
         "passes_all_gates": all(gates.values()),
     }

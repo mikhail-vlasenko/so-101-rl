@@ -264,6 +264,34 @@ fails, treat that as a matcher compression/runtime gap and decide explicitly
 whether the slower model, a different Fast checkpoint or another optimized
 matcher is acceptable.
 
+### Stage 2 result — complete
+
+The original 3,522-pair dataset
+`datasets/sponge_20260808_203620` was relabelled from its saved raw tag poses
+after suppressing pose-estimator jitter with a 150 ms causal mean. Sixteen of
+its 26 static placement windows are inside the policy workspace; 12 were used
+for development and four whole placements were held out.
+
+Freeze OpenCV StereoSGBM with block size 7, uniqueness ratio 15, 150-pixel
+speckle window, speckle range 2 and left/right maximum difference 2. On 144
+held-out tag-inpainted frames it produced 1.35 mm median / 5.12 mm p95 cuboid
+surface error, zero catastrophic outliers and at least 627 filtered points in
+every frame. Median camera-depth bias/scatter were 0.09/1.40 mm, median static
+point-to-surface jitter was 0.25 mm, and the median visible surface coverage
+was 23.0 cm². Cached rectified-pair through filtered-voxel-cloud time was
+17.8 ms median / 20.3 ms p95. Raw tags improve the numbers only slightly; the
+tag-inpainted acceptance path passes every fixed gate, so neither neural stereo
+backend is selected.
+
+`real.tracking.view_dense_stereo` provides the synchronized rectified pair,
+disparity, left/right confidence, orthographic cloud/GT views and optional 3D
+MuJoCo cloud viewer. The current recording has no disappearance after initial
+acquisition, so it cannot measure true reacquisition delay. A broader
+supplementary capture and its disappearance/reacquisition check are deferred.
+The full capture-to-cloud latency benchmark is also intentionally deferred:
+precise refresh is static-gated, and the measured matcher/filter path is far
+inside the 100 ms budget.
+
 References:
 
 - FoundationStereo: <https://github.com/NVlabs/FoundationStereo>
