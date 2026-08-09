@@ -11,10 +11,10 @@ Unresolved, actionable work only. Not a changelog or project-status document.
   checkerboard calibration, the table-anchor reference capture, and both
   `real.diagnostics.snapshot_cam_mount` camera snapshots.
 - **Replace the precise object channel with the accepted StereoSGBM cloud.**
-  Follow the [dense-stereo BPS plan](.claude/plans/dense_stereo_bps.md): freeze
-  the grid on the development split, validate its task-relevant geometry on
-  tagged held-out clouds, then integrate its current/held block into the policy
-  observation.
+  Follow the [dense-stereo BPS plan](.claude/plans/dense_stereo_bps.md):
+  implement the fixed 64-point transform, validate its normalization, clipping
+  and jitter behavior on cached real clouds, then integrate its current/held
+  block into the policy observation.
 - **Pickplace `ObjectSource` rollout.** `rollout_lift` consumes the dual
   channels; after the dense-stereo observation interface lands, add the
   equivalent pickplace source with a real-table target, ring pose, and

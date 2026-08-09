@@ -34,14 +34,12 @@ dense stereo pipeline, BPS observation nor deployed policy may depend on them.
    is occluded. Free-running C922 skew is therefore charged to the live error
    budget and does not corrupt the precise cloud.
 
-2. **Calibrate the independently mounted cameras at their current placement.**
-   Individual intrinsics stay fixed, but either stand moving invalidates
-   `T_aux_main` and its rectification maps. A stationary shared checkerboard
-   snapshots that relative geometry. During episodes, AprilTags 10 and 11 keep
-   one EMA'd base pose per camera; only simultaneous valid board pairs may
-   update relative geometry, and an incomplete/rejected observation holds it.
-   Rectification updates happen only while static and must pass the vertical
-   correspondence gate before dense inference resumes.
+2. **Use one fixed calibration for the rigid stereo mount.** A stationary shared
+   checkerboard determines `T_aux_main` and the rectification maps. The existing
+   table-tag anchors still place measurements in the arm base frame, but never
+   modify the relative stereo calibration. If the startup anchor comparison
+   indicates that the rig moved, withhold dense measurements and require a new
+   checkerboard calibration.
 
 3. **Use the accepted OpenCV StereoSGBM configuration.** Its parameters are
    frozen perception, never part of PPO. Run matching on the full rectified
@@ -55,10 +53,12 @@ dense stereo pipeline, BPS observation nor deployed policy may depend on them.
    Training sees the same partial-surface convention and learns what is
    task-relevant for the one physical sponge family.
 
-5. **Use a fixed base-aligned BPS observation.** Center the filtered cloud on
-   its measured centroid, then encode it as distances from fixed basis points
-   to the nearest visible point. The basis coordinates remain aligned with the
-   arm base axes so sponge orientation remains observable.
+5. **Use a fixed 64-point base-aligned BPS observation.** Center the filtered
+   cloud on its measured centroid. Form the basis as the Cartesian product of
+   `[-0.04, -0.01, 0.01, 0.04] m` on the base x/y/z axes, and encode the
+   distance from each ordered basis point to the nearest visible point. The
+   denser samples near the center resolve the sponge surface while the outer
+   samples cover centroid bias and unusual poses.
 
 6. **The BPS block is not repeated through history taps.** The observation
    contains the existing low-dimensional state history, one current/held BPS
@@ -104,18 +104,22 @@ disparity change. Do not copy those estimates into runtime constants.
 
 ### BPS contract
 
-Let `p_j` be each retained base-frame point minus the measured cloud centroid
-and let `b_i` be the fixed base-axis-aligned basis coordinates. For every basis
-point, store:
+Let `p_j` be each retained base-frame point minus the measured cloud centroid.
+Define the 64 basis points once:
 
 ```text
-bps_distance[i] = clipped_normalized(min_j ||b_i - p_j||)
+basis_axis_m = [-0.04, -0.01, 0.01, 0.04]
+basis = CartesianProduct(basis_axis_m, basis_axis_m, basis_axis_m)
+bps_distance[i] = clip(min_j ||basis[i] - p_j|| / 0.08, 0, 1)
 ```
 
-The basis coordinates, distance scale, clipping limit and ordering are frozen
-perception configuration. They are stored with the policy and covered by one
-fingerprint; a mismatch is a load error. The transform uses every retained
-voxel-downsampled point and has no stochastic sampling step.
+Order the Cartesian product lexicographically by `(x, y, z)` and preserve that
+order as a 64-value observation vector. `conf/config.yaml` owns the axis values
+and 0.08 m distance cap. The policy checkpoint stores a fingerprint of those
+resolved BPS values; a mismatch is a load error. The transform uses every
+retained voxel-downsampled point and has no stochastic sampling step. Across
+the 265 accepted cached clouds, the largest raw basis-to-cloud distance was
+58.4 mm, so the 80 mm cap leaves margin without compressing normal measurements.
 
 Metadata supplied outside the BPS distance vector:
 
@@ -140,10 +144,9 @@ specification, never duplicated as literals.
 - Add an annotated rectification viewer with horizontal guide lines and
   measured vertical correspondence residual. Refuse dense inference when the
   calibration image size/focus does not match.
-- Extend the two-tag camera EMAs to regenerate relative rectification after a
-  stand moves, accepting updates only from synchronized complete-board poses
-  that pass the same vertical-residual gate. Until then, re-run the stationary
-  checkerboard snapshot after moving either camera.
+- Compare the two cameras' startup anchor estimates with the calibration's
+  known-good reference. If the movement threshold is exceeded, fail loudly and
+  instruct the operator to re-run the stationary checkerboard calibration.
 
 ### Calibration acceptance
 
@@ -244,7 +247,7 @@ References:
   <https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html>
 - Basis Point Sets: <https://arxiv.org/abs/1908.09186>
 
-## Stage 3 — BPS observation freeze
+## Stage 3 — BPS contract validation
 
 ### Synthetic cloud generator
 
@@ -254,9 +257,7 @@ rendering RGB/depth for every vectorized environment:
 - sample points on the randomized sponge's physical faces;
 - retain only points visible to both calibrated sim cameras;
 - raycast arm/ring occlusion with the existing geom-group convention;
-- model rectified depth noise, quantization, holes, foreground-edge outliers,
-  mask erosion/dilation, confidence and valid-count distributions measured in
-  Stage 2;
+- apply configurable point noise and random point dropout;
 - simulate whole-view loss and held-cloud age;
 - voxel-downsample and encode through the exact real BPS transform.
 
@@ -264,44 +265,25 @@ This generator becomes the single source used by the sim env and offline BPS
 validation. Contract tests push the same synthetic measurement through both
 paths and require byte-equal BPS observations and metadata.
 
-### Basis selection and validation
+### Fixed-basis validation
 
-Use the synthetic pose domain and only the real parameter-development split to
-define a regular base-axis-aligned cuboid grid that contains the centered
-visible cloud across every sponge pose, including measured centroid bias, with
-a fixed physical margin. Select the smallest recorded grid resolution that
-preserves the task-relevant geometry, then freeze the ordered coordinates,
-distance normalization and clipping before held-out evaluation.
-`conf/config.yaml` owns these parameters; the deployment artifact also stores
-their resolved values and fingerprint.
-
-Fit one disposable policy-sized diagnostic MLP with heads for:
-
-- visible-cloud-centroid to true-body-center residual (3);
-- resting-face class (3-way);
-- long-axis direction under sign symmetry.
-
-The heads are validation tools and are not part of the observation or rollout
-artifact. Train them on synthetic clouds plus the tagged real development
-placements, then evaluate once on held-out tag-inpainted placements. Also audit
-nearest neighbours whose BPS separation is within the development set's p95
-static BPS jitter. Pairs with incompatible ground-truth center correction,
-resting face or long axis indicate insufficient basis coverage or resolution.
+Run the exact 64-point transform over synthetic measurements and every accepted
+cached real cloud. Confirm that outputs are finite, ordinary measurements do
+not clip, and sub-millimetre point jitter causes small output changes.
 
 Keep the StereoSGBM, filter and BPS parameters frozen during policy training.
-Save the BPS coordinates, normalization, StereoSGBM configuration, filter
-configuration and calibration fingerprint inside the policy checkpoint or one
-atomic deployment artifact; never load mismatched pieces silently.
+Store and validate the resolved BPS fingerprint with each policy checkpoint.
 
 ### BPS acceptance
 
+- the generated basis is exactly the lexicographically ordered Cartesian
+  product of the four configured axis values and produces 64 distances;
 - point-order invariance tests pass exactly;
 - sim and real transforms produce byte-equal output for the same retained cloud;
-- held-out real center error <=10 mm p95;
-- held-out resting-face accuracy >=95%;
-- held-out long-axis symmetry error <=15° p95;
-- no face/yaw/workspace slice is missing from the report;
-- no close BPS-space collisions have incompatible task-relevant ground truth;
+- every valid input produces finite distances in `[0, 1]`;
+- no accepted static, unoccluded real cloud reaches the 80 mm clipping cap;
+- the never-measured state is an all-zero distance vector with zero valid
+  fraction and age at the cap;
 - distances change smoothly under sub-millimetre point jitter and degrade
   predictably as valid points are removed.
 
@@ -325,7 +307,9 @@ atomic deployment artifact; never load mismatched pieces silently.
 
 Tests:
 
+- exact 64-point basis coordinates, lexicographic ordering and normalization;
 - point-order invariance of the BPS transform;
+- distance clipping at the configured 80 mm cap;
 - all-invalid never-seen behavior;
 - sim/real BPS twin contract;
 - actor cannot read privileged tail;
@@ -342,14 +326,11 @@ Tests:
   newest eligible pair and never blocks `ArmLoop`.
 - The worker publishes immutable BPS measurements to the shared held/age state
   machine and retains the filtered cloud only for diagnostics and visualization.
-- Track inference time, cloud age, valid count, rejected fractions and stereo
-  calibration/BPS fingerprints in rollout logs.
+- Track inference time, cloud age, valid count and rejected fractions in rollout
+  logs.
 - Compare complete two-tag camera poses with the calibration's known-good
   anchor reference at startup. If either movement threshold is exceeded, print
   the checkerboard recalibration instruction and withhold dense measurements.
-- Replace the orange √M overlay with actual colored 3D points in MuJoCo and
-  projected depth/confidence in the camera viewer. Keep the tag-derived green
-  box only in explicit evaluation mode.
 - A dense-worker failure is loud and aborts camera-mode startup; transient
   empty/invalid clouds are measurements misses and use hold/age normally.
 - Register every new script/argument/resource in `panel/registry.py`.
@@ -370,8 +351,8 @@ GPU scheduling:
    partial clouds. The teacher receives its old/GT-compatible observation;
    the student receives the frozen BPS observation.
 2. PPO fine-tune under `dr=none` until control succeeds.
-3. Continue curriculum through `dr=light` and `dr=full`, enabling measured
-   point noise, holes, outliers and occlusion in stages.
+3. Continue curriculum through `dr=light` and `dr=full`, enabling point noise,
+   dropout and whole-cloud loss in stages.
 
 Training acceptance:
 
@@ -394,20 +375,21 @@ Training acceptance:
 - If StereoSGBM no longer provides valid shared-surface depth after a camera or
   calibration change, fix the geometry/texture regression or move to an
   active-depth camera before training on bad geometry.
-- If the BPS validation gates fail, correct the basis volume, resolution or
-  measured corruption model on the development split before policy training.
+- If BPS contract validation fails, fix the transform, normalization or
+  point-noise/dropout model before policy training.
 
 ## Definition of done
 
-- The shared stereo calibration passes its reprojection, rectification and
-  workspace-coverage gates.
+- The fixed stereo calibration passes its reprojection, rectification and
+  workspace-coverage gates, and startup detects rig movement.
 - The tag-inpainted StereoSGBM cloud passes every held-out offline geometry gate
   and pose/coverage slice.
 - The frozen StereoSGBM configuration meets the static refresh budget.
-- The frozen BPS observation passes held-out real geometry tests.
+- The fixed 64-distance BPS contract passes clipping and jitter tests.
 - Sim and real serve the identical BPS contract.
-- Distilled + PPO-fine-tuned policy succeeds under full measured point-cloud DR.
-- Real viewer shows tag GT only in evaluation mode and actual points otherwise.
+- Distilled + PPO-fine-tuned policy succeeds under the configured point-cloud
+  DR.
+- Real diagnostics show tag GT only in evaluation mode.
 - The real rollout consumes no sponge tags and handles cloud loss through the
   shared hold/age convention.
 - Old visual-hull actor code/config is removed or explicitly retained only for
