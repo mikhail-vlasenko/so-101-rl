@@ -4,18 +4,17 @@ Unresolved, actionable work only. Not a changelog or project-status document.
 
 ## Tag-free object tracking (dual C922 + SAM), follow-ups
 
-- **Build a rigid shared stereo-camera mount.** Design a stiff ribbed printed
-  crossbar or printed camera adapters on an aluminium extrusion that preserve
-  the current ~109 mm baseline and overlapping views, provide repeatable camera
-  location and cable access, and preferably use one central stand rather than
-  over-constraining two stands. After installation, re-run stereo alignment,
+- **Build a rigid shared stereo-camera mount.** Follow the
+  [C922 stereo-camera brace plan](.claude/plans/c922_stereo_brace.md) to tie the
+  two tripod-mounted cameras together while preserving the current ~109 mm
+  baseline and overlapping views. After installation, re-run stereo alignment,
   checkerboard calibration, the table-anchor reference capture, and both
   `real.diagnostics.snapshot_cam_mount` camera snapshots.
 - **Replace the precise object channel with the accepted StereoSGBM cloud.**
-  Fit the known sponge cuboid to the held-out-quality visible point cloud and
-  silhouettes; retain an explicit center/symmetry observation if it passes tag
-  GT, otherwise pretrain the planned PointNet encoder before changing the
-  policy observation.
+  Follow the [dense-stereo BPS plan](.claude/plans/dense_stereo_bps.md): freeze
+  the grid on the development split, validate its task-relevant geometry on
+  tagged held-out clouds, then integrate its current/held block into the policy
+  observation.
 - **Pickplace `ObjectSource` rollout.** `rollout_lift` consumes the dual
   channels; after the dense-stereo observation interface lands, add the
   equivalent pickplace source with a real-table target, ring pose, and
