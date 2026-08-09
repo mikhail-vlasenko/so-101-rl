@@ -33,6 +33,7 @@ from real.calib.calibrate_qpos import (
 )
 from real.calib.calibration import load_calibration, load_compliance, save_calibration
 from real.calib.compliance import COMP_JOINTS, gravity_deflection
+from real.calib.extrinsics import mat_to_rt, rt_to_mat
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import load_joint_maps
 from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_model
@@ -128,6 +129,61 @@ def test_pan_bias_is_gauge_absorbed(setup):
     samples = synth_samples(model, data, jm, site_ids, b_true, T_base_cam, n=12, seed=2)
     b_est = solve_bias(samples, model, data, jm.qposadr(), site_ids)
     assert np.allclose(b_est, 0.0, atol=1e-4)   # camera absorbs the pan, biases stay 0
+
+
+def test_dual_camera_capture_averages_positions_in_main_frame():
+    T_aux_main = np.eye(4)
+    T_aux_main[:3, :3] = Rotation.from_euler(
+        "xyz", [2.0, -1.0, 3.0], degrees=True).as_matrix()
+    T_aux_main[:3, 3] = [-0.11, 0.004, -0.017]
+    T_main_tag = np.eye(4)
+    T_main_tag[:3, :3] = Rotation.from_euler(
+        "xyz", [10.0, 20.0, 30.0], degrees=True).as_matrix()
+    T_main_tag[:3, 3] = [0.08, -0.03, 0.42]
+    main_measured = T_main_tag.copy()
+    main_measured[:3, 3] += [0.002, -0.001, 0.0]
+    aux_in_main = T_main_tag.copy()
+    aux_in_main[:3, 3] += [-0.002, 0.001, 0.0]
+    camera_poses = {
+        "main": {0: mat_to_rt(main_measured)},
+        "aux": {0: mat_to_rt(T_aux_main @ aux_in_main)},
+    }
+
+    fused = cq.fuse_rig_tag_poses(camera_poses, T_aux_main)
+    T_fused = rt_to_mat(*fused[0])
+
+    np.testing.assert_allclose(T_fused[:3, 3], T_main_tag[:3, 3], atol=1e-12)
+    np.testing.assert_allclose(T_fused[:3, :3], main_measured[:3, :3], atol=1e-12)
+
+
+def test_dual_camera_capture_uses_aux_only_tag_in_main_frame():
+    T_aux_main = np.eye(4)
+    T_aux_main[:3, 3] = [-0.1, 0.0, 0.0]
+    T_main_tag = np.eye(4)
+    T_main_tag[:3, 3] = [0.2, 0.1, 0.3]
+    camera_poses = {
+        "main": {},
+        "aux": {2: mat_to_rt(T_aux_main @ T_main_tag)},
+    }
+
+    fused = cq.fuse_rig_tag_poses(camera_poses, T_aux_main)
+    np.testing.assert_allclose(rt_to_mat(*fused[2]), T_main_tag, atol=1e-12)
+
+
+def test_two_table_tags_recover_live_relative_camera_pose():
+    T_aux_main = np.eye(4)
+    T_aux_main[:3, :3] = Rotation.from_euler(
+        "xyz", [1.0, 2.0, -3.0], degrees=True).as_matrix()
+    T_aux_main[:3, 3] = [-0.11, 0.004, -0.017]
+    camera_poses = {"main": {}, "aux": {}}
+    for tag, pos in zip((10, 11), ([0.1, 0.0, 0.4], [0.2, 0.0, 0.4])):
+        T_main_tag = np.eye(4)
+        T_main_tag[:3, 3] = pos
+        camera_poses["main"][tag] = mat_to_rt(T_main_tag)
+        camera_poses["aux"][tag] = mat_to_rt(T_aux_main @ T_main_tag)
+
+    measured = cq.measured_relative_camera_pose(camera_poses)
+    np.testing.assert_allclose(measured, T_aux_main, atol=1e-12)
 
 
 def test_recovers_planted_mount_offset(setup, monkeypatch):

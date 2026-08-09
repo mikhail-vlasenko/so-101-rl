@@ -132,6 +132,16 @@ MARKER_VISIBLE_RGBA = np.array([0.1, 0.8, 0.1, 1.0])
 MARKER_HIDDEN_RGBA = np.array([0.9, 0.1, 0.1, 1.0])
 
 
+def set_marker_render_colors(model, site_ids, detected: np.ndarray) -> None:
+    """Tint marker sites green when currently detected and red otherwise."""
+    detected = np.asarray(detected, dtype=bool)
+    if detected.shape != (len(site_ids),):
+        raise ValueError(
+            f"detected must have shape ({len(site_ids)},), got {detected.shape}")
+    for sid, seen in zip(site_ids, detected):
+        model.site_rgba[sid] = MARKER_VISIBLE_RGBA if seen else MARKER_HIDDEN_RGBA
+
+
 @dataclass(frozen=True)
 class RuntimeEnvConfig:
     """Runtime observation/DR options shared across envs."""
@@ -745,8 +755,7 @@ class SO101BaseEnv(SO101ArmEnv):
     def _set_marker_render_colors(self, detected):
         """Tint each marker site green when detected this frame, red otherwise.
         Visual only (site rgba) — no effect on physics or observations."""
-        for sid, det in zip(self.marker_site_ids, detected):
-            self.model.site_rgba[sid] = MARKER_VISIBLE_RGBA if det else MARKER_HIDDEN_RGBA
+        set_marker_render_colors(self.model, self.marker_site_ids, detected)
 
     def _capture_camera_state(self):
         """CamState snapshot of the current MjData — recorded per substep so

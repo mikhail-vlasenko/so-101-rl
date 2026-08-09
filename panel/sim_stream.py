@@ -71,12 +71,16 @@ def draw_detected_markers(scn: mujoco.MjvScene, marker_pos: np.ndarray,
         scn.ngeom += 1
 
 
-# Object-channel overlay: live centroid in cyan and the held dense-cloud center
-# in orange. The BPS distance vector is policy input, not invertible geometry;
-# diagnostics that retain the source cloud draw that cloud directly.
+# Object-channel overlay: live centroid in cyan, held dense-cloud center in
+# orange, and a stable subsample of the source cloud in green. The BPS distance
+# vector is policy input but is not invertible geometry, so rollout diagnostics
+# receive the retained source cloud separately.
 LIVE_POINT_RGBA = (0.0, 0.9, 0.9, 0.9)
 PRECISE_CENTER_RGBA = (1.0, 0.55, 0.1, 0.9)
+POINT_CLOUD_RGBA = (0.2, 1.0, 0.25, 0.8)
+POINT_CLOUD_MAX_POINTS = 128
 _LIVE_BALL_RADIUS = np.array([0.008, 0.0, 0.0])
+_CLOUD_BALL_RADIUS = np.array([0.0015, 0.0, 0.0])
 
 
 def draw_object_channels(scn: mujoco.MjvScene, live: np.ndarray,
@@ -93,6 +97,35 @@ def draw_object_channels(scn: mujoco.MjvScene, live: np.ndarray,
                             _LIVE_BALL_RADIUS, np.asarray(center, np.float64),
                             np.eye(3).flatten(),
                             np.asarray(PRECISE_CENTER_RGBA, np.float32))
+        scn.ngeom += 1
+
+
+def sample_point_cloud(points: np.ndarray,
+                       max_points: int = POINT_CLOUD_MAX_POINTS) -> np.ndarray:
+    """Return a stable, evenly spaced display sample of an ``(N, 3)`` cloud."""
+    points = np.asarray(points)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError(f"point cloud must have shape (N, 3), got {points.shape}")
+    if not np.all(np.isfinite(points)):
+        raise ValueError("point cloud must contain only finite coordinates")
+    if max_points <= 0:
+        raise ValueError(f"max_points must be positive, got {max_points}")
+    if points.shape[0] <= max_points:
+        return points
+    indices = np.linspace(0, points.shape[0] - 1, max_points, dtype=np.int64)
+    return points[indices]
+
+
+def draw_point_cloud(scn: mujoco.MjvScene, points: np.ndarray) -> None:
+    """Append small decorative spheres for a bounded sample of a dense cloud."""
+    rgba = np.asarray(POINT_CLOUD_RGBA, dtype=np.float32)
+    identity = np.eye(3).flatten()
+    for point in sample_point_cloud(points):
+        if scn.ngeom >= scn.maxgeom:
+            return
+        mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
+                            _CLOUD_BALL_RADIUS, np.asarray(point, np.float64),
+                            identity, rgba)
         scn.ngeom += 1
 
 
@@ -119,15 +152,19 @@ class SimStreamPublisher:
     def publish(self, data: mujoco.MjData, marker_pos: np.ndarray | None = None,
                 marker_rot: np.ndarray | None = None,
                 marker_include_rot: bool = False,
-                object_channels: tuple | None = None) -> None:
+                object_channels: tuple | None = None,
+                point_cloud: np.ndarray | None = None) -> None:
         """`object_channels` optionally draws the tag-free cube obs as
-        ``(live (3,), dense cloud center (3,))``."""
+        ``(live (3,), dense cloud center (3,))``. ``point_cloud`` is the
+        retained source geometry, not reconstructed from the BPS vector."""
         self._renderer.update_scene(data, camera=self._camera)
         if marker_pos is not None:
             draw_detected_markers(self._renderer.scene, marker_pos, marker_rot,
                                   marker_include_rot)
         if object_channels is not None:
             draw_object_channels(self._renderer.scene, *object_channels)
+        if point_cloud is not None:
+            draw_point_cloud(self._renderer.scene, point_cloud)
         rgb = self._renderer.render()
         ok, jpeg = cv2.imencode(".jpg", rgb[:, :, ::-1],
                                 [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])

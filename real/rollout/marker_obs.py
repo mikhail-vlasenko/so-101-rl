@@ -1,11 +1,11 @@
 """Live AprilTag marker observations in the arm base frame for real rollouts.
 
-Replaces the FK stand-in in the rollout loop: a consumer thread on the main
-camera's frame feed (real/rollout/frame_bus.py — the same frames the SAM
-object tracker consumes) detects the arm tags and maps them into the base
-frame through the calibrated extrinsics (`real/calib/extrinsics.py`, produced
-by `real/calib/calibrate_qpos.py`), so the policy consumes *measured* tag
-poses in the exact `(xyz, axis-angle)` form it saw in sim
+Replaces the FK stand-in in the rollout loop: one consumer per camera detects
+the arm tags and maps them into the base frame through each view's table-board
+anchor. :class:`StereoCameraMarkerSource` averages base-frame positions when
+both cameras currently see a tag and uses the sole measurement when only one
+does. The policy therefore consumes measured poses in the exact
+``(xyz, axis-angle)`` form it saw in sim
 (`src/base_env.py::marker_world_poses`).
 
 Per frame the two fixed table tags jointly re-anchor the camera through an
@@ -38,14 +38,59 @@ from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_IDS
 from real.rollout.frame_bus import CAPTURE_TO_READ_S
 from real.vision.detect import make_detector
 from real.vision.pose import PoseEstimator
+from real.vision.stereo_rig import CAMERA_NAMES
 from src.base_env import MARKER_AGE_CAP_S, MARKER_SITE_NAMES, N_MARKERS
+
+
+def fuse_marker_views(positions: np.ndarray, rotations: np.ndarray,
+                      detected: np.ndarray,
+                      capture_times: np.ndarray
+                      ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Fuse two current camera frames in their shared base coordinate frame.
+
+    Position is averaged only where both current frames detect the tag. The
+    main-camera orientation remains primary because the rollout contract only
+    calls for position fusion; aux orientation is the fallback when main does
+    not see the tag. A paired measurement gets the mean capture timestamp,
+    matching the time represented by its averaged position.
+    """
+    positions = np.asarray(positions, dtype=np.float64)
+    rotations = np.asarray(rotations, dtype=np.float64)
+    detected = np.asarray(detected, dtype=bool)
+    capture_times = np.asarray(capture_times, dtype=np.float64)
+    if positions.shape != (2, N_MARKERS, 3):
+        raise ValueError(
+            f"positions must have shape (2, {N_MARKERS}, 3), got {positions.shape}")
+    if rotations.shape != positions.shape:
+        raise ValueError(
+            f"rotations must have shape {positions.shape}, got {rotations.shape}")
+    if detected.shape != (2, N_MARKERS):
+        raise ValueError(
+            f"detected must have shape (2, {N_MARKERS}), got {detected.shape}")
+    if capture_times.shape != (2,):
+        raise ValueError(f"capture_times must have shape (2,), got {capture_times.shape}")
+
+    fused_detected = detected[0] | detected[1]
+    both = detected[0] & detected[1]
+    aux_only = ~detected[0] & detected[1]
+    fused_pos = positions[0].copy()
+    fused_pos[aux_only] = positions[1, aux_only]
+    fused_pos[both] = positions[:, both].mean(axis=0)
+    fused_rot = rotations[0].copy()
+    fused_rot[aux_only] = rotations[1, aux_only]
+    fused_capture_times = np.full(N_MARKERS, -np.inf)
+    fused_capture_times[detected[0]] = capture_times[0]
+    fused_capture_times[aux_only] = capture_times[1]
+    fused_capture_times[both] = np.mean(capture_times)
+    return fused_pos, fused_rot, fused_detected, fused_capture_times
+
 
 class CameraMarkerSource:
     """Frame-feed consumer → base-frame marker poses. start() → marker_poses() → stop().
 
-    `feed` is the main camera's started CameraFeed; the capture settings
-    (per-unit calibrated focus, marker exposure/gain) are the feed's concern
-    (real/vision/stereo_rig.py).
+    `feed` is one started rig CameraFeed; the capture settings (per-unit
+    calibrated focus, marker exposure/gain) are the feed's concern
+    (real/vision/stereo_rig.py). The stereo wrapper owns one source per view.
     """
 
     def __init__(self, feed, family: str = "apriltag", on_frame=None):
@@ -69,6 +114,8 @@ class CameraMarkerSource:
         self._pos = np.zeros((N_MARKERS, 3))
         self._rot = np.zeros((N_MARKERS, 3))
         self._last_capture_t = np.full(N_MARKERS, -np.inf)
+        self._detected = np.zeros(N_MARKERS, dtype=bool)
+        self._frame_capture_t: float | None = None
         # Capture time of the last frame the table anchor tag was seen in; -inf =
         # never. Until it is fresh the camera can't be mapped to the base frame at
         # all (every pose is zeroed/held), so warmup() blocks on it.
@@ -127,6 +174,8 @@ class CameraMarkerSource:
                     self._pos[detected] = pos[detected]
                     self._rot[detected] = rot[detected]
                     self._last_capture_t[detected] = t_capture
+                    self._detected = detected
+                    self._frame_capture_t = t_capture
                     if anchor_updated:
                         self._table_last_capture_t = t_capture
                     self._recv_t = t_recv
@@ -170,6 +219,17 @@ class CameraMarkerSource:
             last_capture_t = self._last_capture_t.copy()
         age = np.minimum(MARKER_AGE_CAP_S, time.monotonic() - last_capture_t)
         return pos, rot, age
+
+    def latest_marker_frame(
+            self) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        """Held poses plus the current frame's detection mask and timestamp."""
+        if self.error is not None:
+            raise self.error
+        with self._lock:
+            if self._frame_capture_t is None:
+                raise RuntimeError("marker source has not processed a frame")
+            return (self._pos.copy(), self._rot.copy(), self._detected.copy(),
+                    self._frame_capture_t)
 
     def frame_stats(self) -> tuple[float, float, float]:
         """(staleness_s, read_ms, detect_ms) for the most recent processed frame.
@@ -226,3 +286,66 @@ class CameraMarkerSource:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+
+
+class StereoCameraMarkerSource:
+    """Fuse independent main/aux arm-tag observations into one held channel."""
+
+    def __init__(self, feeds: dict, family: str = "apriltag"):
+        if set(feeds) != set(CAMERA_NAMES):
+            raise ValueError(f"feeds must contain exactly {CAMERA_NAMES}")
+        self._sources = {
+            name: CameraMarkerSource(feeds[name], family)
+            for name in CAMERA_NAMES
+        }
+        self._pos = np.zeros((N_MARKERS, 3))
+        self._rot = np.zeros((N_MARKERS, 3))
+        self._last_capture_t = np.full(N_MARKERS, -np.inf)
+
+    def start(self) -> None:
+        for name in CAMERA_NAMES:
+            self._sources[name].start()
+
+    def marker_observation(
+            self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return held fused poses, ages, and current stereo visibility."""
+        frames = [self._sources[name].latest_marker_frame()
+                  for name in ("main", "aux")]
+        pos, rot, detected, capture_times = fuse_marker_views(
+            np.stack([frame[0] for frame in frames]),
+            np.stack([frame[1] for frame in frames]),
+            np.stack([frame[2] for frame in frames]),
+            np.asarray([frame[3] for frame in frames]),
+        )
+        self._pos[detected] = pos[detected]
+        self._rot[detected] = rot[detected]
+        self._last_capture_t[detected] = capture_times[detected]
+        age = np.minimum(
+            MARKER_AGE_CAP_S, time.monotonic() - self._last_capture_t)
+        return self._pos.copy(), self._rot.copy(), age, detected
+
+    def marker_poses(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        pos, rot, age, _ = self.marker_observation()
+        return pos, rot, age
+
+    def frame_stats(self) -> tuple[float, float, float]:
+        """Worst per-camera staleness/read/detection latency for the pair."""
+        stats = np.asarray([
+            self._sources[name].frame_stats() for name in CAMERA_NAMES
+        ])
+        return tuple(np.max(stats, axis=0))
+
+    def warmup(self, timeout_s: float = 5.0, fresh_s: float = 0.25) -> float:
+        """Require a fresh table-board anchor from each camera."""
+        started = time.monotonic()
+        for name in CAMERA_NAMES:
+            remaining = timeout_s - (time.monotonic() - started)
+            if remaining <= 0.0:
+                raise RuntimeError(
+                    f"stereo marker warmup exceeded {timeout_s:.0f} s")
+            self._sources[name].warmup(remaining, fresh_s)
+        return time.monotonic() - started
+
+    def stop(self) -> None:
+        for name in CAMERA_NAMES:
+            self._sources[name].stop()

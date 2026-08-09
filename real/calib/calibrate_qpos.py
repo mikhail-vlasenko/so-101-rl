@@ -16,10 +16,11 @@ How it works:
     samples are concentrated where the gripper meets objects on the table (markers at
     ~0.06-0.10 m), not up high where a fit extrapolates poorly to contact. Per target,
     IK over the four non-base joints both reaches the point and aims *both* arm tags
-    at the camera; that coupling moves every joint between nearby poses, so all
-    observable biases are excited. Each pose is verified collision-free and
-    both-tags-visible in sim (including the marker_visible height ceiling that models
-    the real camera's top-of-frame cut-off) before driving.
+    at the main camera; aux contributes whenever the shared workspace also exposes
+    them. That coupling moves every joint between nearby poses, so all observable
+    biases are excited. Each pose is verified collision-free and both-tags-visible
+    in the main sim view (including the marker_visible height ceiling that models the
+    real camera's top-of-frame cut-off) before driving.
   - The kept poses are re-ordered for drive safety (a greedy nearest-neighbour walk
     keyed on the EE-height-driving joints, starting from the highest pose) and that
     ordering is verified collision-free along every straight-line interpolation in
@@ -46,7 +47,7 @@ held-out marker residual (cross-validated 3.6 -> 2.0 mm mean, 8.2 -> 4.7 mm max)
 Position-only throughout (tag centres / tvec), so the solve is immune to solvePnP
 rvec flips on the small arm tags.
 
-What is and isn't observable (position-only, single fixed camera):
+What is and isn't observable (position-only, rigid stereo pair):
   - lift / elbow / wrist_flex / wrist_roll biases each warp the tag positions in a
     pose-dependent way a rigid camera transform cannot absorb -> solved.
   - shoulder_pan bias is a rotation about the base z-axis through the base origin,
@@ -84,6 +85,10 @@ from omegaconf import OmegaConf
 from scipy.optimize import least_squares
 
 from real.calib.calibrate_camera import FOCUS_ABSOLUTE
+from real.calib.align_stereo_rig import (
+    camera_movement_warning,
+    relative_pose_change,
+)
 from real.calib.calib_solve import (
     determine_quarter_turns,
     load_samples,
@@ -91,19 +96,31 @@ from real.calib.calib_solve import (
     sim_cam_R_opencv,
     solve_table_anchors,
 )
+from real.calib.calibrate_stereo import (
+    load_limits as load_stereo_limits,
+    load_stereo_rectification,
+)
 from real.calib.calibration import CALIBRATION_PATH, save_calibration
-from real.vision.camera import open_camera
 from real.calib.compliance import COMP_JOINTS, gravity_deflection
 from real.vision.detect import make_detector
-from real.calib.extrinsics import EXTRINSICS_PATH, rigid_register, save_extrinsics
+from real.calib.extrinsics import (
+    EXTRINSICS_PATH,
+    average_transforms,
+    mat_inv,
+    mat_to_rt,
+    rigid_register,
+    rt_to_mat,
+    save_extrinsics,
+)
 from real.marker_spec import (
     ARM_TAG_TO_SITE,
     MARKER_EXPOSURE,
     MARKER_GAIN,
     TABLE_TAG_IDS,
 )
-from real.vision.overlay import annotate_detections
-from real.vision.pose import PoseEstimator, load_intrinsics
+from real.vision.overlay import annotate_detections, compose_stereo_view
+from real.vision.pose import PoseEstimator
+from real.vision.stereo_rig import CAMERA_NAMES, open_rig_camera
 from real.twin.constants import (
     SERVO_POSITION_DEADZONE,
     SERVO_POSITION_KP,
@@ -430,24 +447,26 @@ class _FrameStreamer:
 
 
 class MarkerCamera(threading.Thread):
-    """Single owner of the webcam: a background thread that continuously reads,
-    detects, and (if streaming) publishes the annotated frame, exposing the latest
-    per-tag camera-frame poses. Capture pulls a median from the same stream, so the
-    live view and the calibration data come from one reader (no device contention).
-    """
+    """One named rig camera's continuously drained tag-pose stream."""
 
-    def __init__(self, family, stream_port):
+    def __init__(self, name, family, on_frame):
         super().__init__(daemon=True)
-        self.cap = open_camera(focus=FOCUS_ABSOLUTE, exposure=MARKER_EXPOSURE, gain=MARKER_GAIN)
+        self.name = name
+        self.cap = None
         self.detector = make_detector(family)
-        self.estimator = PoseEstimator(*load_intrinsics())
+        self.estimator = None
         self.wanted = set(ARM_TAG_TO_SITE) | set(TABLE_TAG_IDS)
-        self._stream = _FrameStreamer(stream_port) if stream_port is not None else None
+        self._on_frame = on_frame
         self._lock = threading.Lock()
         self._latest = {}      # id -> (rvec, tvec) from the newest decoded frame
         self._seq = 0
         self._running = True
         self.error = None      # set if the read loop dies; the driver re-raises it
+
+    def start(self):
+        self.cap, camera_matrix, dist_coeffs = open_rig_camera(self.name)
+        self.estimator = PoseEstimator(camera_matrix, dist_coeffs)
+        super().start()
 
     def run(self):
         try:
@@ -460,9 +479,9 @@ class MarkerCamera(threading.Thread):
                 with self._lock:
                     self._latest = poses
                     self._seq += 1
-                if self._stream is not None:
+                if self._on_frame is not None:
                     annotate_detections(frame, dets, self.estimator)
-                    self._stream.publish(frame)
+                    self._on_frame(self.name, frame)
         except Exception as exc:   # surface to the main thread; a dead camera must fail loud
             self.error = exc
 
@@ -488,8 +507,118 @@ class MarkerCamera(threading.Thread):
 
     def close(self):
         self._running = False
-        self.join(timeout=2.0)
-        self.cap.release()
+        if self.is_alive():
+            self.join(timeout=2.0)
+        if self.cap is not None:
+            self.cap.release()
+        self.detector.close()
+
+
+def fuse_rig_tag_poses(camera_poses: dict[str, dict],
+                       T_aux_main: np.ndarray) -> dict:
+    """Fuse settled tag poses into the calibrated main-camera frame.
+
+    Aux poses are transformed through the checkerboard-calibrated rigid stereo
+    transform. When both cameras see a tag, translations are averaged while
+    main orientation remains primary; aux orientation is used only as fallback.
+    The calibration solve is position-only for arm tags, and avoiding rotation
+    averaging keeps planar-PnP flips out of the quarter-turn estimate.
+    """
+    if set(camera_poses) != set(CAMERA_NAMES):
+        raise ValueError(f"camera poses must contain exactly {CAMERA_NAMES}")
+    T_main_aux = mat_inv(T_aux_main)
+    fused = {}
+    tags = set(camera_poses["main"]) | set(camera_poses["aux"])
+    for tag in tags:
+        T_main_tag = (rt_to_mat(*camera_poses["main"][tag])
+                      if tag in camera_poses["main"] else None)
+        T_aux_tag = (T_main_aux @ rt_to_mat(*camera_poses["aux"][tag])
+                     if tag in camera_poses["aux"] else None)
+        if T_main_tag is None:
+            fused[tag] = mat_to_rt(T_aux_tag)
+        elif T_aux_tag is None:
+            fused[tag] = mat_to_rt(T_main_tag)
+        else:
+            T_fused = T_main_tag.copy()
+            T_fused[:3, 3] = 0.5 * (
+                T_main_tag[:3, 3] + T_aux_tag[:3, 3])
+            fused[tag] = mat_to_rt(T_fused)
+    return fused
+
+
+def measured_relative_camera_pose(camera_poses: dict[str, dict]) -> np.ndarray:
+    """Two-tag estimate of ``T_aux_main`` from one settled capture."""
+    for name in CAMERA_NAMES:
+        missing = set(TABLE_TAG_IDS) - set(camera_poses[name])
+        if missing:
+            raise ValueError(f"{name} camera is missing table tags {sorted(missing)}")
+    candidates = [
+        rt_to_mat(*camera_poses["aux"][tag])
+        @ mat_inv(rt_to_mat(*camera_poses["main"][tag]))
+        for tag in TABLE_TAG_IDS
+    ]
+    return average_transforms(candidates)
+
+
+class RigMarkerCameras:
+    """Own both named camera readers and fuse their settled tag captures."""
+
+    def __init__(self, family, stream_port):
+        self.rectification = load_stereo_rectification()
+        if self.rectification.anchor_reference_T_aux_main is None:
+            raise RuntimeError(
+                "stereo calibration has no table-anchor movement reference; "
+                "run real.calib.align_stereo_rig with "
+                "--record-stereo-anchor-reference first")
+        self.limits = load_stereo_limits()
+        self._stream = (
+            _FrameStreamer(stream_port) if stream_port is not None else None)
+        self._frames = {}
+        self._frame_lock = threading.Lock()
+        self.cameras = {
+            name: MarkerCamera(
+                name, family, self._on_frame if self._stream is not None else None)
+            for name in CAMERA_NAMES
+        }
+
+    def _on_frame(self, name, frame):
+        if self._stream is None:
+            return
+        with self._frame_lock:
+            self._frames[name] = frame
+            if name == "main" and set(self._frames) == set(CAMERA_NAMES):
+                self._stream.publish(compose_stereo_view(self._frames))
+
+    def start(self):
+        for name in CAMERA_NAMES:
+            self.cameras[name].start()
+
+    def capture_median(self, n_frames) -> tuple[dict, dict, float, float]:
+        poses = {
+            name: self.cameras[name].capture_median(n_frames)
+            for name in CAMERA_NAMES
+        }
+        for name in CAMERA_NAMES:
+            if self.cameras[name].error is not None:
+                raise self.cameras[name].error
+        fused = fuse_rig_tag_poses(poses, self.rectification.T_aux_main)
+        if any(set(TABLE_TAG_IDS) - set(poses[name]) for name in CAMERA_NAMES):
+            return fused, poses, float("nan"), float("nan")
+        measured = measured_relative_camera_pose(poses)
+        reference = self.rectification.anchor_reference_T_aux_main
+        movement_mm, movement_deg = relative_pose_change(measured, reference)
+        warning = camera_movement_warning(
+            movement_mm, movement_deg,
+            self.limits.camera_movement_warning_translation_mm,
+            self.limits.camera_movement_warning_rotation_deg,
+        )
+        if warning is not None:
+            raise RuntimeError(warning)
+        return fused, poses, movement_mm, movement_deg
+
+    def close(self):
+        for name in CAMERA_NAMES:
+            self.cameras[name].close()
         if self._stream is not None:
             self._stream.close()
 
@@ -509,14 +638,15 @@ def drive_to(bus, jm, direction, pose, prev_raw, max_raw_delta):
 def capture(args, jm, direction, poses, max_raw_delta):
     """Drive to each pose and capture (qpos, tags). Returns the samples list.
 
-    The camera runs in a background thread (`MarkerCamera`) that also serves the
-    annotated live stream when `--stream-port` is set."""
-    cam = MarkerCamera(args.family, args.stream_port)
-    cam.start()
+    Both cameras run in background threads and the optional stream shows their
+    annotated side-by-side view. Their tag positions are fused into the main
+    camera frame before entering the unchanged position-only solver."""
+    cams = RigMarkerCameras(args.family, args.stream_port)
     bus = ServoBus(args.port, jm.servo_ids())
-    bus.connect()
     samples = []
     try:
+        cams.start()
+        bus.connect()
         bus.set_position_kp(SERVO_POSITION_KP)
         bus.set_position_deadzone(SERVO_POSITION_DEADZONE)
         bus.set_torque_limit(SERVO_TORQUE_LIMIT)
@@ -524,23 +654,28 @@ def capture(args, jm, direction, poses, max_raw_delta):
         prev_raw = bus.read_all().copy()
         for i, pose in enumerate(poses):
             prev_raw = drive_to(bus, jm, direction, pose, prev_raw, max_raw_delta)
-            if cam.error is not None:
-                raise cam.error
-            tag_poses = cam.capture_median(CAPTURE_FRAMES)
+            tag_poses, camera_poses, movement_mm, movement_deg = cams.capture_median(
+                CAPTURE_FRAMES)
             arm_seen = [t for t in ARM_TAG_TO_SITE if t in tag_poses]
             anchors_seen = [tag for tag in TABLE_TAG_IDS if tag in tag_poses]
-            if len(anchors_seen) != len(TABLE_TAG_IDS) or not arm_seen:
+            missing_by_camera = {
+                name: sorted(set(TABLE_TAG_IDS) - set(camera_poses[name]))
+                for name in CAMERA_NAMES
+            }
+            if (any(missing_by_camera.values())
+                    or len(anchors_seen) != len(TABLE_TAG_IDS) or not arm_seen):
                 print(f"  pose {i + 1}/{len(poses)}: SKIP "
-                      f"(table anchors={anchors_seen or 'none'}, "
+                      f"(table missing={missing_by_camera}, "
                       f"arm={arm_seen or 'none'})")
                 continue
             qpos = raw_to_rad(bus.read_all(), jm, direction)
             samples.append((qpos.copy(), tag_poses))
             print(f"  pose {i + 1}/{len(poses)}: captured arm tags {arm_seen} "
+                  f"rig={movement_mm:.2f}mm/{movement_deg:.3f}deg "
                   f"({len(samples)} kept)")
     finally:
         bus.close()  # torque off
-        cam.close()
+        cams.close()
     return samples
 
 

@@ -445,7 +445,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         id="calibrate_qpos", title="Calibrate encoder bias", page="sysid",
         module="real.calib.calibrate_qpos", arg_style="argparse",
         description="Self-drive the arm through a Cartesian sweep and jointly solve "
-                    "encoder zero-offsets + camera extrinsics from the arm tags (writes "
+                    "encoder zero-offsets + camera extrinsics from dual-camera arm tags (writes "
                     "calibration.yaml + extrinsics.yaml). The sim view shows the sweep "
                     "preview on dry-run, and the live annotated camera feed while executing.",
         args=(

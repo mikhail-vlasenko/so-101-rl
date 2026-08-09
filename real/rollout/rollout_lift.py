@@ -46,6 +46,7 @@ from src.base_env import (
     priv_dim_for,
     state_dim_for,
     sample_cube_orientation,
+    set_marker_render_colors,
     tag_cam_model,
 )
 from src.obs_history import ObsHistory
@@ -108,6 +109,7 @@ class FkObjectSource:
             self.bps_config, clean_synthetic_cloud_config(),
         )
         self.rng = np.random.default_rng(0)
+        self._latest_cloud = np.empty((0, 3), dtype=np.float64)
 
     def boot(self):
         """Seed the pre-episode static evidence, like the env reset and the
@@ -143,10 +145,15 @@ class FkObjectSource:
                 self.model, self.data, self.cams, self.cube_geom_id,
                 self.cube_body_id, self.half_extents, self.rng)
             self.bps_state.ingest(t, None if capture is None else capture.measurement)
+            if capture is not None:
+                self._latest_cloud = capture.points_base.copy()
 
     def object_obs(self):
         now = time.monotonic()
         return self.driver.serve(now), self.bps_state.serve(now)
+
+    def latest_cloud(self) -> np.ndarray:
+        return self._latest_cloud.copy()
 
 
 def sample_visible_fk_spawn(fk_object, data, cube_qposadr, rng, cube_low,
@@ -433,6 +440,10 @@ def main() -> int:
             model.geom_size[cube_geom_id, 2],
         ])
         cube_quat_init = np.array([1.0, 0.0, 0.0, 0.0])
+        # Camera rollouts have no simulated object state. Keep the cube body in
+        # the model for checkpoint-compatible kinematics, but do not depict a
+        # fake sponge translated to the measured cloud center.
+        model.geom_rgba[cube_geom_id, 3] = 0.0
 
     stopped = install_sigint_flag()
 
@@ -447,21 +458,27 @@ def main() -> int:
     # the passive viewer too, so calibration drift and the policy's object
     # belief are visible. The stream draws them itself inside
     # publisher.publish; the viewer needs the helpers directly.
-    draw_channels = None
+    draw_channels = draw_cloud = None
     if viewer is not None:
-        from panel.sim_stream import draw_object_channels as draw_channels
+        from panel.sim_stream import (
+            draw_detected_markers,
+            draw_object_channels,
+            draw_point_cloud,
+        )
+        draw_channels = draw_object_channels
+        draw_cloud = draw_point_cloud
     log_rows: list[dict] = []
     try:
         servo_bus.connect()
         if args.marker_source == "camera":
             from real.rollout.frame_bus import FrameBus
-            from real.rollout.marker_obs import CameraMarkerSource
+            from real.rollout.marker_obs import StereoCameraMarkerSource
             from real.rollout.object_obs import ObjectSource
             from real.vision.stereo_rig import CAMERA_NAMES
 
             frame_bus = FrameBus(CAMERA_NAMES)
             frame_bus.start()
-            camera_markers = CameraMarkerSource(frame_bus.feeds["main"])
+            camera_markers = StereoCameraMarkerSource(frame_bus.feeds)
             camera_object = ObjectSource(
                 frame_bus.feeds, (cube_low, cube_high),
                 prompt=args.object_prompt, sam2_model=args.sam2_model)
@@ -511,8 +528,10 @@ def main() -> int:
                 fk_seen_t[vis] = now - FK_FRESH_AGE_S
                 marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
                 marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
+                marker_detected = vis
                 fk_object.tick()
                 (live, live_age), bps_obs = fk_object.object_obs()
+                point_cloud = fk_object.latest_cloud()
                 marker_age_ms = cam_read_ms = detect_ms = float("nan")
                 sam_ms = dense_ms = float("nan")
                 dense_valid_count = 0
@@ -522,10 +541,12 @@ def main() -> int:
                 dense_refreshes = dense_misses = 0
                 rig_movement_mm = rig_movement_deg = float("nan")
             else:
-                marker_pos, marker_rot, marker_age = camera_markers.marker_poses()
+                marker_pos, marker_rot, marker_age, marker_detected = (
+                    camera_markers.marker_observation())
                 marker_staleness, cam_read_ms, detect_ms = camera_markers.frame_stats()
                 marker_age_ms = marker_staleness * 1e3
                 (live, live_age), bps_obs = camera_object.object_obs()
+                point_cloud = camera_object.latest_cloud()
                 object_stats = camera_object.stats()
                 sam_ms = object_stats.sam_ms
                 dense_ms = object_stats.dense_ms
@@ -560,19 +581,18 @@ def main() -> int:
                     mujoco.mj_step(model, data)
                 data.qpos[qposadr] = loop.qpos
                 data.qvel[joint_dofadr] = loop.qvel
-                mujoco.mj_forward(model, data)
-            else:
-                if bps_obs.valid_fraction > 0.0:
-                    data.qpos[cube_qposadr:cube_qposadr + 3] = bps_obs.center_base
-                data.qvel[model.jnt_dofadr[cube_joint_id]:
-                          model.jnt_dofadr[cube_joint_id] + 6] = 0.0
-                mujoco.mj_forward(model, data)
+            # Camera mode deliberately leaves the hidden, synthetic sponge at
+            # its boot pose; only the retained measured cloud is visualized.
+            mujoco.mj_forward(model, data)
+            set_marker_render_colors(model, marker_site_ids, marker_detected)
             if publisher is not None:
                 publisher.publish(
                     data,
-                    None, None,
+                    marker_pos if args.marker_source == "camera" else None,
+                    marker_rot if args.marker_source == "camera" else None,
                     marker_include_rot,
-                    object_channels=(live, bps_obs.center_base))
+                    object_channels=(live, bps_obs.center_base),
+                    point_cloud=point_cloud)
 
             cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
             ee_pos = data.site_xpos[ee_site_id].copy()
@@ -618,7 +638,12 @@ def main() -> int:
 
             if viewer is not None:
                 viewer.user_scn.ngeom = 0
+                if args.marker_source == "camera":
+                    draw_detected_markers(
+                        viewer.user_scn, marker_pos, marker_rot,
+                        marker_include_rot)
                 draw_channels(viewer.user_scn, live, bps_obs.center_base)
+                draw_cloud(viewer.user_scn, point_cloud)
                 viewer.sync()
                 if not viewer.is_running():
                     print("Viewer closed; stopping rollout.")

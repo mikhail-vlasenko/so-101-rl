@@ -106,7 +106,9 @@ What we learned (C922 / UVC quirks — don't relitigate):
 
 **Implemented** by `real/calib/calibrate_qpos.py` (self-driven, position-only). The arm
 drives *itself* to a spread of sim-generated poses (collision-free, in-limits,
-arm tag facing the camera), captures `(encoder qpos, arm-tag tvec)`, and solves
+arm tags facing the main camera inside the stereo workspace), fuses aux
+measurements into the calibrated main-camera frame whenever available, captures
+`(encoder qpos, arm-tag tvec)`, and solves
 `qpos_bias` *jointly* with `T_base_cam` so FK(θ_enc − b) lands the tags where the
 camera sees them. One run writes both `calibration.yaml` (`qpos_bias`, `compliance`)
 and `extrinsics.yaml` (`t_base_cam_fixed`, leveled `table_anchors`,
