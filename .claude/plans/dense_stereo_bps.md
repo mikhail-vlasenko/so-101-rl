@@ -287,6 +287,33 @@ Store and validate the resolved BPS fingerprint with each policy checkpoint.
 - distances change smoothly under sub-millimetre point jitter and degrade
   predictably as valid points are removed.
 
+### Stage 3 result — complete
+
+The fixed transform lives in `src/bps.py`: the configured axis values expand
+to the lexicographically ordered 64-point basis, clouds are canonically sorted
+before centroid and nearest-distance reduction, and the normalized float32
+result is therefore byte-identical under point permutations. The same module
+owns voxel selection, the never-measured/held-age state, and the SHA-256
+fingerprint over the resolved ordered basis and 80 mm cap. The fingerprint is
+`3257e6752899edceb76df6d70ed39bbda7488961d2e0d9b0755edcbc6002963c`.
+
+`src/sim_bps.py` samples the randomized physical box faces, intersects
+visibility through both calibrated MuJoCo cameras, uses the existing geom-group
+raycast convention for arm/ring occlusion, applies configurable point noise,
+dropout and whole-view loss, and then uses the shared real voxel/BPS path.
+Contract tests pass the same retained cloud through the sim generator and
+`real.tracking.dense_stereo.cloud_to_bps` and require byte-equal distances,
+center and metadata.
+
+`python -m real.tracking.eval_bps --dataset
+datasets/sponge_20260808_203620` validated all 265 accepted tag-inpainted Stage
+2 clouds (627–1,303 points per cloud). Every output was finite and in range,
+point-order invariance was exact, and the largest raw basis distance was 58.384
+mm, leaving 21.616 mm below the 80 mm clipping cap. Bounded 0.5 mm point jitter
+changed a normalized distance by at most 0.006215, inside the analytic 0.0125
+centering-aware Lipschitz bound. Every Stage 3 gate passes; the machine-readable
+report is cached beside the Stage 2 report as `bps_report.yaml`.
+
 ## Stage 4 — observation and policy integration
 
 - Extend the existing flat observation specification to

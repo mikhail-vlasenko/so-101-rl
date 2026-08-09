@@ -22,6 +22,8 @@ import cv2
 import numpy as np
 import yaml
 
+from src.bps import BPSConfig, BPSMeasurement, encode_bps, voxel_first_indices
+
 from real.calib.calibrate_stereo import StereoRectification, load_stereo_rectification
 from real.marker_spec import SPONGE_TAG_IDS
 from real.vision.intrinsics import intrinsics_path
@@ -412,12 +414,14 @@ def voxel_downsample(points: np.ndarray, confidence: np.ndarray,
     confidence = np.asarray(confidence, dtype=np.float32).reshape(-1)
     if points.shape[0] != confidence.shape[0]:
         raise ValueError("points and confidence lengths differ")
-    if points.shape[0] == 0:
-        return points, confidence
-    voxels = np.floor(points / voxel_size_m).astype(np.int64)
-    _, first = np.unique(voxels, axis=0, return_index=True)
-    first.sort()
+    first = voxel_first_indices(points, voxel_size_m)
     return points[first], confidence[first]
+
+
+def cloud_to_bps(points_base: np.ndarray, valid_fraction: float,
+                 config: BPSConfig) -> BPSMeasurement:
+    """Real-cloud entry point for the shared fixed BPS transform."""
+    return encode_bps(points_base, valid_fraction, config)
 
 
 def sample_cloud(points: np.ndarray, confidence: np.ndarray, count: int):

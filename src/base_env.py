@@ -27,6 +27,11 @@ from src.shape_obs import (
     sqrtm_from_cov,
     sqrtm_upper,
 )
+from src.surface_cloud import (
+    OCCLUDER_GEOMGROUP as _OCCLUDER_GEOMGROUP,
+    unit_box_surface_points,
+    visible_surface as cube_visible_surface,
+)
 from src.units import action_to_target
 from real.marker_spec import ARM_TAG_TO_SITE, TAG_SIZE_MM
 
@@ -242,101 +247,17 @@ def marker_dropout_prob(pos, normals, cam, p_near, p_far):
     return prob
 
 
-# Geom groups the occlusion raycasts consider. Group 1 holds nothing but the
-# cameras' visible stand-in geoms (tag_cam[_aux]_body/lens in so101.xml), which
-# every ray starts inside — a camera does not occlude its own view. Everything
-# else (floor 0, arm visual meshes 2, arm/gripper collision geoms 3 and 4)
-# blocks the real view and must block here.
-_OCCLUDER_GEOMGROUP = np.array([1, 0, 1, 1, 1, 1], dtype=np.uint8)
-
-# Body-frame sample grid on the sponge box's surface for the per-camera
-# visible-surface test (cube_visible_surface): a 3x3 grid per face at these
-# fractions of the face half-extents (interior points — corners/edges belong
-# to two faces and would double-count), on all six faces. Scaled by the
-# episode's actual half extents at capture time.
-_FACE_GRID_FRACTIONS = (-0.7, 0.0, 0.7)
-
-
-def _unit_box_surface_points():
-    """(points (54, 3), normals (54, 3)) on the unit box [-1, 1]^3: a 3x3 grid
-    per face with the face's outward normal."""
-    pts, normals = [], []
-    for axis in range(3):
-        u, v = (axis + 1) % 3, (axis + 2) % 3
-        for sign in (-1.0, 1.0):
-            for a in _FACE_GRID_FRACTIONS:
-                for b in _FACE_GRID_FRACTIONS:
-                    p = np.zeros(3)
-                    p[axis] = sign
-                    p[u] = a
-                    p[v] = b
-                    n = np.zeros(3)
-                    n[axis] = sign
-                    pts.append(p)
-                    normals.append(n)
-    return np.array(pts), np.array(normals)
-
-
-CUBE_SURFACE_UNIT_POINTS, CUBE_SURFACE_UNIT_NORMALS = _unit_box_surface_points()
+CUBE_SURFACE_UNIT_POINTS, CUBE_SURFACE_UNIT_NORMALS = unit_box_surface_points(3)
 
 
 def cube_surface_points_world(data, cube_geom_id, half_extents):
     """(points (54, 3), normals (54, 3)) of the box-surface sample grid in
     world coordinates, from the cube geom's current world pose."""
-    R = data.geom_xmat[cube_geom_id].reshape(3, 3)
-    c = data.geom_xpos[cube_geom_id]
-    pts = c + (CUBE_SURFACE_UNIT_POINTS * np.asarray(half_extents)) @ R.T
-    return pts, CUBE_SURFACE_UNIT_NORMALS @ R.T
-
-
-def cube_visible_surface(model, data, cam, cube_body_id, points, normals):
-    """What one camera sees of the box surface: (visible_fraction, centroid).
-
-    A sample point is *facing* when its outward normal points toward the
-    camera (self-occlusion of the convex box, no ray needed); a facing point
-    is *visible* when it also projects inside the camera frame (cam.in_view)
-    and the segment between it and the camera clears every other geom (arm
-    meshes, ring walls, floor — the shapes that block the real view; the
-    cube's own body is excluded, the facing test already handles it).
-    visible_fraction is visible/facing — 1.0 for an unoccluded fully-framed
-    box regardless of its orientation, mirroring the real pipeline's
-    mask-area-vs-baseline occlusion measure. centroid is the mean of the
-    visible points (the visible-surface point a segmentation-mask centroid's
-    ray aims at), or None when nothing is visible.
-
-    The occlusion test casts *outward from the camera*, which mj_multiRay does
-    for every candidate in one call — the per-point direction is what varies,
-    and the camera is the shared origin. A ray reports only its nearest hit,
-    so casting from this end needs the camera's own stand-in geoms masked out
-    (_OCCLUDER_GEOMGROUP); past that the question is symmetric — whether any
-    geom lies on the segment between camera and sample point.
-    """
-    to_cam = cam.pos - points
-    facing = np.einsum("ij,ij->i", normals, to_cam) > 0.0
-    n_facing = int(facing.sum())
-    if n_facing == 0:
-        return 0.0, None
-    candidates = facing & cam.in_view(points)
-    n_rays = int(candidates.sum())
-    if n_rays == 0:
-        return 0.0, None
-    cand_pts = points[candidates]
-    rays = -to_cam[candidates]
-    dists = np.linalg.norm(rays, axis=1)
-    geomid = np.empty(n_rays, dtype=np.int32)
-    hit = np.empty(n_rays, dtype=np.float64)
-    mujoco.mj_multiRay(model, data, cam.pos,
-                       np.ascontiguousarray(rays / dists[:, None]).ravel(),
-                       _OCCLUDER_GEOMGROUP, 1, cube_body_id, geomid, hit, None,
-                       n_rays, float(dists.max()))
-    # hit is the camera's distance to the first blocking geom, or -1 when the
-    # ray is clear; a hit at or past the sample point is behind it, not on the
-    # segment. Rays beyond the farthest sample are cut off, so no hit can land
-    # past dists.max() to begin with.
-    visible_pts = cand_pts[(hit < 0.0) | (hit >= dists)]
-    if not len(visible_pts):
-        return 0.0, None
-    return len(visible_pts) / n_facing, visible_pts.mean(axis=0)
+    rotation = data.geom_xmat[cube_geom_id].reshape(3, 3)
+    center = data.geom_xpos[cube_geom_id]
+    points = center + (CUBE_SURFACE_UNIT_POINTS
+                       * np.asarray(half_extents)) @ rotation.T
+    return points, CUBE_SURFACE_UNIT_NORMALS @ rotation.T
 
 
 class CamState(NamedTuple):

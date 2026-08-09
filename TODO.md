@@ -10,11 +10,11 @@ Unresolved, actionable work only. Not a changelog or project-status document.
   baseline and overlapping views. After installation, re-run stereo alignment,
   checkerboard calibration, the table-anchor reference capture, and both
   `real.diagnostics.snapshot_cam_mount` camera snapshots.
-- **Replace the precise object channel with the accepted StereoSGBM cloud.**
-  Follow the [dense-stereo BPS plan](.claude/plans/dense_stereo_bps.md):
-  implement the fixed 64-point transform, validate its normalization, clipping
-  and jitter behavior on cached real clouds, then integrate its current/held
-  block into the policy observation.
+- **Integrate the validated BPS block into the policy observation.** Follow
+  Stage 4 of the [dense-stereo BPS plan](.claude/plans/dense_stereo_bps.md):
+  replace the precise center/√M actor channel with one current/held BPS block,
+  update dimensions and normalization, persist/validate the basis fingerprint
+  in checkpoints, and extend distillation and rollout loading explicitly.
 - **Pickplace `ObjectSource` rollout.** `rollout_lift` consumes the dual
   channels; after the dense-stereo observation interface lands, add the
   equivalent pickplace source with a real-table target, ring pose, and
