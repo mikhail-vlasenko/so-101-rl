@@ -2,6 +2,10 @@ __pycache__/
 *.log
 logs/
 outputs/
+rollouts/
+.idea/
+screenshots/
+.codex/
 datasets/
 wandb/
 *.zip
