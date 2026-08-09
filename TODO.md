@@ -4,21 +4,14 @@ Unresolved, actionable work only. Not a changelog or project-status document.
 
 ## Tag-free object tracking (dual C922 + SAM), follow-ups
 
-- **Build a rigid shared stereo-camera mount.** Follow the
-  [C922 stereo-camera brace plan](.claude/plans/c922_stereo_brace.md) to tie the
-  two tripod-mounted cameras together while preserving the current ~109 mm
-  baseline and overlapping views. After installation, re-run stereo alignment,
-  checkerboard calibration, the table-anchor reference capture, and both
-  `real.diagnostics.snapshot_cam_mount` camera snapshots.
-- **Integrate the dense-stereo worker into real rollouts.** Follow Stage 5 of
-  the [dense-stereo BPS plan](.claude/plans/dense_stereo_bps.md): publish
-  static-gated BPS measurements behind `FrameBus`, validate stereo-rig movement
-  at startup, expose dense latency/validity telemetry, and re-enable camera mode
-  in `real.rollout.rollout_lift` only after the complete source is available.
-- **Pickplace dense-stereo rollout.** After the dense worker re-enables camera
-  mode in `rollout_lift`, add the
-  equivalent pickplace source with a real-table target, ring pose, and
-  phase-aware termination on `ArmLoop`.
+- **Restore the strict stereo calibration gates.** Mount the checkerboard to a
+  rigid planar backing, recalibrate until per-camera reprojection RMSE and
+  rectified vertical correspondence p95 are below 1 px, then restore
+  `max_reprojection_rmse_px: 1.0` and `max_rectified_vertical_p95_px: 1.0`.
+  The current 1.25/3 px gates only accommodate the visibly bowed paper target.
+- **Pickplace dense-stereo rollout.** Add the equivalent camera object source to
+  pickplace with a real-table target, ring pose, and phase-aware termination on
+  `ArmLoop`.
 - **Delete the legacy tag remnants when the legacy teacher retires.** The
   `cube_tag` site in the scene XMLs and the GT tag-pose helper survive only
   for `distill.teacher_obs=legacy_tag` (migrating the last tag-obs

@@ -15,6 +15,8 @@ from scipy.spatial.transform import Rotation
 
 import real.calib.calibrate_qpos as cq
 from real.calib.calibrate_qpos import (
+    GRIPPER_FIXED,
+    IK_SEED,
     MIN_EE_Z,
     OBSERVABLE_JOINTS,
     OUTLIER_FLOOR_MM,
@@ -222,8 +224,9 @@ def test_gravity_slack_matches_dynamic_settle(setup):
     play_qadr, play_dadr, play_rng = _backlash_dofs(model)
     assert len(play_qadr) == 4   # lift/elbow/wrist_flex/wrist_roll gear play wired
 
-    poses, _ = generate_poses(model, data, jm)
-    pose = poses[len(poses) // 3]   # a forward-reaching grid pose
+    # This dynamics contract must not depend on the visibility-filtered calibration
+    # sweep: remounting a camera legitimately changes that sweep's membership/order.
+    pose = np.array([0.0, *IK_SEED, GRIPPER_FIXED])
 
     data.qpos[:] = 0.0
     data.qpos[qposadr] = pose

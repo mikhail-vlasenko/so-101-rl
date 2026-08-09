@@ -18,8 +18,8 @@ last measured pose while its age grows, the same hold-last-pose + age
 convention training used for undetected tags (src/base_env.py); a tag never
 seen this session reads all-zero with age pinned at MARKER_AGE_CAP_S.
 
-This source serves the ARM tags and the table anchor only. The Stage 5 dense
-stereo worker will consume the same frame bus for the manipulated object.
+This source serves the ARM tags and the table anchor only. The dense-stereo
+object source consumes the same frame bus independently.
 """
 import threading
 import time

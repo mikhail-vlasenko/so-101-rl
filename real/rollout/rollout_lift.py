@@ -1,10 +1,11 @@
 """Roll out the trained lift policy on the real SO-101 arm.
 
 The cube obs is the tag-free live centroid plus one static-refreshed BPS block.
-The available FK source is a lockstep MuJoCo sponge driven by the real encoders
-via contacts and the same visible-surface/BPS helpers as training. Real-camera
-publication belongs to Stage 5; requesting the old camera mode fails explicitly
-until its dense-stereo worker exists.
+The FK source is a lockstep MuJoCo sponge driven by the real encoders via
+contacts and the same visible-surface/BPS helpers as training. ``camera`` uses
+the asynchronous tag-free SAM + dense-stereo worker behind ``FrameBus``; it
+validates the rigid rig against the calibrated table-anchor reference before
+publishing a cloud and never runs StereoSGBM on the control thread.
 
 Usage:
     python -m real.rollout.rollout_lift                         # dry-run, latest checkpoint
@@ -86,7 +87,7 @@ CUBE_FRESH_DWELL_S = 0.15
 
 
 class FkObjectSource:
-    """FK twin of the future real dense-stereo source.
+    """FK twin of the real dense-stereo source.
 
     It drives the training env's surface helpers from the lockstep sim and
     publishes through the shared object/BPS state machines.
@@ -177,9 +178,12 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
     p.add_argument("--no-view", action="store_true",
                    help="Disable the MuJoCo passive viewer.")
     p.add_argument("--marker-source", default="fk", choices=["fk", "camera"],
-                   help="Observation source. 'fk' is currently available; "
-                        "'camera' is reserved for the Stage 5 dense worker and "
-                        "fails explicitly until then.")
+                   help="Observation source: lockstep MuJoCo stand-in or the "
+                        "real tag-free camera pipeline.")
+    p.add_argument("--object-prompt", default="sponge",
+                   help="SAM3 text prompt used to acquire the object in camera mode.")
+    p.add_argument("--sam2-model", default="tiny", choices=["tiny", "base+"],
+                   help="Streaming mask tracker used in camera mode.")
     return p.parse_args()
 
 
@@ -319,6 +323,10 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
               + [f"bps_{i:02d}" for i in range(BPS_DISTANCE_DIM)]
               + [f"center_{ax}" for ax in "xyz"]
               + ["precise_age_s", "valid_fraction"]
+              + ["dense_valid_count", "dense_valid_fraction",
+                 "dense_correspondence_rejected_fraction",
+                 "dense_overall_rejected_fraction", "dense_refreshes", "dense_misses",
+                 "rig_movement_mm", "rig_movement_deg"]
               + ["loop_ms", "predict_ms", "read_all_ms", "stream_ms", "window_ms",
                  "marker_age_ms", "cam_read_ms", "detect_ms", "sam_ms", "dense_ms"])
     with out_path.open("w", newline="") as f:
@@ -340,6 +348,13 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
                         *(f"{v:.6f}" for v in r["center"]),
                         f"{r['precise_age']:.4f}",
                         f"{r['valid_fraction']:.6f}",
+                        r["dense_valid_count"],
+                        f"{r['dense_valid_fraction']:.6f}",
+                        f"{r['dense_correspondence_rejected_fraction']:.6f}",
+                        f"{r['dense_overall_rejected_fraction']:.6f}",
+                        r["dense_refreshes"], r["dense_misses"],
+                        f"{r['rig_movement_mm']:.4f}",
+                        f"{r['rig_movement_deg']:.6f}",
                         f"{r['loop_ms']:.2f}", f"{r['predict_ms']:.3f}",
                         f"{r['read_all_ms']:.2f}", f"{r['stream_ms']:.2f}",
                         f"{r['window_ms']:.2f}",
@@ -357,11 +372,6 @@ def main() -> int:
     target_height = float(lift_cfg["target_height"])
 
     args = parse_args(lift_cfg)
-    if args.marker_source == "camera":
-        raise RuntimeError(
-            "camera object observations require the Stage 5 dense-stereo worker; "
-            "Stage 4 intentionally removed the rejected precise source"
-        )
 
     model = mujoco.MjModel.from_xml_path(args.xml)
     data = mujoco.MjData(model)
@@ -401,22 +411,32 @@ def main() -> int:
 
     rng = np.random.default_rng(args.seed)
 
-    bus = ServoBus(args.port, jm.servo_ids())
-    loop = ArmLoop(model=model, n_substeps=n_substeps, jm=jm, bus=bus,
+    servo_bus = ServoBus(args.port, jm.servo_ids())
+    loop = ArmLoop(model=model, n_substeps=n_substeps, jm=jm, bus=servo_bus,
                    action_scale=action_scale, prev_actions_n=prev_actions_n,
                    execute=args.execute, ema_alpha=args.ema_alpha,
                    slow=args.slow, interp_hz=args.interp_hz,
                    qpos_bias=load_calibration(), compliance=load_compliance())
     print(f"seed={args.seed} {loop.describe()}")
 
-    fk_object = FkObjectSource(model, data, cube_geom_id, cube_body_id)
-    cube_pos_init, cube_quat_init = sample_visible_fk_spawn(
-        fk_object, data, cube_qposadr, rng, cube_low, cube_high)
-    print(f"sim cube spawn: ({cube_pos_init[0]:+.3f}, {cube_pos_init[1]:+.3f}, "
-          f"{cube_pos_init[2]:+.3f})  target_height={target_height}")
+    fk_object = None
+    if args.marker_source == "fk":
+        fk_object = FkObjectSource(model, data, cube_geom_id, cube_body_id)
+        cube_pos_init, cube_quat_init = sample_visible_fk_spawn(
+            fk_object, data, cube_qposadr, rng, cube_low, cube_high)
+        print(f"sim cube spawn: ({cube_pos_init[0]:+.3f}, {cube_pos_init[1]:+.3f}, "
+              f"{cube_pos_init[2]:+.3f})  target_height={target_height}")
+    else:
+        cube_pos_init = np.array([
+            np.mean((cube_low[0], cube_high[0])),
+            np.mean((cube_low[1], cube_high[1])),
+            model.geom_size[cube_geom_id, 2],
+        ])
+        cube_quat_init = np.array([1.0, 0.0, 0.0, 0.0])
 
-    bus.connect()
     stopped = install_sigint_flag()
+
+    frame_bus = camera_markers = camera_object = None
 
     viewer = None if args.no_view else mujoco.viewer.launch_passive(model, data)
     publisher = None
@@ -432,6 +452,19 @@ def main() -> int:
         from panel.sim_stream import draw_object_channels as draw_channels
     log_rows: list[dict] = []
     try:
+        servo_bus.connect()
+        if args.marker_source == "camera":
+            from real.rollout.frame_bus import FrameBus
+            from real.rollout.marker_obs import CameraMarkerSource
+            from real.rollout.object_obs import ObjectSource
+            from real.vision.stereo_rig import CAMERA_NAMES
+
+            frame_bus = FrameBus(CAMERA_NAMES)
+            frame_bus.start()
+            camera_markers = CameraMarkerSource(frame_bus.feeds["main"])
+            camera_object = ObjectSource(
+                frame_bus.feeds, (cube_low, cube_high),
+                prompt=args.object_prompt, sam2_model=args.sam2_model)
         loop.boot()
 
         # Sync the sim arm to the real arm and place the FK sponge.
@@ -444,7 +477,13 @@ def main() -> int:
         if model.na > 0:
             data.act[:] = loop.qpos
         mujoco.mj_forward(model, data)
-        fk_object.boot()
+        if args.marker_source == "fk":
+            fk_object.boot()
+        else:
+            camera_markers.start()
+            marker_warmup_s = camera_markers.warmup()
+            print(f"camera marker anchor ready after {marker_warmup_s:.2f}s")
+            camera_object.start()
 
         dwell_count = 0
         step = 0
@@ -461,22 +500,45 @@ def main() -> int:
             loop_ms = (iter_t - prev_iter_t) * 1e3 if prev_iter_t is not None else float("nan")
             prev_iter_t = iter_t
 
-            # FK marker poses of the same qpos the obs uses (data is still
-            # pinned at loop.qpos from the previous tick). The logged
-            # observation and FK pose are identical while this
-            # rollout exposes only the lockstep source.
-            fk_pos_now, fk_rot_now = marker_world_poses(data, marker_site_ids)
+            # FK marker poses at the same qpos remain in camera-mode logs as a
+            # direct calibration diagnostic against the measured markers.
             now = time.monotonic()
-            vis = markers_visible(data, marker_site_ids, tag_cam)
-            fk_pos[vis] = fk_pos_now[vis]
-            fk_rot[vis] = fk_rot_now[vis]
-            fk_seen_t[vis] = now - FK_FRESH_AGE_S
-            marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
-            marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
-            fk_object.tick()
-            (live, live_age), bps_obs = fk_object.object_obs()
-            marker_age_ms = cam_read_ms = detect_ms = float("nan")
-            sam_ms = dense_ms = float("nan")
+            fk_pos_now, fk_rot_now = marker_world_poses(data, marker_site_ids)
+            if args.marker_source == "fk":
+                vis = markers_visible(data, marker_site_ids, tag_cam)
+                fk_pos[vis] = fk_pos_now[vis]
+                fk_rot[vis] = fk_rot_now[vis]
+                fk_seen_t[vis] = now - FK_FRESH_AGE_S
+                marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
+                marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
+                fk_object.tick()
+                (live, live_age), bps_obs = fk_object.object_obs()
+                marker_age_ms = cam_read_ms = detect_ms = float("nan")
+                sam_ms = dense_ms = float("nan")
+                dense_valid_count = 0
+                dense_valid_fraction = float("nan")
+                dense_correspondence_rejected_fraction = float("nan")
+                dense_overall_rejected_fraction = float("nan")
+                dense_refreshes = dense_misses = 0
+                rig_movement_mm = rig_movement_deg = float("nan")
+            else:
+                marker_pos, marker_rot, marker_age = camera_markers.marker_poses()
+                marker_staleness, cam_read_ms, detect_ms = camera_markers.frame_stats()
+                marker_age_ms = marker_staleness * 1e3
+                (live, live_age), bps_obs = camera_object.object_obs()
+                object_stats = camera_object.stats()
+                sam_ms = object_stats.sam_ms
+                dense_ms = object_stats.dense_ms
+                dense_valid_count = object_stats.valid_count
+                dense_valid_fraction = object_stats.valid_fraction
+                dense_correspondence_rejected_fraction = (
+                    object_stats.correspondence_rejected_fraction)
+                dense_overall_rejected_fraction = (
+                    object_stats.overall_rejected_fraction)
+                dense_refreshes = object_stats.dense_refreshes
+                dense_misses = object_stats.dense_misses
+                rig_movement_mm = object_stats.rig_movement_mm
+                rig_movement_deg = object_stats.rig_movement_deg
 
             frame = build_state_frame(loop.qpos, loop.qvel, marker_pos, marker_rot,
                                       marker_age, live, live_age,
@@ -488,19 +550,23 @@ def main() -> int:
             predict_ms = (time.perf_counter() - t_pred) * 1e3
             action = loop.tick(raw_action)
 
-            # Write the real arm's new state into the sim and step it so the
-            # cube responds to gripper/floor contacts (fk mode; in camera mode
-            # the parked cube just stays put).
+            # Write the real arm's new state into the sim. FK mode steps the
+            # sponge through contacts; camera mode only mirrors measured state.
             data.qpos[qposadr] = loop.qpos
             data.qvel[joint_dofadr] = loop.qvel
-            data.ctrl[:6] = loop.qpos  # actuators hold current pose; cube reacts via contacts
-            for _ in range(n_substeps):
-                mujoco.mj_step(model, data)
-            # Re-pin the arm: prevent any drift between real and sim arm caused
-            # by sim physics during the substep loop. Cube state is preserved.
-            data.qpos[qposadr] = loop.qpos
-            data.qvel[joint_dofadr] = loop.qvel
-            mujoco.mj_forward(model, data)
+            if args.marker_source == "fk":
+                data.ctrl[:6] = loop.qpos
+                for _ in range(n_substeps):
+                    mujoco.mj_step(model, data)
+                data.qpos[qposadr] = loop.qpos
+                data.qvel[joint_dofadr] = loop.qvel
+                mujoco.mj_forward(model, data)
+            else:
+                if bps_obs.valid_fraction > 0.0:
+                    data.qpos[cube_qposadr:cube_qposadr + 3] = bps_obs.center_base
+                data.qvel[model.jnt_dofadr[cube_joint_id]:
+                          model.jnt_dofadr[cube_joint_id] + 6] = 0.0
+                mujoco.mj_forward(model, data)
             if publisher is not None:
                 publisher.publish(
                     data,
@@ -513,7 +579,8 @@ def main() -> int:
 
             ee_live = float(np.linalg.norm(ee_pos - live))
             gripper_val = loop.qpos[JOINT_NAMES.index("gripper")]
-            grasped_sim = ee_live < 0.05 and gripper_val < 0.3
+            grasped_sim = (args.marker_source == "fk"
+                           and ee_live < 0.05 and gripper_val < 0.3)
             # Success = dwell on the live centroid height, counted only while
             # the live channel is fresh — a frozen held value must not fake a
             # lift (plan decision 9).
@@ -532,6 +599,16 @@ def main() -> int:
                 "center": bps_obs.center_base.copy(),
                 "precise_age": bps_obs.age_s,
                 "valid_fraction": bps_obs.valid_fraction,
+                "dense_valid_count": dense_valid_count,
+                "dense_valid_fraction": dense_valid_fraction,
+                "dense_correspondence_rejected_fraction": (
+                    dense_correspondence_rejected_fraction),
+                "dense_overall_rejected_fraction": (
+                    dense_overall_rejected_fraction),
+                "dense_refreshes": dense_refreshes,
+                "dense_misses": dense_misses,
+                "rig_movement_mm": rig_movement_mm,
+                "rig_movement_deg": rig_movement_deg,
                 "loop_ms": loop_ms, "predict_ms": predict_ms,
                 "read_all_ms": loop.last_read_ms, "stream_ms": loop.last_stream_ms,
                 "window_ms": loop.last_window_ms,
@@ -555,6 +632,13 @@ def main() -> int:
                        f"read_all={loop.last_read_ms:.0f} stream={loop.last_stream_ms:.0f} "
                        f"window={loop.last_window_ms:.0f}")
                 print(lat)
+                if args.marker_source == "camera":
+                    print(
+                        f"          dense: points={dense_valid_count} "
+                        f"valid={bps_obs.valid_fraction:.1%} "
+                        f"reject={dense_correspondence_rejected_fraction:.1%}/"
+                        f"{dense_overall_rejected_fraction:.1%} "
+                        f"refresh/miss={dense_refreshes}/{dense_misses}")
             step += 1
 
             if dwell_count >= 5:
@@ -565,7 +649,13 @@ def main() -> int:
             if not stopped["flag"]:
                 print(f"TIMEOUT at step {step}")
     finally:
-        bus.close()
+        if camera_object is not None:
+            camera_object.stop()
+        if camera_markers is not None:
+            camera_markers.stop()
+        if frame_bus is not None:
+            frame_bus.stop()
+        servo_bus.close()
         if viewer is not None:
             viewer.close()
         if publisher is not None:

@@ -37,6 +37,7 @@ from real.calib.extrinsics import (
 from real.calib.table_anchor import TableAnchorTracker
 from real.marker_spec import SPONGE_TAG_IDS, TABLE_TAG_IDS
 from real.tracking.tag_body_calib import SPONGE_TAGS_PATH, body_pose_from_tag, load_sponge_tags
+from real.tracking.shape_dataset import CausalMeanPosition, load_workspace_bounds
 from real.vision.detect import make_detector
 from real.vision.overlay import (
     GREEN,
@@ -55,16 +56,7 @@ from src.shape_obs import STATIC_DWELL_S, is_static
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-LIFT_CONFIG_PATH = REPO_ROOT / "conf" / "env" / "lift.yaml"
 CONFIG_PATH = REPO_ROOT / "conf" / "config.yaml"
-
-
-def load_workspace_bounds():
-    """Cube spawn xy bounds used to bin dataset coverage."""
-    with LIFT_CONFIG_PATH.open() as stream:
-        task = yaml.safe_load(stream)["lift_env"]
-    return (np.asarray(task["cube_low"], dtype=np.float64),
-            np.asarray(task["cube_high"], dtype=np.float64))
 
 
 def load_static_mean_window_s():
@@ -75,25 +67,6 @@ def load_static_mean_window_s():
     value = float(value)
     assert 0.0 < value < STATIC_DWELL_S
     return value
-
-
-class CausalMeanPosition:
-    """Suppress pose-estimator jitter without looking into future frames."""
-
-    def __init__(self, window_s):
-        self.window_s = float(window_s)
-        assert self.window_s > 0.0
-        self._times = []
-        self._positions = []
-
-    def update(self, t, position):
-        t = float(t)
-        self._times.append(t)
-        self._positions.append(np.asarray(position, dtype=np.float64).copy())
-        while len(self._times) > 1 and self._times[0] < t - self.window_s:
-            self._times.pop(0)
-            self._positions.pop(0)
-        return np.mean(np.stack(self._positions), axis=0)
 
 
 class Coverage:

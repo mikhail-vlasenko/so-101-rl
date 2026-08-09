@@ -2,7 +2,7 @@
 
 A V4L2 device can only be opened once, but the rollout needs the same main-cam
 frames in two places — the AprilTag marker detector (real/rollout/marker_obs.py)
-and the upcoming dense-stereo object worker. Each `CameraFeed`
+and the dense-stereo object worker (real/rollout/object_obs.py). Each `CameraFeed`
 owns one camera (opened by rig name at its calibrated focus,
 real/vision/stereo_rig.py) and republishes every frame with a sequence number;
 consumers block on `wait_next` for frames they haven't processed yet, each at

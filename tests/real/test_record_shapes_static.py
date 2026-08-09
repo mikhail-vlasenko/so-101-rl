@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from real.tracking.record_shapes import CausalMeanPosition
+from real.tracking.shape_dataset import CausalMeanPosition
 from src.shape_obs import STATIC_DWELL_S, is_static
 
 

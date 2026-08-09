@@ -24,7 +24,8 @@ file holds only cross-file contracts, gotchas, and commands — keep it that way
 - `real/` — `vision/` (camera + marker detection/pose primitives), `calib/`
   (calibration stack), `tracking/` (stereo/SAM tracking, shape dataset + dense
   evaluation), `rollout/` (rollout scripts, `rollout_common.py` core,
-  `frame_bus.py` camera fan-out), `diagnostics/` (one-off reads), `twin/` (digital twin,
+  `frame_bus.py` camera fan-out, `object_obs.py` asynchronous SAM+dense BPS),
+  `diagnostics/` (one-off reads), `twin/` (digital twin,
   `python -m real.twin.digital_twin`); `marker_spec.py` stays at the top — the
   tag/marker source of truth every subpackage reads
 - `sysid/` — real-vs-sim dynamics fitting (record → replay → analyze → fit) and

@@ -56,8 +56,14 @@ from real.tracking.dense_stereo import (
     sgbm_disparities,
     voxel_downsample,
 )
-from real.tracking.shape_dataset import compute_masks, gt_pose, load_dataset, load_mask
-from real.tracking.record_shapes import CausalMeanPosition, load_workspace_bounds
+from real.tracking.shape_dataset import (
+    CausalMeanPosition,
+    compute_masks,
+    gt_pose,
+    load_dataset,
+    load_mask,
+    load_workspace_bounds,
+)
 from src.shape_obs import STATIC_DWELL_S, VISIBLE_FRACTION_MIN, is_static
 
 

@@ -70,6 +70,8 @@ class DenseStereoConfig:
     depth_mad_floor_m: float
     min_mask_area_px: int
     sgbm_candidates: tuple[SGBMCandidate, ...]
+    frozen_sgbm_candidate: SGBMCandidate
+    min_deployment_valid_points: int
     fast_max_disp_multiple: int
     fast_candidates: tuple[FastFoundationCandidate, ...]
 
@@ -95,6 +97,11 @@ def load_config(path: Path = CONFIG_PATH) -> DenseStereoConfig:
     candidates = tuple(SGBMCandidate(**entry) for entry in data["sgbm_candidates"])
     fast_candidates = tuple(
         FastFoundationCandidate(**entry) for entry in data["fast_candidates"])
+    frozen_number = int(data["frozen_sgbm_candidate"])
+    if not 1 <= frozen_number <= len(candidates):
+        raise ValueError(
+            "dense_stereo_feasibility.frozen_sgbm_candidate must select a "
+            "one-based sgbm_candidates entry")
     config = DenseStereoConfig(
         processing_scale=float(data["processing_scale"]),
         processing_height_multiple=int(data["processing_height_multiple"]),
@@ -113,6 +120,8 @@ def load_config(path: Path = CONFIG_PATH) -> DenseStereoConfig:
         depth_mad_floor_m=float(data["depth_mad_floor_m"]),
         min_mask_area_px=int(data["min_mask_area_px"]),
         sgbm_candidates=candidates,
+        frozen_sgbm_candidate=candidates[frozen_number - 1],
+        min_deployment_valid_points=int(data["min_deployment_valid_points"]),
         fast_max_disp_multiple=int(data["fast_max_disp_multiple"]),
         fast_candidates=fast_candidates,
     )
@@ -128,6 +137,7 @@ def load_config(path: Path = CONFIG_PATH) -> DenseStereoConfig:
     assert config.depth_mad_scale > 0.0 and config.depth_mad_floor_m > 0.0
     assert config.min_mask_area_px > 0
     assert candidates
+    assert config.min_deployment_valid_points > 0
     for candidate in candidates:
         assert candidate.block_size >= 3 and candidate.block_size % 2 == 1
     assert config.fast_max_disp_multiple > 0

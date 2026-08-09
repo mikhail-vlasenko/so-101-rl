@@ -396,6 +396,38 @@ GPU scheduling:
 - The PPO policy remains on CPU unless end-to-end profiling proves a shared GPU
   path is simpler and faster.
 
+### Stage 5 implementation result — complete and live-validated
+
+`real.rollout.object_obs.ObjectSource` now consumes both camera feeds without
+opening either device. One background loop keeps SAM3 resident, runs the two
+SAM2 trackers, triangulates the live centroid, denoises only the static-gate
+point and replaces the pending dense job with the newest eligible immutable
+pair. A second CPU loop runs the frozen sixth StereoSGBM candidate, shared
+rectification/filter/voxel/BPS path and publishes through `BPSObsState`; misses
+hold and age, while worker failures re-raise on the rollout thread. The latest
+filtered cloud remains available for diagnostics.
+
+Camera mode in `real.rollout.rollout_lift` now combines the existing arm-marker
+source with this object source, mirrors measured channels in the viewer, and
+logs cloud age, valid count/fraction, correspondence/overall rejection,
+refresh/miss counts, SAM/dense latency and startup rig movement. The panel
+registers both the mode's arguments/resources and a camera-only
+`python -m real.rollout.object_obs --seconds 5` smoke test. The software and
+sim/real contract suite passes 494 tests.
+
+After refreshing the stereo calibration, table-anchor reference and both sim
+camera snapshots, the five-second live smoke passed the rig gate at 0.09 mm /
+0.009 degrees and found the sponge in both views at SAM3 score 0.92. It
+published 86 dense refreshes with zero misses: clouds retained 1,016–1,088
+voxel points, validity was 90.7–95.0 percent, and dense latency was 24.0–30.5
+ms. The live centroid remained near `(0.141, -0.054, 0.032)` m.
+
+The available paper checkerboard was visibly bowed, so this placement snapshot
+was accepted under temporary 1.25 px reprojection / 3 px rectified-p95 gates;
+its measured values were 1.088/0.926 px and 2.665 px. `TODO.md` retains the
+action to restore both 1 px Stage 1 gates after mounting the target to a rigid
+planar backing.
+
 ## Stage 6 — policy training
 
 1. Distill from the best available privileged/tag teacher using synthetic

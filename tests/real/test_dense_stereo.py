@@ -13,6 +13,7 @@ from real.tracking.dense_stereo import (
     left_right_validity,
     sample_cloud,
     voxel_downsample,
+    load_config,
 )
 from real.tracking.eval_fast_foundation import max_disparity_for_range
 
@@ -36,6 +37,8 @@ def _config():
         depth_mad_floor_m=0.01,
         min_mask_area_px=10,
         sgbm_candidates=(SGBMCandidate(3, 5, 50, 1, 1),),
+        frozen_sgbm_candidate=SGBMCandidate(3, 5, 50, 1, 1),
+        min_deployment_valid_points=2,
         fast_max_disp_multiple=32,
         fast_candidates=(FastFoundationCandidate("23-36-37", 8),),
     )
@@ -56,6 +59,13 @@ def _rectification():
         valid_rois={"main": (0, 0, 8, 6), "aux": (0, 0, 8, 6)},
         anchor_reference_T_aux_main=None,
     )
+
+
+def test_deployment_uses_the_stage2_frozen_candidate_and_point_gate():
+    config = load_config()
+
+    assert config.frozen_sgbm_candidate == SGBMCandidate(7, 15, 150, 2, 2)
+    assert config.min_deployment_valid_points == 128
 
 
 def test_disparity_range_is_derived_and_rounded_for_sgbm():

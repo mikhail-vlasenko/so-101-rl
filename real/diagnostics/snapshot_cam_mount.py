@@ -7,9 +7,9 @@ script simply takes that same measurement
 once, robust-averages it over N frames, converts the OpenCV camera frame
 (+x right, +y down, +z into the scene) to MuJoCo's camera convention (looks
 down -z, +y up; a 180-degree flip about the camera x-axis, pinned by
-tests/real/test_cam_mount_convention.py against the main camera's existing
-extrinsics/XML pair), and prints the XML-ready line. Run it whenever a camera
-is remounted; paste the output into so101.xml.
+exact frame-direction and round-trip tests in
+tests/real/test_cam_mount_convention.py), and prints the XML-ready line. Run it
+whenever a camera is remounted; paste the output into so101.xml.
 
 Usage:
     conda run -n mujoco_env python -m real.diagnostics.snapshot_cam_mount --camera aux

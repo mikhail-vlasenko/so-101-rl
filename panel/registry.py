@@ -163,17 +163,23 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
     ScriptSpec(
         id="rollout_lift", title="Rollout: lift", page="real",
         module="real.rollout.rollout_lift", arg_style="argparse",
-        description="Lift policy on the real arm with the lockstep FK+BPS "
-                    "object source. Real camera mode remains withheld until the "
-                    "Stage 5 dense worker is complete. Dry-run unless Execute is checked.",
+        description="Lift policy with either the lockstep FK source or the "
+                    "tag-free SAM + dense-stereo camera source. Camera mode "
+                    "validates the rigid rig before publishing BPS. Dry-run "
+                    "unless Execute is checked.",
         args=(
             ArgSpec("--model", "str", "Model (latest / best / path)", default="latest",
                     checkpoint_picker="ppo_lift"),
             *_arm_loop_args(),
             ArgSpec("--seed", "int", "Cube spawn seed"),
+            ArgSpec("--marker-source", "choice", "Observation source", default="fk",
+                    choices=("fk", "camera")),
+            ArgSpec("--object-prompt", "str", "SAM3 object prompt", default="sponge"),
+            ArgSpec("--sam2-model", "choice", "SAM2 tracker size", default="tiny",
+                    choices=("tiny", "base+")),
             ArgSpec("--no-view", "flag", "Disable native MuJoCo viewer"),
         ),
-        resources=(Resource.SERIAL,),
+        resources=(Resource.SERIAL, Resource.CAMERA),
         supports_stream=True,
         stream_extra_args=("--no-view",),
     ),
@@ -248,6 +254,19 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         ),
         resources=(Resource.CAMERA,),
         native_gui=True,
+    ),
+    ScriptSpec(
+        id="object_obs", title="Live dense object source", page="camera",
+        module="real.rollout.object_obs", arg_style="argparse",
+        description="Non-arm Stage 5 smoke test: validate the stereo rig, "
+                    "track the still sponge and publish live BPS telemetry.",
+        args=(
+            ArgSpec("--seconds", "float", "Sample time after warmup", default="5"),
+            ArgSpec("--prompt", "str", "SAM3 object prompt", default="sponge"),
+            ArgSpec("--sam2-model", "choice", "SAM2 tracker size", default="tiny",
+                    choices=("tiny", "base+")),
+        ),
+        resources=(Resource.CAMERA,),
     ),
     ScriptSpec(
         id="sam_track", title="SAM stereo tracking", page="camera",

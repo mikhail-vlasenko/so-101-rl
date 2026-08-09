@@ -11,6 +11,43 @@ from tqdm.auto import tqdm
 from real.calib.extrinsics import pos_quat_to_mat
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+LIFT_CONFIG_PATH = REPO_ROOT / "conf" / "env" / "lift.yaml"
+
+
+def load_workspace_bounds():
+    """Configured lift workspace xy bounds used by dense stereo."""
+    with LIFT_CONFIG_PATH.open() as stream:
+        task = yaml.safe_load(stream)["lift_env"]
+    return (np.asarray(task["cube_low"], dtype=np.float64),
+            np.asarray(task["cube_high"], dtype=np.float64))
+
+
+class CausalMeanPosition:
+    """Suppress position jitter without using future samples."""
+
+    def __init__(self, window_s):
+        self.window_s = float(window_s)
+        if self.window_s <= 0.0:
+            raise ValueError("causal mean window must be positive")
+        self._times = []
+        self._positions = []
+
+    def update(self, t, position):
+        t = float(t)
+        self._times.append(t)
+        self._positions.append(np.asarray(position, dtype=np.float64).copy())
+        while len(self._times) > 1 and self._times[0] < t - self.window_s:
+            self._times.pop(0)
+            self._positions.pop(0)
+        return np.mean(np.stack(self._positions), axis=0)
+
+    def clear(self):
+        """Discard samples across a tracking loss."""
+        self._times.clear()
+        self._positions.clear()
+
+
 def load_dataset(dataset_dir: Path):
     with (dataset_dir / "meta.yaml").open() as stream:
         meta = yaml.safe_load(stream)
