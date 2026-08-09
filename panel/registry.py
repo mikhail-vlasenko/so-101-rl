@@ -379,6 +379,41 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         native_gui=True,
     ),
     ScriptSpec(
+        id="eval_dense_stereo", title="Evaluate dense stereo", page="camera",
+        module="real.tracking.eval_dense_stereo", arg_style="argparse",
+        description="Prepare the calibration-specific tagged dataset cache, tune "
+                    "StereoSGBM on development placements, and evaluate the frozen "
+                    "matcher on held-out tag-inpainted frames.",
+        args=(
+            ArgSpec("--dataset", "str", "Tagged sponge dataset directory"),
+            ArgSpec("--calibration", "str", "Accepted stereo calibration YAML"),
+            ArgSpec("--prompt", "str", "SAM object prompt", default="sponge"),
+            ArgSpec("--sam2-model", "choice", "SAM2 tracker size", default="tiny",
+                    choices=("tiny", "base+")),
+            ArgSpec("--prepare-only", "flag", "Only build rectified caches"),
+            ArgSpec("--analyze-only", "flag", "Only validate placement and split"),
+            ArgSpec("--max-frames", "int", "Smoke-test preprocessing frame cap"),
+        ),
+    ),
+    ScriptSpec(
+        id="eval_fast_foundation", title="Evaluate Fast Foundation Stereo",
+        page="camera", module="real.tracking.eval_fast_foundation",
+        arg_style="argparse",
+        description="Run official Fast-FoundationStereo checkpoints in the "
+                    "isolated environment and evaluate them through the same "
+                    "held-out cloud geometry gate as StereoSGBM.",
+        args=(
+            ArgSpec("--dataset", "str", "Prepared tagged sponge dataset directory"),
+            ArgSpec("--calibration", "str", "Accepted stereo calibration YAML"),
+            ArgSpec("--sam2-model", "choice", "Cached SAM2 tracker size",
+                    default="tiny", choices=("tiny", "base+")),
+            ArgSpec("--fast-root", "str", "Official Fast-FoundationStereo checkout"),
+            ArgSpec("--conda-env", "str", "Isolated conda environment",
+                    default="fast_foundation_stereo"),
+            ArgSpec("--max-development-frames", "int", "Smoke-test frame cap"),
+        ),
+    ),
+    ScriptSpec(
         id="focus_picker", title="Focus picker", page="camera",
         module="real.calib.focus_picker", arg_style="argparse",
         description="Interactively pick the pinned focus_absolute value (native cv2 window).",

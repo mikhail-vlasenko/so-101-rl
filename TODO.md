@@ -11,11 +11,11 @@ Unresolved, actionable work only. Not a changelog or project-status document.
   over-constraining two stands. After installation, re-run stereo alignment,
   checkerboard calibration, the table-anchor reference capture, and both
   `real.diagnostics.snapshot_cam_mount` camera snapshots.
-- **Replace the precise object channel with dense stereo and a pretrained
-  point-cloud encoder.** Use the accepted stereo calibration to capture a short
-  tagged dense-depth validation set, gate StereoSGBM before trying
-  Fast-FoundationStereo, then build the explicit-fit/PointNet observation only
-  from a matcher that passes the held-out geometry checks.
+- **Replace the precise object channel with the accepted StereoSGBM cloud.**
+  Fit the known sponge cuboid to the held-out-quality visible point cloud and
+  silhouettes; retain an explicit center/symmetry observation if it passes tag
+  GT, otherwise pretrain the planned PointNet encoder before changing the
+  policy observation.
 - **Pickplace `ObjectSource` rollout.** `rollout_lift` consumes the dual
   channels; after the dense-stereo observation interface lands, add the
   equivalent pickplace source with a real-table target, ring pose, and

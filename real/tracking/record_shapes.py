@@ -56,6 +56,7 @@ from src.shape_obs import STATIC_DWELL_S, is_static
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 LIFT_CONFIG_PATH = REPO_ROOT / "conf" / "env" / "lift.yaml"
+CONFIG_PATH = REPO_ROOT / "conf" / "config.yaml"
 
 
 def load_workspace_bounds():
@@ -64,6 +65,35 @@ def load_workspace_bounds():
         task = yaml.safe_load(stream)["lift_env"]
     return (np.asarray(task["cube_low"], dtype=np.float64),
             np.asarray(task["cube_high"], dtype=np.float64))
+
+
+def load_static_mean_window_s():
+    """Causal denoising window used before applying the shared static gate."""
+    with CONFIG_PATH.open() as stream:
+        value = yaml.safe_load(stream)["dense_stereo_feasibility"][
+            "static_mean_window_s"]
+    value = float(value)
+    assert 0.0 < value < STATIC_DWELL_S
+    return value
+
+
+class CausalMeanPosition:
+    """Suppress pose-estimator jitter without looking into future frames."""
+
+    def __init__(self, window_s):
+        self.window_s = float(window_s)
+        assert self.window_s > 0.0
+        self._times = []
+        self._positions = []
+
+    def update(self, t, position):
+        t = float(t)
+        self._times.append(t)
+        self._positions.append(np.asarray(position, dtype=np.float64).copy())
+        while len(self._times) > 1 and self._times[0] < t - self.window_s:
+            self._times.pop(0)
+            self._positions.pop(0)
+        return np.mean(np.stack(self._positions), axis=0)
 
 
 class Coverage:
@@ -75,6 +105,7 @@ class Coverage:
         self.counts = {}          # (face, yaw_bin, region) -> frames
         self.static_frames = 0
         self.moving_frames = 0
+        self.outside_workspace_frames = 0
         self.settle_events = 0
         self._prev_static = None
 
@@ -95,6 +126,9 @@ class Coverage:
         axis = R[:, 0] if face != "x" else R[:, 1]
         yaw_bin = int(((np.arctan2(axis[1], axis[0]) + np.pi) / (np.pi / 2))) % 4
         xy = T_base_body[:2, 3]
+        if np.any(xy < self.workspace_low) or np.any(xy > self.workspace_high):
+            self.outside_workspace_frames += 1
+            return
         cell = np.clip(((xy - self.workspace_low)
                         / (self.workspace_high - self.workspace_low) * 2)
                        .astype(int), 0, 1)
@@ -103,7 +137,8 @@ class Coverage:
 
     def report(self):
         lines = [f"coverage: static={self.static_frames} moving={self.moving_frames} "
-                 f"settles={self.settle_events}"]
+                 f"settles={self.settle_events} "
+                 f"outside={self.outside_workspace_frames}"]
         for face in "xyz":
             cells = {k: v for k, v in self.counts.items() if k[0] == face}
             total = sum(cells.values())
@@ -118,7 +153,8 @@ class Coverage:
                             if seen_face == face)
                   for face in "xyz"}
         return (f"coverage static={self.static_frames} moving={self.moving_frames} "
-                f"settles={self.settle_events}  face frames "
+                f"settles={self.settle_events} "
+                f"outside={self.outside_workspace_frames}  face frames "
                 + " ".join(f"{face}={totals[face]}" for face in "xyz"))
 
 
@@ -171,6 +207,7 @@ def main():
     coverage = Coverage(*load_workspace_bounds())
     body_hist_t: list[float] = []
     body_hist_p: list[np.ndarray] = []
+    static_filter = CausalMeanPosition(load_static_mean_window_s())
     started = time.monotonic()
     deadline = started + args.minutes * 60.0
     k = 0
@@ -236,7 +273,7 @@ def main():
                 record["body"]["fused"] = {"pos": pos.tolist(), "quat": quat.tolist()}
                 t_now = float(np.mean([record["t"][n] for n in CAMERA_NAMES]))
                 body_hist_t.append(t_now)
-                body_hist_p.append(fused[:3, 3])
+                body_hist_p.append(static_filter.update(t_now, fused[:3, 3]))
                 cutoff = t_now - 2.0 * STATIC_DWELL_S
                 while len(body_hist_t) > 2 and body_hist_t[0] < cutoff:
                     body_hist_t.pop(0)
