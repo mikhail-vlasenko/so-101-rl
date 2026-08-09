@@ -16,6 +16,10 @@ seed: null
 slow_factor: 2
 render: true   # eval.py only: false for headless metric collection
 stream_port: null  # eval/show_starts: serve sim view as MJPEG on this port (web panel)
+# eval.py only: adapt the current env to a migration teacher's observation.
+# null evaluates a current BPS checkpoint; legacy_tag evaluates the final
+# pre-BPS tag policy family through the same bridge used by distillation.
+teacher_obs: null
 
 # Per-step joint-space delta (rad) when |action|=1. Shared across all envs so
 # the policy's notion of "one step" is uniform — env yamls reference this as
@@ -183,6 +187,13 @@ marker_include_rot: false
 history_taps: [0]
 
 train:
+  # Policy observation returned by training envs. bps is the deployable path.
+  # legacy_tag exists only to PPO-refine the final 37-input tag teacher before
+  # distilling it; it requires env=lift, algorithm=ppo, resume=, and [0] history.
+  policy_obs: bps
+  # Optional subdirectory below logs/<algorithm>_<env>/, useful for isolated
+  # migration/refinement runs that must not overwrite the main final_model.zip.
+  run_name: null
   time_limit_minutes: 20
   # Deliberately oversubscribed (the box has 16 cores): at one worker per core
   # the learner has none, so every vec-step waits on a descheduled straggler.

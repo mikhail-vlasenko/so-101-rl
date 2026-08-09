@@ -10,7 +10,12 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
-from src.base_env import RuntimeEnvConfig, obs_dim_for, state_dim_for
+from src.base_env import (
+    RuntimeEnvConfig,
+    legacy_tag_actor_dim_for,
+    obs_dim_for,
+    state_dim_for,
+)
 from src.bps import BPSConfig, bps_fingerprint, validate_checkpoint_bps
 from src.callbacks import (
     CompletionRateCallback, CubeDragCallback, EpisodeCountCallback, EpisodeLengthCallback,
@@ -21,6 +26,7 @@ from src.callbacks import (
 from src.networks import LayerNormActorCriticPolicy, LayerNormSACPolicy
 from src.obs_norm import build_obs_norm, build_reach_obs_norm
 from src.lift_env import SO101LiftEnv
+from src.legacy_tag_env import LegacyTagActorObs
 from src.pickplace_env import SO101PickPlaceEnv
 from src.reach_env import SO101ReachEnv
 from src.sim_bps import SyntheticCloudConfig
@@ -99,11 +105,21 @@ def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1,
                    cfg=cfg)
 
 
-def _make_env_fn(env_cls, env_cfg, xml_path, *, cfg: RuntimeEnvConfig):
+def _policy_obs_env(env, policy_obs_mode: str):
+    """Apply the explicit training observation mode to one raw environment."""
+    if policy_obs_mode == "bps":
+        return env
+    if policy_obs_mode == "legacy_tag":
+        return LegacyTagActorObs(env)
+    raise ValueError(f"Unknown train.policy_obs: {policy_obs_mode!r}")
+
+
+def _make_env_fn(env_cls, env_cfg, xml_path, *, cfg: RuntimeEnvConfig,
+                 policy_obs_mode: str = "bps"):
     """Factory closure for SubprocVecEnv."""
     def _init():
-        return Monitor(env_cls(env_cfg=env_cfg, xml_path=xml_path,
-                               cfg=cfg))
+        env = env_cls(env_cfg=env_cfg, xml_path=xml_path, cfg=cfg)
+        return Monitor(_policy_obs_env(env, policy_obs_mode))
     return _init
 
 
@@ -142,7 +158,8 @@ def _resolve_env(cfg, orig_dir, env_name):
     return env_cls, cfg[f"{env_name}_env"], os.path.join(orig_dir, env_cls.XML_PATH)
 
 
-def env_specs(cfg, orig_dir, runtime_cfg: RuntimeEnvConfig, n_envs: int):
+def env_specs(cfg, orig_dir, runtime_cfg: RuntimeEnvConfig, n_envs: int,
+              policy_obs_mode: str = "bps"):
     """(env_fns, eval_inner, n_substeps) for the configured env(s).
 
     Encapsulates the multitask-vs-single branching so training and the
@@ -155,19 +172,24 @@ def env_specs(cfg, orig_dir, runtime_cfg: RuntimeEnvConfig, n_envs: int):
         pp_cls, pp_cfg, pp_xml = _resolve_env(cfg, orig_dir, "pickplace")
         n_lift = round(n_envs * cfg.lift_ratio)
         env_fns = [
-            _make_env_fn(lift_cls, lift_cfg, lift_xml, cfg=runtime_cfg) if i < n_lift
-            else _make_env_fn(pp_cls, pp_cfg, pp_xml, cfg=runtime_cfg)
+            _make_env_fn(lift_cls, lift_cfg, lift_xml, cfg=runtime_cfg,
+                         policy_obs_mode=policy_obs_mode) if i < n_lift
+            else _make_env_fn(pp_cls, pp_cfg, pp_xml, cfg=runtime_cfg,
+                              policy_obs_mode=policy_obs_mode)
             for i in range(n_envs)
         ]
-        eval_inner = make_env(pp_cls, pp_cfg, pp_xml, cfg=runtime_cfg)
+        eval_inner = _policy_obs_env(
+            make_env(pp_cls, pp_cfg, pp_xml, cfg=runtime_cfg), policy_obs_mode)
         assert int(lift_cfg["n_substeps"]) == int(pp_cfg["n_substeps"]), \
             "multitask envs must share a control rate for one obs_norm qvel scale"
         n_substeps = int(lift_cfg["n_substeps"])
     else:
         env_cls, env_cfg, xml_path = _resolve_env(cfg, orig_dir, cfg.env_name)
-        env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, cfg=runtime_cfg)
+        env_fns = [_make_env_fn(env_cls, env_cfg, xml_path, cfg=runtime_cfg,
+                                policy_obs_mode=policy_obs_mode)
                    for _ in range(n_envs)]
-        eval_inner = make_env(env_cls, env_cfg, xml_path, cfg=runtime_cfg)
+        eval_inner = _policy_obs_env(
+            make_env(env_cls, env_cfg, xml_path, cfg=runtime_cfg), policy_obs_mode)
         n_substeps = int(env_cfg["n_substeps"])
     return env_fns, eval_inner, n_substeps
 
@@ -265,7 +287,19 @@ def train(cfg: DictConfig):
 
     runtime_cfg = runtime_cfg_from_hydra(cfg)
 
-    env_fns, eval_inner, n_substeps = env_specs(cfg, orig_dir, runtime_cfg, n_envs)
+    policy_obs_mode = str(cfg.train.policy_obs)
+    if policy_obs_mode == "legacy_tag":
+        assert cfg.env_name == "lift", \
+            "legacy_tag training is retained only for the final lift teacher"
+        assert cfg.algorithm == "ppo", \
+            "the retained legacy tag teacher is a PPO checkpoint"
+        assert cfg.resume is not None, \
+            "legacy_tag training only adapts an existing migration teacher"
+        assert list(cfg.history_taps) == [0], \
+            "the legacy tag checkpoint is single-frame"
+
+    env_fns, eval_inner, n_substeps = env_specs(
+        cfg, orig_dir, runtime_cfg, n_envs, policy_obs_mode)
 
     # Fixed input normalization constants (src/obs_norm.py), tiled across
     # history taps. Passed as plain lists inside policy_kwargs so they
@@ -285,6 +319,8 @@ def train(cfg: DictConfig):
     eval_env = VecNormalize(eval_vec_env, norm_obs=False, training=False, norm_reward=False)
 
     log_dir = os.path.join(orig_dir, "logs", f"{algo_name}_{cfg.env_name}")
+    if cfg.train.run_name is not None:
+        log_dir = os.path.join(log_dir, str(cfg.train.run_name))
     os.makedirs(log_dir, exist_ok=True)
 
     # W&B init (syncs metrics via tensorboard, no checkpoint uploads)
@@ -344,7 +380,16 @@ def train(cfg: DictConfig):
             tensorboard_log=os.path.join(orig_dir, "logs"),
             **overrides,
         )
-        if cfg.env_name != "reach":
+        if policy_obs_mode == "legacy_tag":
+            expected = legacy_tag_actor_dim_for(
+                int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+            assert model.observation_space.shape == (expected,), (
+                "legacy_tag resume needs the symmetric actor-only checkpoint "
+                f"space {(expected,)}, got {model.observation_space.shape}")
+            assert ("actor_obs_dim" not in model.policy_kwargs or
+                    model.policy_kwargs["actor_obs_dim"] is None), \
+                "legacy_tag resume expects the symmetric pre-asymmetric checkpoint"
+        elif cfg.env_name != "reach":
             validate_checkpoint_bps(model, runtime_cfg.bps_config)
     else:
         model = build_fresh_model(

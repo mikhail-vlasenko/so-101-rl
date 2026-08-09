@@ -7,6 +7,7 @@ Usage:
     python eval.py episodes=20              # override episode count
     python eval.py algorithm=ppo            # evaluate PPO model
     python eval.py seed=42                  # fixed seed (incremented per episode)
+    python eval.py env=lift model=old.zip teacher_obs=legacy_tag
 """
 
 import os
@@ -19,7 +20,14 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.checkpoints import resolve_model_path
 from src.bps import validate_checkpoint_bps
-from src.train import ENV_REGISTRY, _resolve_env, make_env, runtime_cfg_from_hydra
+from src.base_env import (
+    legacy_tag_actor_dim_for,
+    obs_dim_for,
+    priv_dim_for,
+    state_dim_for,
+)
+from src.teacher_obs import teacher_observation, validate_teacher_obs_dim
+from src.train import _resolve_env, make_env, runtime_cfg_from_hydra
 
 ALGORITHM_CLASSES = {
     "sac": SAC,
@@ -50,13 +58,34 @@ def main(cfg: DictConfig):
     model = algo_cls.load(model_path)
 
     runtime_cfg = runtime_cfg_from_hydra(cfg)
-    if cfg.env_name != "reach":
+    teacher_obs_mode = cfg.teacher_obs
+    if teacher_obs_mode is None and cfg.env_name != "reach":
         validate_checkpoint_bps(model, runtime_cfg.bps_config)
     render_mode = "human" if cfg.render else None
     inner_env = make_env(env_cls, env_cfg, xml_path, render_mode=render_mode,
                          slow_factor=cfg.slow_factor,
                          cfg=runtime_cfg)
     vec_env = DummyVecEnv([lambda: inner_env])
+
+    teacher_dims = None
+    if teacher_obs_mode is not None:
+        assert cfg.env_name != "reach", \
+            "teacher_obs adapters apply only to cube environments"
+        single_actor_dim = obs_dim_for(
+            int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+        state_dim = state_dim_for(
+            int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+        priv_dim = priv_dim_for(bool(cfg.marker_include_rot))
+        legacy_actor_dim = legacy_tag_actor_dim_for(
+            int(cfg.prev_actions_n), bool(cfg.marker_include_rot))
+        teacher_obs_dim = model.observation_space.shape[0]
+        validate_teacher_obs_dim(
+            teacher_obs_mode, teacher_obs_dim,
+            inner_env.observation_space.shape[0], single_actor_dim, priv_dim,
+            legacy_actor_dim)
+        if teacher_obs_mode != "legacy_tag":
+            validate_checkpoint_bps(model, runtime_cfg.bps_config)
+        teacher_dims = (state_dim, priv_dim, legacy_actor_dim, teacher_obs_dim)
 
     publisher = None
     if cfg.stream_port is not None:
@@ -74,7 +103,11 @@ def main(cfg: DictConfig):
             done = False
             info = {}
             while not done:
-                action, _ = model.predict(obs, deterministic=deterministic)
+                policy_obs = obs
+                if teacher_dims is not None:
+                    policy_obs = teacher_observation(
+                        vec_env, obs, teacher_obs_mode, *teacher_dims)
+                action, _ = model.predict(policy_obs, deterministic=deterministic)
                 obs, reward, dones, infos = vec_env.step(action)
                 total_reward += float(reward[0])
                 done = bool(dones[0])

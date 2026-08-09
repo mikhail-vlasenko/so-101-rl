@@ -14,10 +14,17 @@ from hydra import compose, initialize
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.base_env import obs_dim_for, priv_dim_for
+from src.base_env import (
+    legacy_tag_actor_dim_for,
+    obs_dim_for,
+    priv_dim_for,
+    state_dim_for,
+)
 from src.bps import bps_fingerprint
 from src.distill import DistillBuffer, _policy_outputs, distill, regress
 from src.lift_env import SO101LiftEnv
+from src.legacy_tag_env import LegacyTagActorObs
+from src.teacher_obs import teacher_observation, validate_teacher_obs_dim
 from src.train import (
     actor_obs_dim_for, build_fresh_model, obs_norm_for, resume_overrides,
     runtime_cfg_from_hydra,
@@ -39,6 +46,47 @@ def _lift_venv(cfg):
     return DummyVecEnv([lambda: SO101LiftEnv(
         env_cfg=cfg.lift_env, xml_path="so101/scene_lift.xml",
         cfg=runtime_cfg_from_hydra(cfg))])
+
+
+def test_actor_only_legacy_teacher_view_matches_checkpoint_layout(lift_cfg):
+    """The final symmetric tag teacher has no privileged critic tail."""
+    venv = _lift_venv(lift_cfg)
+    student_obs = venv.reset()
+    prev_actions_n = int(lift_cfg.prev_actions_n)
+    include_rot = bool(lift_cfg.marker_include_rot)
+    state_dim = state_dim_for(prev_actions_n, include_rot)
+    priv_dim = priv_dim_for(include_rot)
+    legacy_actor_dim = legacy_tag_actor_dim_for(prev_actions_n, include_rot)
+
+    validate_teacher_obs_dim(
+        "legacy_tag", legacy_actor_dim, student_obs.shape[1],
+        obs_dim_for(prev_actions_n, include_rot), priv_dim, legacy_actor_dim)
+    teacher_obs = teacher_observation(
+        venv, student_obs, "legacy_tag", state_dim, priv_dim,
+        legacy_actor_dim, legacy_actor_dim)
+
+    assert teacher_obs.shape == (1, legacy_actor_dim)
+    np.testing.assert_allclose(
+        teacher_obs[0], venv.envs[0].legacy_tag_obs()[:legacy_actor_dim])
+    venv.close()
+
+
+def test_legacy_training_wrapper_serves_actor_only_tag_view(lift_cfg):
+    raw = SO101LiftEnv(
+        env_cfg=lift_cfg.lift_env, xml_path="so101/scene_lift.xml",
+        cfg=runtime_cfg_from_hydra(lift_cfg))
+    env = LegacyTagActorObs(raw)
+
+    obs, _ = env.reset(seed=7)
+    expected = legacy_tag_actor_dim_for(
+        int(lift_cfg.prev_actions_n), bool(lift_cfg.marker_include_rot))
+    assert env.observation_space.shape == (expected,)
+    assert obs.shape == (expected,)
+    np.testing.assert_allclose(obs, raw.legacy_tag_obs()[:expected])
+
+    obs, _, _, _, _ = env.step(np.zeros(6, dtype=np.float32))
+    np.testing.assert_allclose(obs, raw.legacy_tag_obs()[:expected])
+    env.close()
 
 
 # --------------------------------------------------------------------------
