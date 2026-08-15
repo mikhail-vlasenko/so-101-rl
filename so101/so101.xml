@@ -218,7 +218,7 @@
                    edit by hand. quat stays the by-hand estimate (in-plane glue
                    turns live in extrinsics.yaml quarter_turns). -->
               <site name="marker_wrist" type="box" group="2" size="0.01 0.01 0.0005"
-                    pos="0.000785909 -0.0224493 -0.0104879" quat="0 1 0 0" rgba="0.9 0.1 0.1 1"/>
+                    pos="-9.37138e-05 -0.0222935 -0.0108401" quat="0 1 0 0" rgba="0.9 0.1 0.1 1"/>
               <!-- Link gripper -->
               <body name="gripper" pos="5.55112e-17 -0.0611 0.0181" quat="0.0172091 -0.0172091 0.706897 0.706897">
                 <!-- Joint from wrist to gripper -->
@@ -253,7 +253,7 @@
                      — written by real/calibrate_qpos.py; don't edit by hand.
                      quat stays the by-hand estimate (+ quarter_turns). -->
                 <site name="marker_finger" type="box" group="2" size="0.01 0.01 0.0005"
-                      pos="-0.0349518 -2.23202e-06 -0.0248959" quat="0.5 -0.5 -0.5 0.5"
+                      pos="-0.0359585 2.75695e-06 -0.0247098" quat="0.5 -0.5 -0.5 0.5"
                       rgba="0.9 0.1 0.1 1"/>
                 <!-- Frame gripperframe -->
                 <site group="3" name="gripperframe" pos="0.012 -0.000218 -0.098127" quat="1 0 1 0"/>
