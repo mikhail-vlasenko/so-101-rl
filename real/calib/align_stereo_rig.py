@@ -237,12 +237,13 @@ def relative_pose_change(T_current: np.ndarray,
 
 def camera_movement_warning(
         movement_mm: float, movement_deg: float,
-        translation_limit_mm: float, rotation_limit_deg: float) -> str | None:
+        translation_limit_mm: float, rotation_limit_deg: float,
+        reference_description: str = "their stereo calibration") -> str | None:
     """Return the operator instruction when tag poses show calibration drift."""
     if movement_mm <= translation_limit_mm and movement_deg <= rotation_limit_deg:
         return None
     return (
-        "WARNING: cameras moved relative to their stereo calibration "
+        f"WARNING: cameras moved relative to {reference_description} "
         f"({movement_mm:.2f} mm / {movement_deg:.3f} deg). Lay the "
         "checkerboard flat in both views and rerun "
         "`python -m real.calib.calibrate_stereo` before dense stereo."

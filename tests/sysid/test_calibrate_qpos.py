@@ -189,6 +189,47 @@ def test_joint_board_anchors_recover_live_relative_camera_pose():
     np.testing.assert_allclose(measured, T_aux_main, atol=1e-12)
 
 
+def test_rig_guard_uses_accepted_preflight_as_run_reference():
+    calibration_reference = np.eye(4)
+    preflight = np.eye(4)
+    preflight[:3, :3] = Rotation.from_euler(
+        "x", 0.130, degrees=True).as_matrix()
+    preflight[0, 3] = 0.00080
+    guard = cq.StereoRigMovementGuard(
+        calibration_reference, translation_limit_mm=1.0,
+        rotation_limit_deg=0.15)
+
+    movement_mm, movement_deg = guard.check(preflight)
+    assert np.isclose(movement_mm, 0.8)
+    assert np.isclose(movement_deg, 0.130)
+
+    jittered = preflight.copy()
+    jittered[:3, :3] = Rotation.from_euler(
+        "x", 0.158, degrees=True).as_matrix()
+    jittered[0, 3] = 0.00106
+    movement_mm, movement_deg = guard.check(jittered)
+    assert np.isclose(movement_mm, 0.26)
+    assert np.isclose(movement_deg, 0.028)
+
+
+def test_rig_guard_rejects_startup_drift_and_in_run_motion():
+    calibration_reference = np.eye(4)
+    guard = cq.StereoRigMovementGuard(
+        calibration_reference, translation_limit_mm=1.0,
+        rotation_limit_deg=0.15)
+    bad_preflight = np.eye(4)
+    bad_preflight[0, 3] = 0.0011
+    with pytest.raises(RuntimeError, match="stereo calibration"):
+        guard.check(bad_preflight)
+
+    guard.check(calibration_reference)
+    moved = np.eye(4)
+    moved[:3, :3] = Rotation.from_euler(
+        "z", 0.16, degrees=True).as_matrix()
+    with pytest.raises(RuntimeError, match="accepted start-of-run pose"):
+        guard.check(moved)
+
+
 def test_recovers_planted_mount_offset(setup, monkeypatch):
     """The joint solve recovers a planted *wrist*-tag centre offset together with the
     lift/elbow/wrist_flex biases: clean data pins both to precision, so the bias+mount

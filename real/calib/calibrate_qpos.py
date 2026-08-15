@@ -30,6 +30,11 @@ How it works:
     residual cutoff (against the compliance-aware forward model, so a real per-pose
     outlier can't hide in the looser bias-only field) and the fit re-run, so one bad
     point can't skew it.
+  - Before torque is enabled, the stereo rig pose recovered from the two table
+    tags is checked against the saved post-calibration reference. That accepted
+    live pose becomes the run reference; per-pose checks detect camera motion
+    during the sweep without repeatedly tripping on saved-reference estimator
+    jitter near the startup tolerance.
 
 The dry-run (no --execute) previews the sweep in the sim viewer (one pose/second),
 so the trajectory can be eyeballed before any hardware moves. With --stream-port
@@ -365,8 +370,9 @@ def generate_poses(model, data, jm):
     are visible and it is collision-free (and, at pan=middle, actually reaches the
     target). The kept poses are then re-ordered for drive safety (order_drive_safe)
     and the ordering is verified collision-free (verify_drive_safe). Returns
-    (poses, n_grid) where n_grid is the pan=middle grid count (composition, not order:
-    after the safety re-order the grid poses are interleaved with the panned ones)."""
+    (poses, n_grid) where n_grid is the primary pan=middle grid count (composition,
+    not order: after the safety re-order those poses are interleaved with the
+    wrist-up and panned supplements)."""
     qposadr = jm.qposadr()
     b_lo = jm.xml_low()[list(FREE_JOINTS)] + POSE_MARGIN_RAD
     b_hi = jm.xml_high()[list(FREE_JOINTS)] - POSE_MARGIN_RAD
@@ -636,6 +642,42 @@ def measured_relative_camera_pose(camera_anchors: dict[str, np.ndarray]) -> np.n
     return mat_inv(camera_anchors["aux"]) @ camera_anchors["main"]
 
 
+class StereoRigMovementGuard:
+    """Gate startup against calibration, then motion against the run start.
+
+    A live joint-board estimate can sit near the saved-reference tolerance and
+    jitter across it even when the hardware is untouched. Once that estimate has
+    passed preflight, subsequent observations must stay close to the accepted
+    episode pose instead of repeatedly proving the historical absolute placement.
+    """
+
+    def __init__(self, calibration_reference, translation_limit_mm,
+                 rotation_limit_deg):
+        self.calibration_reference = np.asarray(
+            calibration_reference, dtype=np.float64).copy()
+        self.translation_limit_mm = float(translation_limit_mm)
+        self.rotation_limit_deg = float(rotation_limit_deg)
+        self.run_reference = None
+
+    def check(self, measured):
+        preflight = self.run_reference is None
+        reference = (self.calibration_reference if preflight
+                     else self.run_reference)
+        movement_mm, movement_deg = relative_pose_change(measured, reference)
+        description = ("their stereo calibration" if preflight
+                       else "their accepted start-of-run pose")
+        warning = camera_movement_warning(
+            movement_mm, movement_deg,
+            self.translation_limit_mm, self.rotation_limit_deg,
+            description,
+        )
+        if warning is not None:
+            raise RuntimeError(warning)
+        if preflight:
+            self.run_reference = np.asarray(measured, dtype=np.float64).copy()
+        return movement_mm, movement_deg
+
+
 class RigMarkerCameras:
     """Own both named camera readers and fuse their settled tag captures."""
 
@@ -647,6 +689,11 @@ class RigMarkerCameras:
                 "run real.calib.align_stereo_rig with "
                 "--record-stereo-anchor-reference first")
         self.limits = load_stereo_limits()
+        self.movement_guard = StereoRigMovementGuard(
+            self.rectification.anchor_reference_T_aux_main,
+            self.limits.camera_movement_warning_translation_mm,
+            self.limits.camera_movement_warning_rotation_deg,
+        )
         self._stream = (
             _FrameStreamer(stream_port) if stream_port is not None else None)
         self._frames = {}
@@ -684,15 +731,7 @@ class RigMarkerCameras:
                 or any(anchors[name] is None for name in CAMERA_NAMES)):
             return fused, poses, float("nan"), float("nan")
         measured = measured_relative_camera_pose(anchors)
-        reference = self.rectification.anchor_reference_T_aux_main
-        movement_mm, movement_deg = relative_pose_change(measured, reference)
-        warning = camera_movement_warning(
-            movement_mm, movement_deg,
-            self.limits.camera_movement_warning_translation_mm,
-            self.limits.camera_movement_warning_rotation_deg,
-        )
-        if warning is not None:
-            raise RuntimeError(warning)
+        movement_mm, movement_deg = self.movement_guard.check(measured)
         return fused, poses, movement_mm, movement_deg
 
     def close(self):
@@ -715,14 +754,17 @@ def drive_to(bus, jm, direction, pose, prev_raw, max_raw_delta):
 
 
 def capture(args, jm, direction, poses, max_raw_delta):
-    """Drive to each pose and capture (qpos, tags). Returns the samples list.
+    """Drive to each pose and capture fused plus native per-camera tag poses.
 
     Both cameras run in background threads and the optional stream shows their
     annotated side-by-side view. Their tag positions are fused into the main
-    camera frame before entering the unchanged position-only solver."""
+    camera frame before entering the unchanged position-only solver. Native poses
+    remain paired with every kept sample so camera disagreement can be diagnosed
+    after the run."""
     cams = RigMarkerCameras(args.family, args.stream_port)
     bus = ServoBus(args.port, jm.servo_ids())
     samples = []
+    camera_samples = []
     try:
         cams.start()
         _, preflight_poses, movement_mm, movement_deg = cams.capture_median(
@@ -764,13 +806,20 @@ def capture(args, jm, direction, poses, max_raw_delta):
                 continue
             qpos = raw_to_rad(bus.read_all(), jm, direction)
             samples.append((qpos.copy(), tag_poses))
+            camera_samples.append({
+                name: {
+                    tag: (rvec.copy(), tvec.copy())
+                    for tag, (rvec, tvec) in camera_poses[name].items()
+                }
+                for name in CAMERA_NAMES
+            })
             print(f"  pose {i + 1}/{len(poses)}: captured arm tags {arm_seen} "
                   f"rig={movement_mm:.2f}mm/{movement_deg:.3f}deg "
                   f"({len(samples)} kept)")
     finally:
         bus.close()  # torque off
         cams.close()
-    return samples
+    return samples, camera_samples, cams.rectification.T_aux_main.copy()
 
 
 def _backlash_dofs(model):
@@ -1137,7 +1186,8 @@ def main():
     else:
         poses, n_grid = generate_poses(model, data, jm)
         print(f"generated {len(poses)} sweep poses "
-              f"({n_grid} pan=middle grid, {len(poses) - n_grid} panned), table-hugging")
+              f"({n_grid} primary grid, {len(poses) - n_grid} wrist-up/panned "
+              "supplements), table-hugging")
         if not args.execute:
             print("dry-run: previewing the sweep in sim "
                   "(pass --execute to drive the arm and capture).")
@@ -1145,8 +1195,11 @@ def main():
             return
         max_raw_delta = max_raw_delta_per_step(
             float(OmegaConf.load(CONFIG_YAML)["action_scale"]))
-        samples = capture(args, jm, direction, poses, max_raw_delta)
-        save_samples(args.samples_out, samples)
+        samples, camera_samples, T_aux_main = capture(
+            args, jm, direction, poses, max_raw_delta)
+        save_samples(
+            args.samples_out, samples,
+            camera_samples=camera_samples, T_aux_main=T_aux_main)
         print(f"saved {len(samples)} samples to {args.samples_out}")
 
     if len(samples) < MIN_SAMPLES:

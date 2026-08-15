@@ -1,10 +1,14 @@
 """Position-based calibration solve from arm-tag samples (no camera or servos).
 
 Shared by the encoder-bias calibrator (`real/calib/calibrate_qpos.py`) and the residual
-plot (`real/calib/plot_calib_residuals.py`). A "sample" is `(qpos[6], {tag_id: (rvec,
-tvec)})`: the joint angles at a captured pose and each tag's pose in the camera
-frame. From a spread of samples these helpers register the camera in the arm base
-frame, anchor the fixed two-tag table board, and recover each arm tag's glue offset.
+plot (`real/calib/plot_calib_residuals.py`). A solver sample is `(qpos[6], {tag_id:
+(rvec, tvec)})`: the joint angles at a captured pose and each fused tag pose in the
+main-camera frame. Version-2 sample files additionally preserve each camera's native
+poses and the exact stereo transform used for fusion; `load_samples` intentionally
+returns only the unchanged solver samples, while `load_rig_samples` exposes the raw
+measurements for stereo disagreement diagnostics. From a spread of samples these
+helpers register the camera in the arm base frame, anchor the fixed two-tag table
+board, and recover each arm tag's glue offset.
 
 The camera measures every tag in its own frame; the only thing it can't know is how
 that frame relates to the arm base. The *arm* tags hand it over for free: MuJoCo FK
@@ -36,6 +40,7 @@ from real.calib.extrinsics import (
     transform_spread,
 )
 from real.marker_spec import TABLE_TAG_IDS
+from real.vision.stereo_rig import CAMERA_NAMES
 from src.base_env import TAG_CAM_NAME
 
 
@@ -61,25 +66,116 @@ def sim_cam_R_opencv(model, data):
     return R_gl @ np.diag([1.0, -1.0, -1.0])
 
 
-def save_samples(path, samples):
-    out = {"samples": [
-        {"qpos": qpos.tolist(),
-         "tags": {str(tag): {"rvec": rvec.tolist(), "tvec": tvec.tolist()}
-                  for tag, (rvec, tvec) in poses.items()}}
-        for qpos, poses in samples]}
+def _poses_to_json(poses):
+    return {
+        str(tag): {"rvec": rvec.tolist(), "tvec": tvec.tolist()}
+        for tag, (rvec, tvec) in poses.items()
+    }
+
+
+def _poses_from_json(poses):
+    return {
+        int(tag): (np.asarray(value["rvec"], dtype=np.float64),
+                   np.asarray(value["tvec"], dtype=np.float64))
+        for tag, value in poses.items()
+    }
+
+
+def save_samples(path, samples, *, camera_samples=None, T_aux_main=None):
+    """Save fused solver samples and, when supplied, native stereo measurements.
+
+    `camera_samples[i][camera]` corresponds exactly to `samples[i]`. The stereo
+    transform is stored with them so later diagnostics do not silently reinterpret
+    aux poses through a newer calibration file.
+    """
+    preserving_rig = camera_samples is not None or T_aux_main is not None
+    if preserving_rig and (camera_samples is None or T_aux_main is None):
+        raise ValueError("camera_samples and T_aux_main must be supplied together")
+    if camera_samples is not None and len(camera_samples) != len(samples):
+        raise ValueError(
+            f"camera sample count {len(camera_samples)} != fused sample count "
+            f"{len(samples)}")
+
+    records = []
+    for index, (qpos, poses) in enumerate(samples):
+        record = {"qpos": qpos.tolist(), "tags": _poses_to_json(poses)}
+        if camera_samples is not None:
+            by_camera = camera_samples[index]
+            if set(by_camera) != set(CAMERA_NAMES):
+                raise ValueError(
+                    f"camera sample {index} must contain exactly {CAMERA_NAMES}")
+            record["camera_poses"] = {
+                camera: _poses_to_json(by_camera[camera])
+                for camera in CAMERA_NAMES
+            }
+        records.append(record)
+
+    out = {"schema_version": 2 if T_aux_main is not None else 1,
+           "samples": records}
+    if T_aux_main is not None:
+        transform = np.asarray(T_aux_main, dtype=np.float64)
+        if transform.shape != (4, 4):
+            raise ValueError(f"T_aux_main must be 4x4, got {transform.shape}")
+        out["stereo_rig"] = {
+            "camera_names": list(CAMERA_NAMES),
+            "T_aux_main": transform.tolist(),
+        }
     with open(path, "w") as f:
         json.dump(out, f, indent=2)
 
 
-def load_samples(path):
+def _load_sample_document(path):
     with open(path) as f:
         data = json.load(f)
+    version = int(data["schema_version"]) if "schema_version" in data else 1
+    if version not in (1, 2):
+        raise RuntimeError(f"unsupported calibration sample schema {version}")
+    return data, version
+
+
+def load_samples(path):
+    """Load fused solver samples from legacy or stereo-preserving files."""
+    data, _ = _load_sample_document(path)
+    return [
+        (np.asarray(sample["qpos"], dtype=np.float64),
+         _poses_from_json(sample["tags"]))
+        for sample in data["samples"]
+    ]
+
+
+def load_rig_samples(path):
+    """Load fused samples, native per-camera poses, and their stereo transform."""
+    data, version = _load_sample_document(path)
+    if version != 2 or "stereo_rig" not in data:
+        raise RuntimeError(f"{path} does not contain preserved stereo measurements")
+    rig = data["stereo_rig"]
+    if tuple(rig["camera_names"]) != CAMERA_NAMES:
+        raise RuntimeError(
+            f"sample cameras {tuple(rig['camera_names'])} != configured {CAMERA_NAMES}")
+
     samples = []
-    for s in data["samples"]:
-        poses = {int(tag): (np.array(t["rvec"]), np.array(t["tvec"]))
-                 for tag, t in s["tags"].items()}
-        samples.append((np.array(s["qpos"]), poses))
-    return samples
+    camera_samples = []
+    for index, sample in enumerate(data["samples"]):
+        if "camera_poses" not in sample:
+            raise RuntimeError(f"sample {index} has no native camera poses")
+        by_camera = sample["camera_poses"]
+        if set(by_camera) != set(CAMERA_NAMES):
+            raise RuntimeError(
+                f"sample {index} cameras {tuple(by_camera)} != configured "
+                f"{CAMERA_NAMES}")
+        samples.append((
+            np.asarray(sample["qpos"], dtype=np.float64),
+            _poses_from_json(sample["tags"]),
+        ))
+        camera_samples.append({
+            camera: _poses_from_json(by_camera[camera])
+            for camera in CAMERA_NAMES
+        })
+    T_aux_main = np.asarray(rig["T_aux_main"], dtype=np.float64)
+    if T_aux_main.shape != (4, 4):
+        raise RuntimeError(
+            f"saved T_aux_main must be 4x4, got {T_aux_main.shape}")
+    return samples, camera_samples, T_aux_main
 
 
 def determine_quarter_turns(samples, model, data, qposadr, site_ids, R_cam_approx):

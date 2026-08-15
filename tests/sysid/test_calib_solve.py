@@ -10,6 +10,7 @@ spins about its centre). `determine_quarter_turns` must still vote that glue bac
 for the rotation channel. These cover the position registration, the tag->site
 mapping, and the glue handling end to end.
 """
+import json
 from pathlib import Path
 
 import mujoco
@@ -19,6 +20,9 @@ from scipy.spatial.transform import Rotation
 
 from real.calib.calib_solve import (
     determine_quarter_turns,
+    load_rig_samples,
+    load_samples,
+    save_samples,
     site_mat,
     solve_camera,
     solve_table_anchors,
@@ -127,6 +131,68 @@ def test_glue_offset_voted():
     assert quarter_turns == glue
     for _, res, _ in report.values():
         assert res.max() < 1e-6   # a clean quarter turn leaves no residual
+
+
+def _assert_poses_equal(actual, expected):
+    assert set(actual) == set(expected)
+    for tag in expected:
+        np.testing.assert_allclose(actual[tag][0], expected[tag][0])
+        np.testing.assert_allclose(actual[tag][1], expected[tag][1])
+
+
+def test_stereo_sample_round_trip_preserves_native_measurements(tmp_path):
+    qpos = np.linspace(-0.3, 0.3, 6)
+    fused = {
+        0: (np.array([0.1, 0.2, 0.3]), np.array([0.04, -0.02, 0.35])),
+        10: (np.array([0.0, 0.0, 0.2]), np.array([0.10, 0.03, 0.42])),
+    }
+    camera_samples = [{
+        "main": {
+            0: (np.array([0.11, 0.21, 0.31]), np.array([0.041, -0.021, 0.351])),
+            10: (np.array([0.0, 0.0, 0.21]), np.array([0.101, 0.03, 0.421])),
+        },
+        "aux": {
+            0: (np.array([0.09, 0.19, 0.29]), np.array([-0.06, -0.02, 0.36])),
+            10: (np.array([0.0, 0.0, 0.19]), np.array([0.001, 0.03, 0.43])),
+        },
+    }]
+    T_aux_main = make_T([0.01, -0.02, 0.03], [-0.105, 0.002, -0.01])
+    path = tmp_path / "samples.json"
+
+    save_samples(
+        path, [(qpos, fused)], camera_samples=camera_samples,
+        T_aux_main=T_aux_main)
+
+    loaded = load_samples(path)
+    assert len(loaded) == 1
+    np.testing.assert_allclose(loaded[0][0], qpos)
+    _assert_poses_equal(loaded[0][1], fused)
+
+    rig_samples, loaded_cameras, loaded_T = load_rig_samples(path)
+    np.testing.assert_allclose(rig_samples[0][0], qpos)
+    _assert_poses_equal(rig_samples[0][1], fused)
+    for camera in ("main", "aux"):
+        _assert_poses_equal(loaded_cameras[0][camera], camera_samples[0][camera])
+    np.testing.assert_allclose(loaded_T, T_aux_main)
+
+
+def test_legacy_sample_file_still_loads(tmp_path):
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({
+        "samples": [{
+            "qpos": [0.0] * 6,
+            "tags": {"0": {"rvec": [0.1, 0.2, 0.3],
+                            "tvec": [0.04, -0.02, 0.35]}},
+        }],
+    }))
+
+    samples = load_samples(path)
+
+    assert len(samples) == 1
+    np.testing.assert_allclose(samples[0][0], 0.0)
+    np.testing.assert_allclose(samples[0][1][0][1], [0.04, -0.02, 0.35])
+    with pytest.raises(RuntimeError, match="does not contain preserved stereo"):
+        load_rig_samples(path)
 
 
 if __name__ == "__main__":
