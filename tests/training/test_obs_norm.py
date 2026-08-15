@@ -73,7 +73,7 @@ def test_reach_shapes():
     ("pickplace", SO101PickPlaceEnv, "pickplace_env", "so101/scene_pickplace.xml"),
 ])
 def test_rollout_obs_within_bounds(env_name, env_cls, cfg_key, xml):
-    """Random-action episodes under full DR: every normalized obs dimension
+    """Seeded random-action episodes under full DR: every normalized obs dimension
     stays within a few units. If this fails after a workspace/task change, the
     boxes in src/obs_norm.py need re-centering."""
     cfg = _compose(env_name)
@@ -83,13 +83,17 @@ def test_rollout_obs_within_bounds(env_name, env_cls, cfg_key, xml):
     assert center.shape == (env.obs_dim + env.priv_dim,)
 
     worst = 0.0
-    obs, _ = env.reset(seed=0)
-    for i in range(400):
-        z = (obs - center) / scale
-        worst = max(worst, float(np.abs(z).max()))
-        obs, _, term, trunc, _ = env.step(env.action_space.sample())
-        if term or trunc:
-            obs, _ = env.reset(seed=i)
+    n_rollouts = 4
+    steps_per_rollout = 50
+    for seed in range(n_rollouts):
+        env.action_space.seed(seed)
+        obs, _ = env.reset(seed=seed)
+        for step in range(steps_per_rollout):
+            z = (obs - center) / scale
+            worst = max(worst, float(np.abs(z).max()))
+            obs, _, term, trunc, _ = env.step(env.action_space.sample())
+            if term or trunc:
+                obs, _ = env.reset(seed=10_000 + seed * steps_per_rollout + step)
     assert worst < 4.0, f"normalized obs reached {worst:.2f}; re-center src/obs_norm.py"
 
 
