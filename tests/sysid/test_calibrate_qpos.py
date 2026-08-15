@@ -23,6 +23,7 @@ from real.calib.calibrate_qpos import (
     _apply_gravity_slack,
     _backlash_dofs,
     _true_poses,
+    clears_observed_real_contacts,
     generate_poses,
     reject_outliers,
     settled_site_xpos,
@@ -33,7 +34,7 @@ from real.calib.calibrate_qpos import (
 )
 from real.calib.calibration import load_calibration, load_compliance, save_calibration
 from real.calib.compliance import COMP_JOINTS, gravity_deflection
-from real.calib.extrinsics import mat_to_rt, rt_to_mat
+from real.calib.extrinsics import mat_inv, mat_to_rt, rt_to_mat
 from real.marker_spec import ARM_TAG_TO_SITE
 from real.twin.mapping import load_joint_maps
 from src.base_env import MARKER_SITE_NAMES, markers_visible, tag_cam_model
@@ -170,19 +171,21 @@ def test_dual_camera_capture_uses_aux_only_tag_in_main_frame():
     np.testing.assert_allclose(rt_to_mat(*fused[2]), T_main_tag, atol=1e-12)
 
 
-def test_two_table_tags_recover_live_relative_camera_pose():
+def test_joint_board_anchors_recover_live_relative_camera_pose():
     T_aux_main = np.eye(4)
     T_aux_main[:3, :3] = Rotation.from_euler(
         "xyz", [1.0, 2.0, -3.0], degrees=True).as_matrix()
     T_aux_main[:3, 3] = [-0.11, 0.004, -0.017]
-    camera_poses = {"main": {}, "aux": {}}
-    for tag, pos in zip((10, 11), ([0.1, 0.0, 0.4], [0.2, 0.0, 0.4])):
-        T_main_tag = np.eye(4)
-        T_main_tag[:3, 3] = pos
-        camera_poses["main"][tag] = mat_to_rt(T_main_tag)
-        camera_poses["aux"][tag] = mat_to_rt(T_aux_main @ T_main_tag)
+    T_base_main = np.eye(4)
+    T_base_main[:3, :3] = Rotation.from_euler(
+        "xyz", [10.0, -20.0, 30.0], degrees=True).as_matrix()
+    T_base_main[:3, 3] = [0.15, -0.38, 0.21]
+    camera_anchors = {
+        "main": T_base_main,
+        "aux": T_base_main @ mat_inv(T_aux_main),
+    }
 
-    measured = cq.measured_relative_camera_pose(camera_poses)
+    measured = cq.measured_relative_camera_pose(camera_anchors)
     np.testing.assert_allclose(measured, T_aux_main, atol=1e-12)
 
 
@@ -380,6 +383,27 @@ def test_generated_poses_are_valid(setup):
         assert markers_visible(data, arm_sites, cam).all()   # both tags visible
 
 
+def test_sweep_avoids_observed_real_contact_regions(setup):
+    model, data, jm, _ = setup
+    poses, _ = generate_poses(model, data, jm)
+    assert all(clears_observed_real_contacts(q) for q in poses)
+
+
+def test_sweep_covers_medium_reach_wrist_up_hover(setup):
+    model, data, jm, _ = setup
+    poses, _ = generate_poses(model, data, jm)
+    qposadr = jm.qposadr()
+    ee_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
+    covered = []
+    for q in poses:
+        data.qpos[qposadr] = q
+        mujoco.mj_forward(model, data)
+        x, _, z = data.site_xpos[ee_id]
+        if 0.21 <= x <= 0.33 and 0.035 <= z <= 0.09 and q[2] > 1.2 and q[3] < -0.4:
+            covered.append(q)
+    assert len(covered) >= 3
+
+
 def test_sweep_exercises_every_joint(setup):
     """Each non-pinned joint must span a real range across the sweep so its bias is
     observable, and every consecutive (drive-order) move must touch a joint."""
@@ -388,7 +412,10 @@ def test_sweep_exercises_every_joint(setup):
     P = np.array(poses)
     for j in (1, 2, 3, 4):               # lift, elbow, wrist_flex, wrist_roll
         assert np.ptp(P[:, j]) > 0.2, f"joint {j} barely moves: span {np.ptp(P[:, j])}"
-    assert np.ptp(P[:, 0]) > 1.0         # pan spans the panned blocks
+    # The observed base-contact exclusion removes the risky negative-35-degree
+    # branch; both signs at 17.5 degrees plus the safe positive-35 branch remain.
+    assert P[:, 0].min() <= np.radians(-17.5)
+    assert P[:, 0].max() >= np.radians(35.0)
     assert np.ptp(P[:, 3]) > 0.8         # wrist_flex stays observable without the wrist-up block
     assert np.ptp(P[:, 4]) > 1.0         # wrist_roll sweeps wide
     adj = np.abs(np.diff(P, axis=0))

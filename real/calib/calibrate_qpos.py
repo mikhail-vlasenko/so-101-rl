@@ -73,6 +73,7 @@ Run:
     conda run -n mujoco_env python -m real.calib.calibrate_qpos --from-samples <json>
 """
 import argparse
+from dataclasses import replace
 import re
 import threading
 import time
@@ -102,6 +103,7 @@ from real.calib.calibrate_stereo import (
 )
 from real.calib.calibration import CALIBRATION_PATH, save_calibration
 from real.calib.compliance import COMP_JOINTS, gravity_deflection
+from real.calib.table_anchor import TableAnchorTracker, load_table_anchor_limits
 from real.vision.detect import make_detector
 from real.calib.extrinsics import (
     EXTRINSICS_PATH,
@@ -234,6 +236,26 @@ W_ROLL_DECORR, ROLL_SWEEP_AMP = 0.4, 0.6   # weight, alternating offset (rad) ab
 W_FLEX_DECORR, FLEX_SWEEP_AMP = 0.5, 1.1
 IK_SEED = np.array([-0.6, 0.8, 0.6, 0.0])      # lift, elbow, wrist_flex, wrist_roll
 
+# Medium-reach wrist-up coverage, seeded from a live hand-posed configuration
+# measured after the first dual-camera sweep. Raise it off its measured 13 mm
+# fingertip height while retaining the otherwise-missing elbow-up/wrist-up branch.
+WRIST_UP_SEED = np.array([-0.1061, 1.5242, -0.8213, 1.2636])
+WRIST_UP_X = (0.22, 0.25, 0.28, 0.31)
+WRIST_UP_Z = (0.04, 0.06, 0.08)
+WRIST_UP_FLEX_SWEEP_AMP = 0.15
+WRIST_UP_ROLL_SWEEP_AMP = 0.35
+WRIST_UP_W_FLEX_DECORR = 2.0
+WRIST_UP_W_ROLL_DECORR = 0.6
+
+# Real-clearance exclusions learned from the first physical dual-camera sweep.
+# The nominal collision model missed table contact at the extreme forward-fold
+# branch and arm-base contact when lift folded deeply behind a high elbow/wrist.
+FORWARD_CONTACT_MIN_LIFT = 1.05
+FORWARD_CONTACT_MAX_ELBOW = -1.20
+BASE_CONTACT_MAX_LIFT = -0.75
+BASE_CONTACT_MIN_ELBOW = 0.95
+BASE_CONTACT_MIN_WRIST_FLEX = 1.40
+
 # Drive-safety ordering weights (per JOINT_NAMES): EE-height-driving joints
 # (lift/elbow/wrist_flex) heavy, pan/roll light — pan is a horizontal sweep that
 # cannot lower the EE. See order_drive_safe / verify_drive_safe.
@@ -251,7 +273,22 @@ def _rotz(angle):
     return R
 
 
+def clears_observed_real_contacts(q):
+    """Reject joint-space regions that contacted the real table or arm base."""
+    forward_contact = (
+        q[1] > FORWARD_CONTACT_MIN_LIFT
+        and q[2] < FORWARD_CONTACT_MAX_ELBOW
+    )
+    base_contact = (
+        q[1] < BASE_CONTACT_MAX_LIFT
+        and q[2] > BASE_CONTACT_MIN_ELBOW
+        and q[3] > BASE_CONTACT_MIN_WRIST_FLEX
+    )
+    return not forward_contact and not base_contact
+
+
 def _ik_residual(x, pan, target, w_pos, roll_bias, flex_bias,
+                 w_roll_decorr, w_flex_decorr,
                  model, data, qposadr, ee_id, marker_sids, cam_pos):
     """Least-squares residual: reach `target` (weighted) while pointing both tag
     normals at the camera, with a weak wrist nudge for neighbour decorrelation."""
@@ -265,8 +302,8 @@ def _ik_residual(x, pan, target, w_pos, roll_bias, flex_bias,
         normal = data.site_xmat[sid].reshape(3, 3)[:, 2]
         u = cam_pos - data.site_xpos[sid]
         r.append(1.0 - normal @ u / np.linalg.norm(u))   # 0 when the tag faces the camera
-    r.append(W_FLEX_DECORR * (x[2] - flex_bias))
-    r.append(W_ROLL_DECORR * (x[3] - roll_bias))
+    r.append(w_flex_decorr * (x[2] - flex_bias))
+    r.append(w_roll_decorr * (x[3] - roll_bias))
     return r
 
 
@@ -308,6 +345,10 @@ def verify_drive_safe(model, data, qposadr, ee_id, poses):
         for u in np.linspace(0.0, 1.0, INTERP_CHECK_STEPS):
             data.qpos[qposadr] = (1.0 - u) * a + u * b
             mujoco.mj_forward(model, data)
+            if not clears_observed_real_contacts(data.qpos[qposadr]):
+                raise RuntimeError(
+                    f"drive path {i}->{i + 1} enters an observed real-contact "
+                    f"region at u={u:.2f}")
             if data.ncon > 0:
                 raise RuntimeError(
                     f"drive path {i}->{i + 1} collides in sim at u={u:.2f} "
@@ -335,14 +376,16 @@ def generate_poses(model, data, jm):
                    for n in MARKER_SITE_NAMES]
     cam = tag_cam_model(model, data)
 
-    def attempt(pan, target, seed, w_pos, parity):
+    def attempt(pan, target, seed, w_pos, parity, flex_sweep_amp,
+                roll_sweep_amp, w_flex_decorr, w_roll_decorr):
         sign = 1.0 if parity else -1.0
-        roll_bias = seed[3] + sign * ROLL_SWEEP_AMP
-        flex_bias = seed[2] + sign * FLEX_SWEEP_AMP
+        roll_bias = seed[3] + sign * roll_sweep_amp
+        flex_bias = seed[2] + sign * flex_sweep_amp
         res = least_squares(
             _ik_residual, np.clip(seed, b_lo, b_hi), bounds=(b_lo, b_hi),
-            args=(pan, target, w_pos, roll_bias, flex_bias, model, data,
-                  qposadr, ee_id, marker_sids, cam.pos))
+            args=(pan, target, w_pos, roll_bias, flex_bias,
+                  w_roll_decorr, w_flex_decorr, model, data, qposadr,
+                  ee_id, marker_sids, cam.pos))
         q = np.zeros(6)
         q[0], q[5] = pan, GRIPPER_FIXED
         q[list(FREE_JOINTS)] = res.x
@@ -351,19 +394,35 @@ def generate_poses(model, data, jm):
         reached = float(np.linalg.norm(data.site_xpos[ee_id] - target))
         ok = (bool(markers_visible(data, marker_sids, cam).all())
               and data.ncon == 0
-              and data.site_xpos[ee_id][2] >= MIN_EE_Z)
+              and data.site_xpos[ee_id][2] >= MIN_EE_Z
+              and clears_observed_real_contacts(q))
         return q, ok, reached
 
     poses, seed, k = [], IK_SEED.copy(), 0
     for j, z in enumerate(GRID_Z):
         for x in (GRID_X if j % 2 == 0 else GRID_X[::-1]):   # snake order -> smooth seeding
             zt = z + (GRID_Z_DITHER if k % 2 == 0 else -GRID_Z_DITHER)
-            q, ok, reached = attempt(0.0, np.array([x, 0.0, zt]), seed, W_POS_GRID, k % 2)
+            q, ok, reached = attempt(
+                0.0, np.array([x, 0.0, zt]), seed, W_POS_GRID, k % 2,
+                FLEX_SWEEP_AMP, ROLL_SWEEP_AMP,
+                W_FLEX_DECORR, W_ROLL_DECORR)
             if ok and reached < REACH_TOL:
                 poses.append(q)
                 seed = q[list(FREE_JOINTS)]
             k += 1
     n_grid = len(poses)
+
+    seed, k = WRIST_UP_SEED.copy(), 0
+    for z in WRIST_UP_Z:
+        for x in WRIST_UP_X:
+            q, ok, reached = attempt(
+                0.0, np.array([x, 0.0, z]), seed, W_POS_GRID, k % 2,
+                WRIST_UP_FLEX_SWEEP_AMP, WRIST_UP_ROLL_SWEEP_AMP,
+                WRIST_UP_W_FLEX_DECORR, WRIST_UP_W_ROLL_DECORR)
+            if ok and reached < REACH_TOL:
+                poses.append(q)
+                seed = q[list(FREE_JOINTS)]
+            k += 1
 
     mid_seed = poses[len(poses) // 2][list(FREE_JOINTS)] if poses else IK_SEED.copy()
     for pan in np.radians(PAN_OFFSETS_DEG):
@@ -371,7 +430,10 @@ def generate_poses(model, data, jm):
         for i, x in enumerate(OFF_X):
             for z in (OFF_Z if i % 2 == 0 else OFF_Z[::-1]):   # snake z -> smooth seeding
                 target = _rotz(pan) @ np.array([x, 0.0, z])
-                q, ok, _ = attempt(pan, target, seed, W_POS_OFF, p % 2)
+                q, ok, _ = attempt(
+                    pan, target, seed, W_POS_OFF, p % 2,
+                    FLEX_SWEEP_AMP, ROLL_SWEEP_AMP,
+                    W_FLEX_DECORR, W_ROLL_DECORR)
                 if ok:
                     poses.append(q)
                     seed = q[list(FREE_JOINTS)]
@@ -455,10 +517,12 @@ class MarkerCamera(threading.Thread):
         self.cap = None
         self.detector = make_detector(family)
         self.estimator = None
+        self.anchor_tracker = None
         self.wanted = set(ARM_TAG_TO_SITE) | set(TABLE_TAG_IDS)
         self._on_frame = on_frame
         self._lock = threading.Lock()
         self._latest = {}      # id -> (rvec, tvec) from the newest decoded frame
+        self._latest_anchor = None
         self._seq = 0
         self._running = True
         self.error = None      # set if the read loop dies; the driver re-raises it
@@ -466,6 +530,9 @@ class MarkerCamera(threading.Thread):
     def start(self):
         self.cap, camera_matrix, dist_coeffs = open_rig_camera(self.name)
         self.estimator = PoseEstimator(camera_matrix, dist_coeffs)
+        self.anchor_tracker = TableAnchorTracker(
+            camera_matrix, dist_coeffs,
+            limits=replace(load_table_anchor_limits(), ema_alpha=1.0))
         super().start()
 
     def run(self):
@@ -476,8 +543,13 @@ class MarkerCamera(threading.Thread):
                     raise RuntimeError("camera read failed mid-session")
                 dets = self.detector.detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
                 poses = {d.id: self.estimator.estimate(d) for d in dets if d.id in self.wanted}
+                by_id = {d.id: d for d in dets}
+                anchor_accepted = self.anchor_tracker.observe(by_id)
+                anchor = (self.anchor_tracker.value().copy()
+                          if anchor_accepted else None)
                 with self._lock:
                     self._latest = poses
+                    self._latest_anchor = anchor
                     self._seq += 1
                 if self._on_frame is not None:
                     annotate_detections(frame, dets, self.estimator)
@@ -488,22 +560,33 @@ class MarkerCamera(threading.Thread):
     def capture_median(self, n_frames, timeout=4.0):
         """Median tvec per tag over the next `n_frames` distinct frames (rejects
         single-frame flukes; needs a tag in >= half of them). Frames are post-settle
-        because the reader has been draining the camera live during the arm's move."""
+        because the reader has been draining the camera live during the arm's move.
+        Also return the averaged accepted joint-board camera pose for rig validation."""
         tvecs = {t: [] for t in self.wanted}
         rvecs = {}
+        anchors = []
         last_seq, got, t0 = -1, 0, time.time()
         while got < n_frames and time.time() - t0 < timeout:
             with self._lock:
                 seq, poses = self._seq, self._latest
+                anchor = (None if self._latest_anchor is None
+                          else self._latest_anchor.copy())
             if seq == last_seq:
                 time.sleep(0.005)
                 continue
             last_seq, got = seq, got + 1
+            if anchor is not None:
+                anchors.append(anchor)
             for t, (rvec, tvec) in poses.items():
                 tvecs[t].append(tvec)
                 rvecs[t] = rvec
-        return {t: (rvecs[t], np.median(np.stack(v), axis=0))
-                for t, v in tvecs.items() if len(v) >= n_frames // 2}
+        poses = {
+            t: (rvecs[t], np.median(np.stack(v), axis=0))
+            for t, v in tvecs.items() if len(v) >= n_frames // 2
+        }
+        anchor = (average_transforms(anchors)
+                  if len(anchors) >= n_frames // 2 else None)
+        return poses, anchor
 
     def close(self):
         self._running = False
@@ -546,18 +629,11 @@ def fuse_rig_tag_poses(camera_poses: dict[str, dict],
     return fused
 
 
-def measured_relative_camera_pose(camera_poses: dict[str, dict]) -> np.ndarray:
-    """Two-tag estimate of ``T_aux_main`` from one settled capture."""
-    for name in CAMERA_NAMES:
-        missing = set(TABLE_TAG_IDS) - set(camera_poses[name])
-        if missing:
-            raise ValueError(f"{name} camera is missing table tags {sorted(missing)}")
-    candidates = [
-        rt_to_mat(*camera_poses["aux"][tag])
-        @ mat_inv(rt_to_mat(*camera_poses["main"][tag]))
-        for tag in TABLE_TAG_IDS
-    ]
-    return average_transforms(candidates)
+def measured_relative_camera_pose(camera_anchors: dict[str, np.ndarray]) -> np.ndarray:
+    """Recover T_aux_main from the same joint-board solves as rig alignment."""
+    if set(camera_anchors) != set(CAMERA_NAMES):
+        raise ValueError(f"camera anchors must contain exactly {CAMERA_NAMES}")
+    return mat_inv(camera_anchors["aux"]) @ camera_anchors["main"]
 
 
 class RigMarkerCameras:
@@ -594,17 +670,20 @@ class RigMarkerCameras:
             self.cameras[name].start()
 
     def capture_median(self, n_frames) -> tuple[dict, dict, float, float]:
-        poses = {
+        captures = {
             name: self.cameras[name].capture_median(n_frames)
             for name in CAMERA_NAMES
         }
+        poses = {name: captures[name][0] for name in CAMERA_NAMES}
+        anchors = {name: captures[name][1] for name in CAMERA_NAMES}
         for name in CAMERA_NAMES:
             if self.cameras[name].error is not None:
                 raise self.cameras[name].error
         fused = fuse_rig_tag_poses(poses, self.rectification.T_aux_main)
-        if any(set(TABLE_TAG_IDS) - set(poses[name]) for name in CAMERA_NAMES):
+        if (any(set(TABLE_TAG_IDS) - set(poses[name]) for name in CAMERA_NAMES)
+                or any(anchors[name] is None for name in CAMERA_NAMES)):
             return fused, poses, float("nan"), float("nan")
-        measured = measured_relative_camera_pose(poses)
+        measured = measured_relative_camera_pose(anchors)
         reference = self.rectification.anchor_reference_T_aux_main
         movement_mm, movement_deg = relative_pose_change(measured, reference)
         warning = camera_movement_warning(
@@ -646,6 +725,19 @@ def capture(args, jm, direction, poses, max_raw_delta):
     samples = []
     try:
         cams.start()
+        _, preflight_poses, movement_mm, movement_deg = cams.capture_median(
+            CAPTURE_FRAMES)
+        missing_by_camera = {
+            name: sorted(set(TABLE_TAG_IDS) - set(preflight_poses[name]))
+            for name in CAMERA_NAMES
+        }
+        if (any(missing_by_camera.values())
+                or not np.isfinite(movement_mm)
+                or not np.isfinite(movement_deg)):
+            raise RuntimeError(
+                "rig preflight failed before arm motion: table detections "
+                f"missing={missing_by_camera}, or a joint-board solve was rejected")
+        print(f"rig preflight: {movement_mm:.2f}mm/{movement_deg:.3f}deg")
         bus.connect()
         bus.set_position_kp(SERVO_POSITION_KP)
         bus.set_position_deadzone(SERVO_POSITION_DEADZONE)
@@ -663,6 +755,8 @@ def capture(args, jm, direction, poses, max_raw_delta):
                 for name in CAMERA_NAMES
             }
             if (any(missing_by_camera.values())
+                    or not np.isfinite(movement_mm)
+                    or not np.isfinite(movement_deg)
                     or len(anchors_seen) != len(TABLE_TAG_IDS) or not arm_seen):
                 print(f"  pose {i + 1}/{len(poses)}: SKIP "
                       f"(table missing={missing_by_camera}, "
