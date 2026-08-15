@@ -103,13 +103,12 @@ stereo_alignment:
 # observe one stationary checkerboard; fixed intrinsics make a single planar
 # pose sufficient to recover their current relative transform. Re-run after a
 # stand moves. The solve is written only when both image-space quality gates
-# pass. Both gates are temporarily relaxed for the available flexible paper
-# target; restore the Stage 1 targets after calibrating with a rigid board.
+# pass.
 stereo_calibration:
   capture_frames: 60
   min_detected_pairs: 30
-  max_reprojection_rmse_px: 1.25
-  max_rectified_vertical_p95_px: 3.0
+  max_reprojection_rmse_px: 1.0
+  max_rectified_vertical_p95_px: 1.0
   camera_movement_warning_translation_mm: 1.0
   camera_movement_warning_rotation_deg: 0.1
 

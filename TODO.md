@@ -4,11 +4,6 @@ Unresolved, actionable work only. Not a changelog or project-status document.
 
 ## Tag-free object tracking (dual C922 + SAM), follow-ups
 
-- **Restore the strict stereo calibration gates.** Mount the checkerboard to a
-  rigid planar backing, recalibrate until per-camera reprojection RMSE and
-  rectified vertical correspondence p95 are below 1 px, then restore
-  `max_reprojection_rmse_px: 1.0` and `max_rectified_vertical_p95_px: 1.0`.
-  The current 1.25/3 px gates only accommodate the visibly bowed paper target.
 - **Pickplace dense-stereo rollout.** Add the equivalent camera object source to
   pickplace with a real-table target, ring pose, and phase-aware termination on
   `ArmLoop`.

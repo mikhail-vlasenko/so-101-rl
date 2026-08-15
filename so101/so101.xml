@@ -105,10 +105,9 @@
   <worldbody>
     <!-- Sim stand-in for the physical webcam, to the right of the arm (-y, the
          same "right" as the marker_wrist comment). Pose is MEASURED: live
-         table-tag anchoring averaged over 100 frames
-         (python -m real.diagnostics.snapshot_cam_mount --camera main,
-         2026-08-09, per-frame spread 0.10 mm / 0.015 deg), the same anchoring
-         the runtime pipeline uses — re-run and paste after moving a camera.
+         table-tag anchoring averaged over 100 frames by
+         real.calib.calibrate_stereo --complete-setup, the same anchoring the
+         runtime pipeline uses. Re-run the workflow after moving a camera.
          The OpenCV camera frame is converted to MuJoCo's OpenGL convention
          (looks down -z, +y up; pinned by
          tests/real/test_cam_mount_convention.py). The pose lives on this
@@ -117,8 +116,8 @@
          pose via cam_xpos/cam_xmat. The marker-visibility check consumes
          both: the position for the facing-angle test, and the full
          orientation for the field-of-view (in-frame) projection. -->
-    <body name="tag_cam_mount" pos="0.128012 -0.428086 0.195349"
-          quat="0.805736 0.591819 -0.014823 -0.017855">
+    <body name="tag_cam_mount" pos="0.147956 -0.383419 0.209645"
+          quat="0.817337 0.576017 0.001270 -0.012742">
       <camera name="tag_cam"/>
       <!-- Visible webcam stand-in (body + forward-facing lens). No collision
            (contype/conaffinity 0) so it never enters the contact or arm-geom
@@ -133,11 +132,9 @@
     </body>
     <!-- Second (aux) C922 for the dual-view object channels (src/base_env.py
          live/precise cube obs), angularly separated from tag_cam about the
-         workspace center. Pose MEASURED like tag_cam_mount above
-         (snapshot_cam_mount --camera aux, 2026-08-09, spread 0.09 mm /
-         0.012 deg). -->
-    <body name="tag_cam_aux_mount" pos="0.236162 -0.418925 0.193178"
-          quat="0.801453 0.596904 -0.022190 -0.029763">
+         workspace center. Pose measured like tag_cam_mount above. -->
+    <body name="tag_cam_aux_mount" pos="0.252617 -0.380792 0.211717"
+          quat="0.821187 0.570645 0.002152 0.003513">
       <camera name="tag_cam_aux"/>
       <geom name="tag_cam_aux_body" type="box" size="0.022 0.032 0.018" group="1"
             rgba="0.05 0.05 0.06 1" contype="0" conaffinity="0"/>

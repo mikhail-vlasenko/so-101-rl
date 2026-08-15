@@ -17,6 +17,13 @@ match exactly. Lay the print flat, keep the complete inner-corner grid visible
 in both cameras, then run:
 
     conda run -n mujoco_env python -m real.calib.calibrate_stereo
+
+For a camera remount, the interactive workflow verifies table-tag alignment,
+pauses for checkerboard placement, calibrates, pauses for checkerboard removal,
+records the new anchor reference, measures both sim mounts, and atomically
+updates so101/so101.xml:
+
+    conda run -n mujoco_env python -m real.calib.calibrate_stereo --complete-setup
 """
 from __future__ import annotations
 
@@ -25,6 +32,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
+import subprocess
+import sys
 
 import cv2
 import numpy as np
@@ -353,6 +362,79 @@ def _save(path: Path, result: StereoCalibrationResult,
     temporary.replace(path)
 
 
+def _run_module(module: str, *args: str) -> None:
+    subprocess.run(
+        [sys.executable, "-m", module, *args],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
+def _wait_for_operator(prompt: str) -> None:
+    try:
+        input(prompt)
+    except EOFError as error:
+        raise RuntimeError(
+            "complete stereo setup requires an interactive terminal") from error
+
+
+def _complete_setup(args: argparse.Namespace) -> None:
+    print(
+        "\nSTAGE 1/4 - VERIFY CAMERA ALIGNMENT\n"
+        "Remove the checkerboard and keep table tags 10 and 11 visible in both views.",
+        flush=True,
+    )
+    _run_module(
+        "real.calib.align_stereo_rig",
+        "--family", args.family,
+    )
+
+    _wait_for_operator(
+        "\nREADY FOR CHECKERBOARD\n"
+        "Lay the checkerboard flat and rigid, with the complete grid visible in "
+        "both cameras.\n"
+        "Once it is stationary, press ENTER to capture: "
+    )
+    calibration_args = [
+        "--frames", str(args.frames),
+        "--output", str(args.output),
+    ]
+    if args.save_frames is not None:
+        calibration_args.extend(["--save-frames", str(args.save_frames)])
+    print("\nSTAGE 2/4 - CAPTURE STATIONARY CHECKERBOARD", flush=True)
+    _run_module("real.calib.calibrate_stereo", *calibration_args)
+
+    _wait_for_operator(
+        "\nSTEREO CALIBRATION ACCEPTED - REMOVE THE CHECKERBOARD\n"
+        "Expose table tags 10 and 11 in both cameras. Press ENTER when clear: "
+    )
+    print("\nSTAGE 3/4 - RECORD TABLE-ANCHOR REFERENCE", flush=True)
+    _run_module(
+        "real.calib.align_stereo_rig",
+        "--family", args.family,
+        "--stereo-calibration", str(args.output),
+        "--record-stereo-anchor-reference",
+    )
+
+    print("\nSTAGE 4/4 - SNAPSHOT SIM CAMERA MOUNTS", flush=True)
+    from real.diagnostics.snapshot_cam_mount import (
+        SO101_XML,
+        print_snapshot,
+        snapshot_mount,
+        update_scene_mounts,
+    )
+
+    snapshots = {
+        camera: snapshot_mount(camera, args.mount_frames, args.family)
+        for camera in CAMERA_NAMES
+    }
+    for snapshot in snapshots.values():
+        print_snapshot(snapshot, show_xml=False)
+        print()
+    update_scene_mounts(snapshots, SO101_XML)
+    print(f"COMPLETE - updated both camera mount poses in {SO101_XML}")
+
+
 def main() -> None:
     limits = load_limits()
     parser = argparse.ArgumentParser(
@@ -363,11 +445,25 @@ def main() -> None:
                         help="stereo calibration YAML")
     parser.add_argument("--save-frames", type=Path, default=None,
                         help="directory for final checkerboard overlays")
+    parser.add_argument(
+        "--complete-setup", action="store_true",
+        help="run alignment, prompted calibration, anchor reference, and XML update")
+    parser.add_argument(
+        "--family", choices=("apriltag", "aruco"), default="apriltag",
+        help="marker family used by the complete setup workflow")
+    parser.add_argument(
+        "--mount-frames", type=int, default=100,
+        help="anchored frames per camera for the complete setup XML snapshot")
     args = parser.parse_args()
     if args.frames < limits.min_detected_pairs:
         parser.error(
             f"--frames must be >= configured min_detected_pairs "
             f"({limits.min_detected_pairs})")
+    if args.mount_frames <= 0:
+        parser.error("--mount-frames must be positive")
+    if args.complete_setup:
+        _complete_setup(args)
+        return
 
     metadata, image_size, pattern, square_size_m = _intrinsics_metadata()
     board_points = object_points(pattern)
