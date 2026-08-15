@@ -1,6 +1,8 @@
 """UI settings persistence: store round-trips and the /api/settings endpoints."""
 
-from fastapi.testclient import TestClient
+import asyncio
+
+import httpx
 
 from panel.app import create_app
 from panel.settings import SettingsStore
@@ -41,13 +43,23 @@ def test_reset_clears_disk(tmp_path):
 def test_settings_api_roundtrip(tmp_path):
     app = create_app()
     app.state.settings = SettingsStore(path=tmp_path / "s.json")  # isolate from repo
-    client = TestClient(app)
 
-    assert client.get("/api/settings").json() == {}
+    async def exercise_api():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                    base_url="http://test") as client:
+            assert (await client.get("/api/settings")).json() == {}
 
-    client.post("/api/settings", json={"scope": "camera", "field": "exposure", "value": "500"})
-    client.post("/api/settings", json={"scope": "camera", "field": "gain", "value": 80})
-    assert client.get("/api/settings").json() == {"camera": {"exposure": "500", "gain": 80}}
+            await client.post(
+                "/api/settings",
+                json={"scope": "camera", "field": "exposure", "value": "500"})
+            await client.post(
+                "/api/settings",
+                json={"scope": "camera", "field": "gain", "value": 80})
+            assert (await client.get("/api/settings")).json() == {
+                "camera": {"exposure": "500", "gain": 80}}
 
-    client.post("/api/settings/reset")
-    assert client.get("/api/settings").json() == {}
+            await client.post("/api/settings/reset")
+            assert (await client.get("/api/settings")).json() == {}
+
+    asyncio.run(exercise_api())

@@ -16,6 +16,7 @@ from real.marker_spec import ARM_TAG_TO_SITE, TABLE_TAG_IDS
 from real.twin.mapping import JOINT_NAMES, load_joint_maps
 from sysid.probe_backlash import (
     MIN_LEVER_M,
+    N_POSES,
     PROBE_JOINTS,
     build_plan,
     hysteresis_estimates,
@@ -129,7 +130,7 @@ def test_table_tag_drift_reported(setup):
 
 def test_plan_is_safe_and_paired(setup):
     model, data, jm, _ = setup
-    steps = build_plan(model, data, jm, PROBE_JOINTS, n_poses=2,
+    steps = build_plan(model, data, jm, PROBE_JOINTS, n_poses=N_POSES,
                        approach_rad=np.radians(6.0))
     lo, hi = jm.xml_low(), jm.xml_high()
     qposadr = jm.qposadr()

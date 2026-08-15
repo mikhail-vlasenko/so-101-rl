@@ -24,6 +24,7 @@ STREAM_BOUNDARY = "panelframe"
 # How long a /stream reader waits for the next frame before re-checking that
 # the server is still up (lets streams end cleanly on close()).
 _STREAM_WAIT_S = 1.0
+_SERVER_POLL_S = 0.05
 
 
 class FrameBox:
@@ -127,6 +128,7 @@ class JpegStreamer:
         self._server.daemon_threads = True
         self.port = self._server.server_address[1]  # actual port (resolves port=0)
         self._thread = threading.Thread(target=self._server.serve_forever,
+                                        args=(_SERVER_POLL_S,),
                                         name=f"jpeg-streamer-{port}", daemon=True)
 
     def start(self) -> None:

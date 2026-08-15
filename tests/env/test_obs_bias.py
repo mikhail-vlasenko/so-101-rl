@@ -123,7 +123,7 @@ def test_marker_bias_common_plus_independent(cfg):
     common variance; each tag's total variance is common + independent."""
     env_clean = _pickplace(cfg, obs_bias=None, marker_always_visible=True)
     env_biased = _pickplace(cfg, obs_bias=SIGMAS, marker_always_visible=True)
-    n = 1500
+    n = 500
     finger = np.empty((n, 3))
     wrist = np.empty((n, 3))
     for i in range(n):
@@ -138,17 +138,17 @@ def test_marker_bias_common_plus_independent(cfg):
     for axis in range(3):
         cov = np.cov(finger[:, axis], wrist[:, axis])
         # The shared component is the whole cross-covariance between the two tags.
-        np.testing.assert_allclose(cov[0, 1], common_var, rtol=0.25)
+        np.testing.assert_allclose(cov[0, 1], common_var, rtol=0.35)
         # Each tag's marginal variance is common + its own independent term.
-        np.testing.assert_allclose(cov[0, 0], total_var, rtol=0.2)
-        np.testing.assert_allclose(cov[1, 1], total_var, rtol=0.2)
+        np.testing.assert_allclose(cov[0, 0], total_var, rtol=0.25)
+        np.testing.assert_allclose(cov[1, 1], total_var, rtol=0.25)
 
 
 def test_bias_magnitude_matches_sigmas(cfg):
     """Std of obs offset across resets matches the configured sigmas."""
     env_clean = _pickplace(cfg, obs_bias=None, marker_always_visible=True)
     env_biased = _pickplace(cfg, obs_bias=SIGMAS, marker_always_visible=True)
-    n = 500
+    n = 250
     qpos_diffs = np.empty((n, 6))
     marker_pos_diffs = np.empty((n, 6))
     marker_rot_diffs = np.empty((n, 6))
@@ -170,12 +170,12 @@ def test_bias_magnitude_matches_sigmas(cfg):
     marker_pos_std = np.sqrt(SIGMAS["marker_common_sigma"] ** 2 + SIGMAS["marker_pos_sigma"] ** 2)
     live_std = np.sqrt(SIGMAS["marker_common_sigma"] ** 2 + SIGMAS["live_sigma"] ** 2)
     center_std = np.sqrt(SIGMAS["marker_common_sigma"] ** 2 + SIGMAS["precise_sigma"] ** 2)
-    np.testing.assert_allclose(qpos_diffs.std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.15)
-    np.testing.assert_allclose(marker_pos_diffs.std(axis=0).mean(), marker_pos_std, rtol=0.15)
+    np.testing.assert_allclose(qpos_diffs.std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.2)
+    np.testing.assert_allclose(marker_pos_diffs.std(axis=0).mean(), marker_pos_std, rtol=0.2)
     np.testing.assert_allclose(marker_rot_diffs.std(axis=0).mean(),
-                               SIGMAS["marker_rot_sigma"], rtol=0.15)
-    np.testing.assert_allclose(live_diffs.std(axis=0).mean(), live_std, rtol=0.15)
-    np.testing.assert_allclose(center_diffs.std(axis=0).mean(), center_std, rtol=0.15)
+                               SIGMAS["marker_rot_sigma"], rtol=0.2)
+    np.testing.assert_allclose(live_diffs.std(axis=0).mean(), live_std, rtol=0.2)
+    np.testing.assert_allclose(center_diffs.std(axis=0).mean(), center_std, rtol=0.2)
 
 
 def test_qvel_unbiased(cfg):

@@ -4,10 +4,11 @@ The dummy claims Resource.SERIAL in its spec so exclusivity can be exercised
 without a real bus; resource accounting never touches devices.
 """
 
+import asyncio
 import time
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from panel.app import create_app
 from panel.registry import ArgSpec, Resource, ScriptSpec, validate_registry
@@ -125,21 +126,27 @@ def test_stream_port_allocation_and_exhaustion(tmp_path):
 
 
 def test_restart_endpoint_relaunches_with_original_values(runner):
-    client = TestClient(create_app(runner))
-    assert client.post("/api/restart/nope").status_code == 404
+    async def exercise_api():
+        transport = httpx.ASGITransport(app=create_app(runner))
+        async with httpx.AsyncClient(transport=transport,
+                                    base_url="http://test") as client:
+            assert (await client.post("/api/restart/nope")).status_code == 404
 
-    run = runner.start(DUMMY_SPEC, {"stubborn": ""}, stream=False)
-    wait_for(lambda: run.total_lines >= 2, what="run up")
-    assert client.post(f"/api/restart/{run.run_id}").status_code == 409
+            run = runner.start(DUMMY_SPEC, {"stubborn": ""}, stream=False)
+            wait_for(lambda: run.total_lines >= 2, what="run up")
+            response = await client.post(f"/api/restart/{run.run_id}")
+            assert response.status_code == 409
 
-    runner.stop(run.run_id)
-    wait_for(lambda: not run.running, what="exit")
-    resp = client.post(f"/api/restart/{run.run_id}")
-    assert resp.status_code == 200
-    rerun = runner.get(resp.json()["run_id"])
-    assert rerun.run_id != run.run_id
-    assert rerun.argv == run.argv
-    runner.stop(rerun.run_id)
+            runner.stop(run.run_id)
+            wait_for(lambda: not run.running, what="exit")
+            response = await client.post(f"/api/restart/{run.run_id}")
+            assert response.status_code == 200
+            rerun = runner.get(response.json()["run_id"])
+            assert rerun.run_id != run.run_id
+            assert rerun.argv == run.argv
+            runner.stop(rerun.run_id)
+
+    asyncio.run(exercise_api())
 
 
 def test_wait_lines_reports_finish(runner):

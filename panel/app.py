@@ -204,7 +204,7 @@ def create_app(runner: Runner | None = None) -> FastAPI:
         return run_summary(run)
 
     @app.post("/api/restart/{run_id}")
-    def api_restart(run_id: str):
+    async def api_restart(run_id: str):
         """Relaunch a finished run with its original values (fresh stream port)."""
         try:
             old = app.state.runner.get(run_id)
@@ -264,7 +264,7 @@ def create_app(runner: Runner | None = None) -> FastAPI:
     # ---- ui settings (form-field persistence) ----
 
     @app.get("/api/settings")
-    def api_settings():
+    async def api_settings():
         return app.state.settings.all()
 
     @app.post("/api/settings")
@@ -274,7 +274,7 @@ def create_app(runner: Runner | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/api/settings/reset")
-    def api_settings_reset():
+    async def api_settings_reset():
         app.state.settings.reset()
         return {"ok": True}
 

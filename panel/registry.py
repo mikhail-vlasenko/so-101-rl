@@ -485,7 +485,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
                     "executing streams the annotated camera feed.",
         args=(
             ArgSpec("--execute", "flag", "Drive the arm and capture (default: preview plan)"),
-            ArgSpec("--n-poses", "int", "Base poses from the calibration sweep", default="3"),
+            ArgSpec("--n-poses", "int", "Base poses from the calibration sweep", default="5"),
             ArgSpec("--approach-deg", "float", "Approach offset per joint (deg)", default="6"),
             ArgSpec("--joints", "str", "Comma-separated joints (default: all but gripper)"),
             ArgSpec("--port", "str", "Serial port", default="/dev/ttyACM0"),

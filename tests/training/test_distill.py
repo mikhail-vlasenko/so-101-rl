@@ -205,6 +205,7 @@ def test_distill_end_to_end_and_resumes(lift_cfg, tmp_path):
     with initialize(config_path="../../conf", version_base=None):
         cfg = compose(config_name="config", overrides=[
             "env=lift", "wandb.enabled=false", "train.n_envs=2", "ppo.n_steps=8",
+            "lift_env.max_steps=2",
             "distill.teacher_obs=identical", "distill.net_arch=[64,64]",
             "distill.iterations=1", "distill.steps_per_iter=32",
             "distill.epochs=1", "distill.batch_size=32", "distill.eval_episodes=1",
@@ -255,6 +256,7 @@ def test_distill_current_mode_migrates_onto_history_taps(tmp_path):
     with initialize(config_path="../../conf", version_base=None):
         cfg = compose(config_name="config", overrides=[
             "env=lift", "wandb.enabled=false", "train.n_envs=2", "ppo.n_steps=8",
+            "lift_env.max_steps=2",
             "history_taps=[0,2]",
             "distill.teacher_obs=current", "distill.net_arch=[32,32]",
             "distill.iterations=1", "distill.steps_per_iter=32",
@@ -273,6 +275,7 @@ def test_distill_current_mode_migrates_onto_history_taps(tmp_path):
         # The tapped student itself is not a valid current-mode teacher.
         cfg2 = compose(config_name="config", overrides=[
             "env=lift", "wandb.enabled=false", "train.n_envs=2", "ppo.n_steps=8",
+            "lift_env.max_steps=2",
             "history_taps=[0,2]", "distill.teacher_obs=current",
             f"distill.teacher={out_path}", f"distill.out={tmp_path / 'x.zip'}",
         ])

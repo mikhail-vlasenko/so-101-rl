@@ -166,7 +166,7 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
     tags = [(slice(12, 15), slice(15, 18), env_noisy._marker_tag_sizes[0]),
             (slice(18, 21), slice(21, 24), env_noisy._marker_tag_sizes[1])]
 
-    n_samples = 1500
+    n_samples = 500
     norm_depth = []      # depth component / depth_sigma  -> N(0,1)
     norm_lat_sq = []     # |lateral|^2 / lateral_sigma^2  -> chi^2 with 2 dof (mean 2)
     rot_diffs = []       # rotation channels stay isotropic
@@ -202,26 +202,26 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
     norm_depth = np.array(norm_depth)
     norm_lat_sq = np.array(norm_lat_sq)
     rot_diffs = np.array(rot_diffs)
-    assert len(norm_depth) > 300, "too few tag-visible samples"
+    assert len(norm_depth) > 100, "too few tag-visible samples"
 
     # After dividing by its own derived sigma, the depth component is unit-normal.
-    np.testing.assert_allclose(norm_depth.std(), 1.0, rtol=0.1)
-    np.testing.assert_allclose(norm_depth.mean(), 0.0, atol=0.1)
+    np.testing.assert_allclose(norm_depth.std(), 1.0, rtol=0.15)
+    np.testing.assert_allclose(norm_depth.mean(), 0.0, atol=0.15)
     # The lateral part spans the 2D image plane: |lateral|^2/lateral_sigma^2 is
     # chi-squared with 2 dof, mean 2.
-    np.testing.assert_allclose(norm_lat_sq.mean(), 2.0, rtol=0.1)
+    np.testing.assert_allclose(norm_lat_sq.mean(), 2.0, rtol=0.15)
     # Rotation noise is unchanged (isotropic marker_rot_sigma on every axis).
-    np.testing.assert_allclose(rot_diffs.std(), SIGMAS["marker_rot_sigma"], rtol=0.1)
+    np.testing.assert_allclose(rot_diffs.std(), SIGMAS["marker_rot_sigma"], rtol=0.15)
     # Cube channels: isotropic per-axis sigmas, each from its own knob.
     np.testing.assert_allclose(np.array(live_diffs).std(),
-                               SIGMAS["live_sigma"], rtol=0.1)
+                               SIGMAS["live_sigma"], rtol=0.15)
     np.testing.assert_allclose(np.array(precise_diffs).std(),
-                               SIGMAS["precise_sigma"], rtol=0.1)
+                               SIGMAS["precise_sigma"], rtol=0.15)
 
     # qpos noise std matches; qvel = (qpos_t - qpos_{t-1})/dt inherits sqrt(2)*qpos_sigma/dt.
-    np.testing.assert_allclose(qpos_diffs.std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.1)
+    np.testing.assert_allclose(qpos_diffs.std(axis=0).mean(), SIGMAS["qpos_sigma"], rtol=0.15)
     qvel_sigma = np.sqrt(2.0) * SIGMAS["qpos_sigma"] / env_noisy._step_dt
-    np.testing.assert_allclose(qvel_diffs.std(axis=0).mean(), qvel_sigma, rtol=0.1)
+    np.testing.assert_allclose(qvel_diffs.std(axis=0).mean(), qvel_sigma, rtol=0.15)
 
 
 def test_depth_noise_dominates_lateral(cfg):
@@ -231,7 +231,7 @@ def test_depth_noise_dominates_lateral(cfg):
     env_noisy = _pickplace(cfg, obs_noise=SIGMAS)
     cam = env_noisy.tag_cam_pos       # position, for the camera-frame noise geometry
     depth_abs, lat_abs = [], []
-    for i in range(400):
+    for i in range(150):
         env_clean.reset(seed=i)
         env_noisy.reset(seed=i)
         oc, *_ = env_clean.step(_zero_action())

@@ -76,7 +76,7 @@ PROBE_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wr
 
 APPROACH_DEG = 6.0      # ±δ approach offset; must exceed any plausible play so the
 #                         gear flank is engaged from a known side before the final leg
-N_POSES = 3             # base poses drawn from the calibration sweep
+N_POSES = 5             # base poses drawn from the calibration sweep
 LIMIT_MARGIN_RAD = 0.02  # ±δ poses must clear the XML limits by this, or rad_to_raw
 #                          clips and the approach silently shrinks
 MIN_PAIRS_PER_JOINT = 2  # fail loud if sim validation leaves a joint thinner than this

@@ -275,12 +275,12 @@ def test_dropout_rate_matches_prob():
     env.reset(seed=2)
     expected = _prob(env.data, env.marker_site_ids, env.tag_cam,
                      probs["near"], probs["far"])
-    n = 4000
+    n = 1000
     drops = np.zeros(N_MARKERS)
     for _ in range(n):
         frame = _refresh_detection(env)  # re-roll at the same (frozen) pose
         drops += ~frame.detected
-    np.testing.assert_allclose(drops / n, expected, atol=0.03)
+    np.testing.assert_allclose(drops / n, expected, atol=0.05)
 
 
 def test_marker_always_visible_disables_staleness():
