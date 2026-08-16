@@ -414,6 +414,7 @@ class LiftRuntimeConfig:
     cube_low: np.ndarray
     cube_high: np.ndarray
     target_height: float
+    success_dwell_steps: int
     rest_qpos: np.ndarray
     rest_duration_s: float
     rest_action_scale: float
@@ -814,7 +815,7 @@ class LiftRolloutSession:
                     self._print_step(
                         step, tick, ee_live, grasped_sim, loop_ms, predict_ms)
                 step += 1
-                if dwell_count >= 5:
+                if dwell_count >= self.config.success_dwell_steps:
                     print(
                         "live centroid held above "
                         f"target_height={self.config.target_height} "
@@ -1087,6 +1088,7 @@ def main() -> int:
         cube_low=np.array(lift_cfg["cube_low"], dtype=np.float64),
         cube_high=np.array(lift_cfg["cube_high"], dtype=np.float64),
         target_height=float(lift_cfg["target_height"]),
+        success_dwell_steps=int(lift_cfg["success_dwell_steps"]),
         rest_qpos=np.array(FOLDED_REST_QPOS, dtype=np.float64),
         rest_duration_s=float(lift_cfg["rest_duration_s"]),
         rest_action_scale=float(lift_cfg["rest_action_scale"]),

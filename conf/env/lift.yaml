@@ -11,6 +11,7 @@ lift_env:
   cube_smallest_face_only: ${cube_smallest_face_only}   # defined in config.yaml
   cube_no_flat_spawns: ${cube_no_flat_spawns}           # defined in config.yaml
   target_height: 0.10
+  success_dwell_steps: 2  # real rollout: consecutive fresh above-target centroid observations
   # Real lift rollout only. The target is FOLDED_REST_QPOS in
   # real/twin/constants.py. The return uses a cosine ramp and the same raw clamp /
   # sub-target servo stream as policy commands. Duration is in policy time, so
