@@ -49,16 +49,16 @@ def test_light_dr_constructs_dense_clouds_at_worker_rate(monkeypatch):
         xml_path="so101/scene_lift.xml",
         cfg=runtime_cfg_from_hydra(cfg),
     )
-    original_capture = env._bps_generator.capture
-    capture_times = []
+    original_whole_view_lost = env._bps_generator.whole_view_lost
+    dense_jobs = 0
 
-    def count_capture(model, data, cameras, cube_geom_id, cube_body_id,
-                      half_extents, rng):
-        capture_times.append(float(data.time))
-        return original_capture(
-            model, data, cameras, cube_geom_id, cube_body_id, half_extents, rng)
+    def count_dense_job(rng):
+        nonlocal dense_jobs
+        dense_jobs += 1
+        return original_whole_view_lost(rng)
 
-    monkeypatch.setattr(env._bps_generator, "capture", count_capture)
+    monkeypatch.setattr(
+        env._bps_generator, "whole_view_lost", count_dense_job)
     try:
         env.reset(seed=123)
         action = np.zeros(6, dtype=np.float32)
@@ -69,8 +69,8 @@ def test_light_dr_constructs_dense_clouds_at_worker_rate(monkeypatch):
         duration_s = n_steps * env._step_dt
         # One boot capture plus the measured 18 Hz worker schedule, allowing
         # one capture of phase slack at either end.
-        expected = 1.0 + duration_s / env._camera.bps_frame_s
-        assert len(capture_times) == pytest.approx(expected, abs=2.0)
-        assert len(capture_times) < duration_s / env._camera.frame_s * 0.7
+        expected = 1.0 + duration_s / env._camera.object_frame_s
+        assert dense_jobs == pytest.approx(expected, abs=2.0)
+        assert dense_jobs < duration_s / env._camera.frame_s * 0.7
     finally:
         env.close()

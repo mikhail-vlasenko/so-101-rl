@@ -73,12 +73,24 @@ class SyntheticBPSGenerator:
         self._unit_points, self._unit_normals = unit_box_surface_points(
             bps_config.synthetic_surface_grid_size)
 
+    @property
+    def unit_points(self) -> np.ndarray:
+        return self._unit_points
+
+    @property
+    def unit_normals(self) -> np.ndarray:
+        return self._unit_normals
+
+    def whole_view_lost(self, rng: np.random.Generator) -> bool:
+        """Draw the per-job complete dense-stereo failure before raycasting."""
+        return bool(rng.random() < self.cloud_config.whole_view_loss_probability)
+
     def capture(self, model, data, cameras, cube_geom_id: int,
                 cube_body_id: int, half_extents: np.ndarray,
                 rng: np.random.Generator) -> SyntheticBPSCapture | None:
         if len(cameras) != 2:
             raise ValueError("dense stereo requires exactly two cameras")
-        if rng.random() < self.cloud_config.whole_view_loss_probability:
+        if self.whole_view_lost(rng):
             return None
 
         points, normals = transform_box_surface_points_world(
@@ -88,10 +100,26 @@ class SyntheticBPSGenerator:
             self._unit_points,
             self._unit_normals,
         )
-        masks = [
+        masks = tuple(
             visible_surface_mask(model, data, camera, cube_body_id, points, normals)[0]
             for camera in cameras
-        ]
+        )
+        return self.capture_visible(points, masks, rng)
+
+    def capture_visible(self, points: np.ndarray,
+                        masks: tuple[np.ndarray, np.ndarray],
+                        rng: np.random.Generator) -> SyntheticBPSCapture | None:
+        """Degrade and encode a dense surface whose visibility is resolved.
+
+        The caller owns the whole-view-loss draw so it can avoid preparing or
+        raycasting dense points when that job is absent.
+        """
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        if len(masks) != 2:
+            raise ValueError("dense stereo requires exactly two visibility masks")
+        masks = tuple(np.asarray(mask, dtype=bool).reshape(-1) for mask in masks)
+        if any(mask.shape != (points.shape[0],) for mask in masks):
+            raise ValueError("dense visibility masks must match the surface points")
         left_visible_count = int(np.count_nonzero(masks[0]))
         shared = masks[0] & masks[1]
         shared_indices = np.flatnonzero(shared)

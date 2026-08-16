@@ -2,9 +2,14 @@
 
 import numpy as np
 import pytest
+import mujoco
 
 from real.tracking.dense_stereo import cloud_to_bps
-from src.base_env import RuntimeEnvConfig
+from src.base_env import (
+    RuntimeEnvConfig,
+    cube_surface_points_world,
+    cube_visible_surface,
+)
 from src.bps import BPSObsState, load_bps_config
 from src.lift_env import SO101LiftEnv
 from src.sim_bps import SyntheticBPSGenerator, SyntheticCloudConfig
@@ -94,4 +99,70 @@ def test_dropout_noise_whole_loss_and_held_age_are_configurable():
     held = state.serve(2.4)
     np.testing.assert_array_equal(held.distances, clean.measurement.distances)
     assert held.age_s == pytest.approx(0.4)
+    env.close()
+
+
+def test_env_batches_live_and_dense_visibility_per_camera(monkeypatch):
+    env = SO101LiftEnv(env_cfg=_env_config(), cfg=RuntimeEnvConfig())
+    env.reset(seed=12)
+    point_counts = []
+    from src import base_env
+    original = base_env.visible_surface_mask
+
+    def record_size(model, data, camera, excluded_body_id, points, normals):
+        point_counts.append(len(points))
+        return original(
+            model, data, camera, excluded_body_id, points, normals)
+
+    monkeypatch.setattr(base_env, "visible_surface_mask", record_size)
+    state = env._capture_camera_state()
+
+    live_points, live_normals = cube_surface_points_world(
+        env.data, env.cube_geom_id, env.cube_half_extents)
+    expected_points = len(live_points) + len(env._bps_generator.unit_points)
+    assert point_counts == [expected_points, expected_points]
+    for i, camera in enumerate(env.cube_cams):
+        fraction, centroid = cube_visible_surface(
+            env.model, env.data, camera, env.cube_body_id,
+            live_points, live_normals)
+        assert state.cube_vis_frac[i] == fraction
+        np.testing.assert_array_equal(state.cube_vis_centroid[i], centroid)
+    assert state.bps_measurement is not None
+    env.close()
+
+
+def test_capture_gate_skips_dense_rays_while_object_moves(monkeypatch):
+    env = SO101LiftEnv(env_cfg=_env_config(), cfg=RuntimeEnvConfig())
+    env.reset(seed=13)
+    point_counts = []
+    from src import base_env
+    original = base_env.visible_surface_mask
+
+    def record_size(model, data, camera, excluded_body_id, points, normals):
+        point_counts.append(len(points))
+        return original(
+            model, data, camera, excluded_body_id, points, normals)
+
+    monkeypatch.setattr(base_env, "visible_surface_mask", record_size)
+    capture_dt = 0.0556
+    capture_t = env.data.time
+    live_count = len(cube_surface_points_world(
+        env.data, env.cube_geom_id, env.cube_half_extents)[0])
+    combined_count = live_count + len(env._bps_generator.unit_points)
+    measurements = []
+    for index in range(14):
+        capture_t += capture_dt
+        if index == 0:
+            env.data.qpos[env.cube_qpos_idx] += 0.01
+            mujoco.mj_forward(env.model, env.data)
+        state = env._capture_camera_state(
+            capture_object=True, gate_dense=True, capture_t=capture_t)
+        measurements.append(state.bps_measurement)
+
+    per_frame_counts = np.asarray(point_counts).reshape(-1, 2)[:, 0]
+    assert per_frame_counts[0] == combined_count
+    assert np.all(per_frame_counts[1:10] == live_count)
+    assert all(measurement is None for measurement in measurements[:10])
+    assert per_frame_counts[-1] == combined_count
+    assert measurements[-1] is not None
     env.close()

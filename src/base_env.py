@@ -37,9 +37,11 @@ from src.sim_bps import (
     clean_synthetic_cloud_config,
 )
 from src.surface_cloud import (
-    OCCLUDER_GEOMGROUP as _OCCLUDER_GEOMGROUP,
+    transform_box_surface_points_world,
     unit_box_surface_points,
     visible_surface as cube_visible_surface,
+    visible_surface_mask,
+    visible_surface_summary,
 )
 from src.units import action_to_target
 from real.marker_spec import ARM_TAG_TO_SITE, TAG_SIZE_MM
@@ -305,6 +307,7 @@ class CamState(NamedTuple):
     cube_vis_frac: np.ndarray  # (2,) per-camera visible fraction (main, aux)
     cube_vis_centroid: np.ndarray  # (2, 3) per-camera visible-point centroid
     cube_seen: np.ndarray      # (2,) bool — any surface point visible per camera
+    live_detected: bool
     bps_measurement: BPSMeasurement | None
 
 
@@ -594,7 +597,7 @@ class SO101BaseEnv(SO101ArmEnv):
         # When false the marker rotation vectors are dropped from the obs (positions
         # only). Changes obs dim — see obs_dim_for / conf/config.yaml:marker_include_rot.
         self.marker_include_rot = bool(cfg.marker_include_rot)
-        # Camera latency model (sim2real): dict with frame_ms, bps_frame_ms,
+        # Camera latency model (sim2real): dict with frame_ms, object_frame_ms,
         # marker_delay_ms for
         # AprilTag markers, live_delay_ms for the dual-SAM centroid,
         # bps_delay_ms for dense stereo, and jitter_ms (see conf/dr/full.yaml),
@@ -625,6 +628,11 @@ class SO101BaseEnv(SO101ArmEnv):
         self.bps_config = cfg.bps_config or load_bps_config()
         cloud_config = cfg.synthetic_cloud or clean_synthetic_cloud_config()
         self._bps_generator = SyntheticBPSGenerator(self.bps_config, cloud_config)
+        self._live_surface_count = CUBE_SURFACE_UNIT_POINTS.shape[0]
+        self._combined_surface_unit_points = np.concatenate(
+            (CUBE_SURFACE_UNIT_POINTS, self._bps_generator.unit_points))
+        self._combined_surface_unit_normals = np.concatenate(
+            (CUBE_SURFACE_UNIT_NORMALS, self._bps_generator.unit_normals))
 
         # The actor sees tapped state frames followed by one current BPS block.
         self.state_dim = state_dim_for(self.prev_actions_n, self.marker_include_rot)
@@ -720,7 +728,8 @@ class SO101BaseEnv(SO101ArmEnv):
         else:
             self._camera = CameraSim(
                 frame_s=float(self.cam_latency["frame_ms"]) * 1e-3,
-                bps_frame_s=float(self.cam_latency["bps_frame_ms"]) * 1e-3,
+                object_frame_s=(
+                    float(self.cam_latency["object_frame_ms"]) * 1e-3),
                 marker_delay_range_s=(
                     float(self.cam_latency["marker_delay_ms"][0]) * 1e-3,
                     float(self.cam_latency["marker_delay_ms"][1]) * 1e-3),
@@ -743,6 +752,10 @@ class SO101BaseEnv(SO101ArmEnv):
         # The live driver owns the shared hold/age/static gate. BPSObsState owns
         # the one current/held dense-surface block outside observation history.
         self._obj = ObjectChannelDriver()
+        # Capture-time twin of the real ObjectSource static gate. It decides
+        # whether a selected frame starts dense work; the delivery-time driver
+        # above still owns the policy-facing live state and precise eligibility.
+        self._capture_obj = ObjectChannelDriver()
         self._bps_state = BPSObsState()
         # Dense processing starts from a live frame only when that frame passes
         # the static/visibility gate. Its result arrives later on the BPS stream.
@@ -777,36 +790,110 @@ class SO101BaseEnv(SO101ArmEnv):
         Visual only (site rgba) — no effect on physics or observations."""
         set_marker_render_colors(self.model, self.marker_site_ids, detected)
 
-    def _capture_camera_state(self, include_bps: bool = True):
+    def _capture_camera_state(self, capture_object: bool = True,
+                              gate_dense: bool = False,
+                              capture_t: float | None = None):
         """CamState snapshot of the current MjData — recorded per substep so
-        CameraSim can capture frames at any past instant of the tick."""
+        CameraSim can capture frames at any past instant of the tick.
+
+        Marker-only frames skip all sponge geometry. Object frames batch live
+        and dense samples into one visibility pass when the capture-time static
+        gate can start a dense job. Direct callers get an unconditional object
+        capture; scheduled callers pass ``gate_dense=True`` and ``capture_t``.
+        """
+        if gate_dense and capture_t is None:
+            raise ValueError("capture_t is required when gate_dense is true")
         marker_pos, marker_rot = marker_world_poses(self.data, self.marker_site_ids)
-        points, normals = cube_surface_points_world(self.data, self.cube_geom_id,
-                                                    self.cube_half_extents)
         vis_frac = np.zeros(2)
         vis_centroid = np.zeros((2, 3))
         seen = np.zeros(2, dtype=bool)
+        cube_center = self.data.geom_xpos[self.cube_geom_id].copy()
+        if not capture_object:
+            return CamState(
+                marker_pos=marker_pos, marker_rot=marker_rot,
+                marker_normal=marker_world_normals(
+                    self.data, self.marker_site_ids),
+                cube_center=cube_center,
+                cube_vis_frac=vis_frac, cube_vis_centroid=vis_centroid,
+                cube_seen=seen, live_detected=False, bps_measurement=None)
+
+        dense_candidate = (
+            not gate_dense
+            or self.marker_always_visible
+            or self._capture_obj.static_now()
+        )
+        dense_visible = dense_candidate and not \
+            self._bps_generator.whole_view_lost(self.np_random)
+        if dense_visible:
+            points, normals = transform_box_surface_points_world(
+                self.data, self.cube_geom_id, self.cube_half_extents,
+                self._combined_surface_unit_points,
+                self._combined_surface_unit_normals)
+        else:
+            points, normals = cube_surface_points_world(
+                self.data, self.cube_geom_id, self.cube_half_extents)
+
+        live_points = points[:self._live_surface_count]
+        live_normals = normals[:self._live_surface_count]
+        dense_masks = []
         for i, cam in enumerate(self.cube_cams):
-            frac, centroid = cube_visible_surface(self.model, self.data, cam,
-                                                  self.cube_body_id, points, normals)
+            visible, _ = visible_surface_mask(
+                self.model, self.data, cam, self.cube_body_id, points, normals)
+            live_visible = visible[:self._live_surface_count]
+            live_facing = int(np.count_nonzero(np.einsum(
+                "ij,ij->i", live_normals, cam.pos - live_points) > 0.0))
+            frac, centroid = visible_surface_summary(
+                live_points, live_visible, live_facing)
             vis_frac[i] = frac
             if centroid is not None:
                 vis_centroid[i] = centroid
                 seen[i] = True
+            if dense_visible:
+                dense_masks.append(visible[self._live_surface_count:])
+
+        if self.marker_always_visible:
+            live_detected = True
+        else:
+            if self.marker_dropout is None:
+                p_near = p_far = 0.0
+            else:
+                p_near = self.marker_dropout["near"]
+                p_far = self.marker_dropout["far"]
+            if not seen.all():
+                live_prob = 1.0
+            elif vis_frac.min() < VISIBLE_FRACTION_MIN:
+                live_prob = p_near
+            else:
+                live_prob = p_far
+            live_detected = bool(self.np_random.random() >= live_prob)
+
+        live_gate = (cube_center if self.marker_always_visible
+                     else vis_centroid.mean(axis=0))
+        dense_eligible = True
+        if gate_dense:
+            if live_detected:
+                self._capture_obj.ingest_live(
+                    capture_t, live_gate, gate_point=live_gate)
+            dense_eligible = (
+                self.marker_always_visible
+                or (live_detected and self._capture_obj.gate_open(vis_frac))
+            )
+
         bps_capture = None
-        if include_bps:
-            bps_capture = self._bps_generator.capture(
-                self.model, self.data, self.cube_cams, self.cube_geom_id,
-                self.cube_body_id, self.cube_half_extents, self.np_random)
+        if dense_visible and dense_eligible:
+            dense_points = points[self._live_surface_count:]
+            bps_capture = self._bps_generator.capture_visible(
+                dense_points, tuple(dense_masks), self.np_random)
         return CamState(marker_pos=marker_pos, marker_rot=marker_rot,
                         marker_normal=marker_world_normals(self.data, self.marker_site_ids),
-                        cube_center=self.data.geom_xpos[self.cube_geom_id].copy(),
+                        cube_center=cube_center,
                         cube_vis_frac=vis_frac, cube_vis_centroid=vis_centroid,
-                        cube_seen=seen,
+                        cube_seen=seen, live_detected=live_detected,
                         bps_measurement=(None if bps_capture is None
                                          else bps_capture.measurement))
 
-    def _process_frame(self, state: CamState) -> CamFrame:
+    def _process_frame(self, state: CamState,
+                       capture_object: bool = True) -> CamFrame:
         """One simulated detection of a captured world state: roll the per-frame
         dropout (geometric visibility + DR), apply bias and per-frame noise.
         Runs exactly once per frame, at capture time — a real frame is detected
@@ -816,7 +903,6 @@ class SO101BaseEnv(SO101ArmEnv):
         folds into the held obs state."""
         if self.marker_always_visible:
             detected = np.ones(N_MARKERS, dtype=bool)
-            live_detected = True
         else:
             if self.marker_dropout is None:
                 p_near = p_far = 0.0
@@ -826,18 +912,7 @@ class SO101BaseEnv(SO101ArmEnv):
             prob = marker_dropout_prob(state.marker_pos, state.marker_normal,
                                        self.tag_cam, p_near, p_far)
             detected = self.np_random.random(N_MARKERS) >= prob
-            # Live channel: needs BOTH views (a single view gives only a ray —
-            # no mono fallback in v1). The dropout knob stands in for the
-            # segmentation tracker's per-frame misses, `near` when the object
-            # is only partially visible somewhere (flaky mask), `far` when
-            # comfortably visible in both views.
-            if not state.cube_seen.all():
-                live_prob = 1.0
-            elif state.cube_vis_frac.min() < VISIBLE_FRACTION_MIN:
-                live_prob = p_near
-            else:
-                live_prob = p_far
-            live_detected = bool(self.np_random.random() >= live_prob)
+        live_detected = bool(capture_object and state.live_detected)
 
         marker_pos = state.marker_pos.copy()
         marker_rot = state.marker_rot.copy()
@@ -846,9 +921,10 @@ class SO101BaseEnv(SO101ArmEnv):
         # visible surface instead of pretending the live channel sees the true
         # center. The privileged live is the GT center under the same
         # bias/noise (what the marker_always_visible crutch serves).
-        live_meas = state.cube_vis_centroid.mean(axis=0)
+        live_meas = (state.cube_vis_centroid.mean(axis=0)
+                     if capture_object else np.zeros(3))
         live_priv = state.cube_center.copy()
-        bps_measurement = state.bps_measurement
+        bps_measurement = state.bps_measurement if capture_object else None
         live_err = np.zeros(3)
         if self.obs_bias is not None:
             # _common_pos_bias hits the arm markers and both cube channels
@@ -856,7 +932,8 @@ class SO101BaseEnv(SO101ArmEnv):
             # independent.
             marker_pos = marker_pos + self._marker_pos_bias + self._common_pos_bias
             marker_rot = marker_rot + self._marker_rot_bias
-            live_err = live_err + self._live_bias + self._common_pos_bias
+            if capture_object:
+                live_err = live_err + self._live_bias + self._common_pos_bias
             if bps_measurement is not None:
                 bps_measurement = BPSMeasurement(
                     distances=bps_measurement.distances,
@@ -878,7 +955,9 @@ class SO101BaseEnv(SO101ArmEnv):
                     self._marker_tag_sizes[i], self._focal_px, px, depth_factor)
             marker_rot = marker_rot + rng.normal(0, self.obs_noise["marker_rot_sigma"],
                                                  size=marker_rot.shape)
-            live_err = live_err + rng.normal(0, self.obs_noise["live_sigma"], size=3)
+            if capture_object:
+                live_err = live_err + rng.normal(
+                    0, self.obs_noise["live_sigma"], size=3)
             if bps_measurement is not None:
                 bps_measurement = BPSMeasurement(
                     distances=bps_measurement.distances,
@@ -886,7 +965,7 @@ class SO101BaseEnv(SO101ArmEnv):
                         0, self.obs_noise["precise_sigma"], size=3)),
                     valid_fraction=bps_measurement.valid_fraction,
                 )
-        if self.marker_always_visible:
+        if self.marker_always_visible and capture_object:
             # Easy-mode crutch: the live channel reads the (noisy) true center,
             # sidestepping the visible-surface bias and any occlusion.
             live_meas = live_priv
@@ -1404,14 +1483,23 @@ class SO101BaseEnv(SO101ArmEnv):
         self._held_marker_rot[:] = 0.0
         self._marker_last_capture_t[:] = -np.inf
         self._obj = ObjectChannelDriver()
+        self._capture_obj = ObjectChannelDriver()
         self._bps_state = BPSObsState()
         self._obj_state_priv = ObjectObsState()
         self._bps_eligible_capture_times.clear()
         self._episode_start_t = self.data.time
+        reset_state = self._capture_camera_state()
+        if reset_state.live_detected:
+            capture_gate = (reset_state.cube_center
+                            if self.marker_always_visible
+                            else reset_state.cube_vis_centroid.mean(axis=0))
+            self._capture_obj.seed_static(
+                self.data.time - STATIC_DWELL_S, capture_gate)
+            self._capture_obj.ingest_live(
+                self.data.time, capture_gate, gate_point=capture_gate)
         deliveries = self._camera.reset(
-            self.np_random, self.data.time,
-            self._capture_camera_state(include_bps=False),
-            self._capture_camera_state(include_bps=True), self._process_frame)
+            self.np_random, self.data.time, reset_state, reset_state,
+            self._process_frame)
         marker_capture_t, marker_frame = deliveries.marker[0]
         live_capture_t, live_frame = deliveries.live[0]
         bps_capture_t, bps_frame = deliveries.bps[0]
@@ -1443,7 +1531,10 @@ class SO101BaseEnv(SO101ArmEnv):
         if self._camera.needs_state(self.data.time, self.np_random):
             self._camera.record(
                 self.data.time,
-                self._capture_camera_state(include_bps=self._camera.record_bps))
+                self._capture_camera_state(
+                    capture_object=self._camera.record_object,
+                    gate_dense=self._camera.record_object,
+                    capture_t=self._camera.record_capture_t))
 
     def step(self, action):
         self.step_count += 1

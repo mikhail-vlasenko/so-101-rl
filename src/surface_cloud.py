@@ -101,6 +101,12 @@ def visible_surface(model, data, cam, excluded_body_id: int,
     """Existing live-channel contract: visible/facing fraction and centroid."""
     visible, n_facing = visible_surface_mask(
         model, data, cam, excluded_body_id, points, normals)
+    return visible_surface_summary(points, visible, n_facing)
+
+
+def visible_surface_summary(points: np.ndarray, visible: np.ndarray,
+                            n_facing: int):
+    """Visible fraction and centroid from one already-resolved mask."""
     if not np.any(visible):
         return 0.0, None
     return float(np.count_nonzero(visible) / n_facing), points[visible].mean(axis=0)

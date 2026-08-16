@@ -115,7 +115,8 @@ def test_single_view_loss_stales_live(env):
     state = env._capture_camera_state()
     assert state.cube_seen.all()
     assert not env._process_frame(
-        state._replace(cube_seen=np.array([True, False]))).live_detected
+        state._replace(cube_seen=np.array([True, False]),
+                       live_detected=False)).live_detected
 
 
 def test_bps_refreshes_only_when_static():
