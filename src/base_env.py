@@ -22,6 +22,7 @@ from src.bps import (
 )
 from src.marker_noise import CameraIntrinsics, anisotropic_pos_noise, load_camera_intrinsics
 from src.obs_history import ObsHistory
+from src.robot_spec import EE_SITE_NAME, JOINT_NAMES
 from src.servo_profile import ServoProfile
 from src.shape_obs import (
     MARKER_AGE_CAP_S,
@@ -384,12 +385,6 @@ MOVING_JAW_NAMES = [
     "moving_jaw_box1", "moving_jaw_box2", "moving_jaw_box3",
     "moving_jaw_sph_tip1", "moving_jaw_sph_tip2", "moving_jaw_sph_tip3",
 ]
-JOINT_NAMES = [
-    "shoulder_pan", "shoulder_lift", "elbow_flex",
-    "wrist_flex", "wrist_roll", "gripper",
-]
-
-
 class SO101ArmEnv(gym.Env):
     """Shared SO-101 arm machinery: model/joint setup, the clip ->
     action_to_target -> servo-profile -> substep drive (_apply_action),
@@ -419,7 +414,8 @@ class SO101ArmEnv(gym.Env):
                           for n in JOINT_NAMES]
         self.joint_qposadr = self.model.jnt_qposadr[self.joint_ids]
         self.joint_dofadr = self.model.jnt_dofadr[self.joint_ids]
-        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
+        self.ee_site_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_SITE, EE_SITE_NAME)
         self.floor_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
         assert self.floor_geom_id >= 0, "Floor geom 'floor' not found in XML"
         self.arm_geom_ids = {i for i in range(self.model.ngeom) if self.model.geom_group[i] == 3}

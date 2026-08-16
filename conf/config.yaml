@@ -279,3 +279,50 @@ distill:
   buffer_cap: 1_000_000  # max aggregated transitions retained (DAgger dataset, FIFO)
   eval_episodes: 32      # paired teacher/student eval episodes (bug tripwire)
   out: distilled.zip     # student checkpoint path (relative to repo root)
+
+# Offline supervised inverse-kinematics capacity experiment. The dataset
+# generator uses MuJoCo only for static kinematics, Jacobians, and terminal-pose
+# collision checks; the sweep itself reads the saved arrays and never imports
+# MuJoCo. Inputs are [current six-joint pose, desired gripperframe xyz], and the
+# label is the closest five-arm-joint displacement under joint-range-normalized
+# distance. The gripper opening is held at its current value because it cannot
+# move gripperframe. Validation and test have identical structure: each combines
+# samples held out inside training cells with every sample from disjoint spatial
+# cells. Architecture selection uses validation only; src.ik_report evaluates
+# the selected depth/width on test.
+ik_capacity:
+  dataset_path: datasets/ik_capacity.npz
+  results_dir: outputs/ik_capacity
+  seed: 20260816
+  dataset:
+    mode: generate       # generate | resplit (reuse labels, replace split arrays only)
+    samples: 100_000
+    workers: 12
+    model_path: so101/scene.xml
+    target_low_m: [0.10, -0.10, 0.03]
+    target_high_m: [0.30, 0.10, 0.20]
+    target_offset_m: [0.0, 0.0, 0.0]
+    spatial_cells: [5, 5, 4]
+    validation_cell_fraction: 0.10
+    test_cell_fraction: 0.10
+    validation_sample_fraction: 0.10
+    test_sample_fraction: 0.10
+    position_tolerance_m: 0.0005
+    joint_limit_margin_fraction: 0.01
+    ik_restarts: 3
+    ik_max_iterations: 80
+    max_sample_attempts: 100
+  sweep:
+    depths: [1, 2, 4, 6]
+    widths: [16, 32, 64, 128, 256]
+    seeds: [0, 1, 2, 3, 4]
+    activation: silu
+    learning_rate: 0.003
+    learning_rate_min: 0.00003
+    batch_size: 4096
+    max_epochs: 300
+    early_stopping_patience: 30
+    early_stopping_min_delta: 1.0e-7
+    device: cuda          # fail fast if unavailable; never silently fall back to CPU
+    parallel_jobs: 1      # one process owns the single GPU
+    threads_per_job: 4
