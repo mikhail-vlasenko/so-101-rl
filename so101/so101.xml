@@ -116,8 +116,8 @@
          pose via cam_xpos/cam_xmat. The marker-visibility check consumes
          both: the position for the facing-angle test, and the full
          orientation for the field-of-view (in-frame) projection. -->
-    <body name="tag_cam_mount" pos="0.147956 -0.383419 0.209645"
-          quat="0.817337 0.576017 0.001270 -0.012742">
+    <body name="tag_cam_mount" pos="0.150900 -0.386796 0.207672"
+          quat="0.816264 0.577600 0.000976 -0.009526">
       <camera name="tag_cam"/>
       <!-- Visible webcam stand-in (body + forward-facing lens). No collision
            (contype/conaffinity 0) so it never enters the contact or arm-geom
@@ -133,8 +133,8 @@
     <!-- Second (aux) C922 for the dual-view object channels (src/base_env.py
          live/precise cube obs), angularly separated from tag_cam about the
          workspace center. Pose measured like tag_cam_mount above. -->
-    <body name="tag_cam_aux_mount" pos="0.252617 -0.380792 0.211717"
-          quat="0.821187 0.570645 0.002152 0.003513">
+    <body name="tag_cam_aux_mount" pos="0.254350 -0.384744 0.210519"
+          quat="0.819790 0.572651 0.000264 0.004032">
       <camera name="tag_cam_aux"/>
       <geom name="tag_cam_aux_body" type="box" size="0.022 0.032 0.018" group="1"
             rgba="0.05 0.05 0.06 1" contype="0" conaffinity="0"/>
