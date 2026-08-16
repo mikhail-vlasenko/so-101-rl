@@ -58,24 +58,35 @@ synthetic_cloud:
   point_dropout_probability: 0.25
   whole_view_loss_probability: 0.05
 
-# Observation latency (sim2real): only camera-derived obs (markers, cube) lag.
+# Observation latency (sim2real): only camera-derived obs lag.
 # Encoder reads are ~2 ms on the bus — effectively fresh at a 66.7 ms tick — so
-# qpos carries no latency, and qvel's half-tick lag comes from the differencing
-# above. Marker/cube obs instead come from simulated camera frames
-# (src/camera_sim.py): capture every frame_ms with a per-episode random phase,
-# available to the policy delay_ms after capture (mid-exposure -> readout ->
-# USB/decode -> AprilTag detection; per-episode uniform sample from the range),
-# consumed at the next control tick. jitter_ms randomizes each frame's capture
-# time so the camera/control beat drifts like real clock skew. The extra
-# 0-33 ms wait-for-consumption staleness the rollouts measure (marker_age_ms
-# telemetry: ~7-43 ms) emerges from the frame schedule itself.
+# qpos carries no latency, and qvel's half-tick lag comes from differencing.
+# One simulated capture feeds three availability streams: arm AprilTags, the
+# dual-SAM live centroid, and dense BPS. Each delay is sampled once per episode;
+# the frame schedule adds capture/control phase staleness on top.
 cam_latency:
   frame_ms: 33.3           # C922 @ 30 fps (probe run: 30.0 fps, p95 gap 36 ms)
   # Measured by sysid/probe_cam_latency.py (run probe_1783181402, driven
   # wrist_flex sine, residual 0.9 mm): capture -> cap.read() tau = 39.5 ms,
   # + ~7 ms AprilTag detect = ~46.5 ms capture -> pose available. Range covers
   # per-frame detect variance plus headroom for run-to-run drift.
-  delay_ms: [42.0, 52.0]
+  marker_delay_ms: [42.0, 52.0]
+  # Three dual-camera rollouts on 2026-08-15 measured policy-facing live ages
+  # of 139-146 ms mean / 160-173 ms p95. Approximate mean stack for the clean
+  # run (145.6 ms total): 39.5 ms capture -> read/decode (measured), 36.0 ms
+  # for both SAM2 passes (measured), ~20 ms for both table-anchor detections
+  # (inferred from ~10 ms/view marker telemetry), ~10-20 ms uninstrumented
+  # mask/centroid/anchor work, and ~33 ms average pickup by the 15 Hz policy.
+  # Pairing is normally near-zero because the worker takes each feed's newest
+  # frame and skips backlog. This range folds the uninstrumented worker/cadence
+  # effects into capture -> live availability; CameraSim then adds its own
+  # frame/control phase, matching the end-to-end age rather than claiming an
+  # exact per-stage model.
+  live_delay_ms: [110.0, 140.0]
+  # On the clean continuously-refreshed run, dense BPS age was 174.1 ms mean /
+  # 204.6 ms p95. StereoSGBM/BPS added 27.3 ms mean / 31.2 ms p95 to the
+  # live-centroid path; the remaining mean publication overhead was ~1 ms.
+  bps_delay_ms: [145.0, 175.0]
   jitter_ms: 1.5
 
 # AprilTag detector dropout: per-frame probability a geometrically-visible tag is

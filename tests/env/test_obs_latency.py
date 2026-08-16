@@ -1,11 +1,9 @@
 """Observation latency contract (sim2real).
 
-Only camera-derived observations (markers, cube) lag. They come from discrete
-simulated camera frames (src/camera_sim.py): captured every frame_ms with a
-per-episode random phase, available to the policy delay_ms after capture,
-consumed at the next control tick — mirroring real/rollout/marker_obs.py, where the
-measured rollout staleness (marker_age_ms telemetry) is the AprilTag detection
-plus the wait for the next policy tick on top of the capture pipeline delay.
+Only camera-derived observations lag. One discrete simulated capture feeds
+separate marker, dual-SAM live-centroid, and dense-BPS availability streams.
+Each has its measured capture-to-result delay plus the frame/control pickup
+phase, matching the age semantics of the real rollout.
 
 The encoder path deliberately has no latency: the real bus read is ~2 ms
 against a 66.7 ms control tick, so qpos is fresh, and qvel is the backward
@@ -26,7 +24,13 @@ CONTROL_DT = 1.0 / 15.0
 SUBSTEP = CONTROL_DT / 10.0
 
 # One-tick-scale camera config with a deterministic delay for exact assertions.
-CAM = {"frame_ms": 33.3, "delay_ms": [45.0, 45.0], "jitter_ms": 0.0}
+CAM = {
+    "frame_ms": 33.3,
+    "marker_delay_ms": [45.0, 45.0],
+    "live_delay_ms": [115.0, 115.0],
+    "bps_delay_ms": [150.0, 150.0],
+    "jitter_ms": 0.0,
+}
 
 
 @pytest.fixture(scope="module")
@@ -48,13 +52,23 @@ def _move_action():
     return np.full(6, 0.5, dtype=np.float32)
 
 
+def _camera(frame_s, delay_range_s, jitter_s=0.0):
+    """CameraSim with one common delay for schedule-only unit tests."""
+    return CameraSim(
+        frame_s=frame_s,
+        marker_delay_range_s=delay_range_s,
+        live_delay_range_s=delay_range_s,
+        bps_delay_range_s=delay_range_s,
+        jitter_s=jitter_s, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+
+
 # ---------------------------------------------------------------- CameraSim
 
 def _run_camera(cam, rng, n_ticks=30):
     """Drive a CameraSim like the env does — state = its own timestamp, only
     the substeps needs_state claims get snapshotted — and return the newest
     consumed frame (== its captured state's time) at each control tick."""
-    _, frame = cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
+    frame = cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s).marker[0][1]
     consumed = []
     t = 0.0
     for _ in range(n_ticks):
@@ -62,7 +76,7 @@ def _run_camera(cam, rng, n_ticks=30):
             t += SUBSTEP
             if cam.needs_state(t, rng):
                 cam.record(t, t)
-        for _, new_frame in cam.observe(t, capture_fn=lambda s: s):
+        for _, new_frame in cam.observe(t, capture_fn=lambda s: s).marker:
             frame = new_frame
         consumed.append(frame)
     return np.array(consumed)
@@ -82,9 +96,8 @@ def test_camera_sim_age_matches_schedule():
     the newest capture with capture_t + d <= t, so its age lies in
     [d, d + frame_s) (plus half a substep of history-lookup rounding)."""
     frame_s = CAM["frame_ms"] * 1e-3
-    delay_s = CAM["delay_ms"][0] * 1e-3
-    cam = CameraSim(frame_s=frame_s, delay_range_s=(delay_s, delay_s),
-                    jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    delay_s = CAM["marker_delay_ms"][0] * 1e-3
+    cam = _camera(frame_s, (delay_s, delay_s))
     rng = np.random.default_rng(1)
     capture_ts = _run_camera(cam, rng)
     obs_ts = CONTROL_DT * np.arange(1, len(capture_ts) + 1)
@@ -100,8 +113,7 @@ def test_camera_sim_jitter_makes_age_drift():
     of freezing the camera/control beat at one value."""
     frame_s = CAM["frame_ms"] * 1e-3
     delay_s = 0.045
-    cam = CameraSim(frame_s=frame_s, delay_range_s=(delay_s, delay_s),
-                    jitter_s=0.0015, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    cam = _camera(frame_s, (delay_s, delay_s), jitter_s=0.0015)
     rng = np.random.default_rng(2)
     capture_ts = _run_camera(cam, rng, n_ticks=300)
     ages = CONTROL_DT * np.arange(1, len(capture_ts) + 1) - capture_ts
@@ -116,8 +128,7 @@ def test_snapshots_are_taken_per_capture_not_per_substep():
     dominates the cost of a step (src/base_env._capture_camera_state), while
     the schedule only ever consumes one state per frame."""
     frame_s = CAM["frame_ms"] * 1e-3
-    cam = CameraSim(frame_s=frame_s, delay_range_s=(0.045, 0.045),
-                    jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    cam = _camera(frame_s, (0.045, 0.045))
     rng = np.random.default_rng(7)
     cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
     n_ticks, claimed, substeps = 60, 0, 0
@@ -140,8 +151,7 @@ def test_consumed_frames_come_from_the_nearest_snapshot():
     every consumed capture still resolves to the recorded substep nearest its
     instant, i.e. within half a substep."""
     frame_s = CAM["frame_ms"] * 1e-3
-    cam = CameraSim(frame_s=frame_s, delay_range_s=(0.045, 0.045),
-                    jitter_s=0.0015, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    cam = _camera(frame_s, (0.045, 0.045), jitter_s=0.0015)
     rng = np.random.default_rng(8)
     cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
     t = 0.0
@@ -150,7 +160,7 @@ def test_consumed_frames_come_from_the_nearest_snapshot():
             t += SUBSTEP
             if cam.needs_state(t, rng):
                 cam.record(t, t)
-        for capture_t, frame in cam.observe(t, capture_fn=lambda s: s):
+        for capture_t, frame in cam.observe(t, capture_fn=lambda s: s).marker:
             if capture_t <= 0.0:
                 continue  # in flight at reset: built from the static reset state
             # frame is the timestamp of the snapshot it was built from.
@@ -158,14 +168,18 @@ def test_consumed_frames_come_from_the_nearest_snapshot():
 
 
 def test_camera_sim_delay_sampled_per_episode():
-    """delay_ms is a per-episode range: different resets draw different delays."""
-    cam = CameraSim(frame_s=0.0333, delay_range_s=(0.030, 0.060),
-                    jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    """Each delay is sampled per episode; marker draws span their range."""
+    cam = CameraSim(
+        frame_s=0.0333,
+        marker_delay_range_s=(0.030, 0.060),
+        live_delay_range_s=(0.070, 0.090),
+        bps_delay_range_s=(0.100, 0.120),
+        jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
     rng = np.random.default_rng(3)
     delays = []
     for _ in range(20):
         cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
-        delays.append(cam._delay)
+        delays.append(cam.pipeline_delay_s)
     delays = np.array(delays)
     assert delays.min() >= 0.030 and delays.max() <= 0.060
     assert delays.std() > 0.005, "per-episode delay draws should spread over the range"
@@ -176,13 +190,13 @@ def test_camera_sim_reset_frame_ages_like_midstream():
     its age at reset lies in [delay, delay + frame_s) — the same sawtooth a
     mid-episode consumed frame has — instead of pretending zero latency."""
     frame_s = CAM["frame_ms"] * 1e-3
-    delay_s = CAM["delay_ms"][0] * 1e-3
-    cam = CameraSim(frame_s=frame_s, delay_range_s=(delay_s, delay_s),
-                    jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    delay_s = CAM["marker_delay_ms"][0] * 1e-3
+    cam = _camera(frame_s, (delay_s, delay_s))
     rng = np.random.default_rng(4)
     t0 = 5.0
     for _ in range(50):
-        capture_t, _ = cam.reset(rng, t0, 0.0, capture_fn=lambda s: s)
+        capture_t, _ = cam.reset(
+            rng, t0, 0.0, capture_fn=lambda s: s).marker[0]
         age = t0 - capture_t
         assert delay_s - 1e-9 <= age < delay_s + frame_s + 1e-9, age
 
@@ -195,8 +209,11 @@ def test_default_config_has_cam_latency(cfg):
     lat = cfg.cam_latency
     assert lat is not None
     assert float(lat.frame_ms) > 0.0
-    lo, hi = float(lat.delay_ms[0]), float(lat.delay_ms[1])
+    lo, hi = map(float, lat.marker_delay_ms)
     assert 0.0 < lo <= hi
+    live_lo, live_hi = map(float, lat.live_delay_ms)
+    bps_lo, bps_hi = map(float, lat.bps_delay_ms)
+    assert hi <= live_lo <= live_hi <= bps_lo <= bps_hi
 
 
 def test_synchronous_camera_markers_are_fresh(cfg):
@@ -223,7 +240,7 @@ def test_delayed_camera_markers_lag_current_state(cfg):
     while the arm moves."""
     env = _pickplace(cfg, cam_latency=CAM, marker_always_visible=True)
     env.reset(seed=0)
-    delay_s = CAM["delay_ms"][0] * 1e-3
+    delay_s = CAM["marker_delay_ms"][0] * 1e-3
     frame_s = CAM["frame_ms"] * 1e-3
     lagged_steps = 0
     for step in range(10):
@@ -247,7 +264,7 @@ def test_marker_age_obs_matches_latency_window(cfg):
     with a fixed pipeline delay and always-visible tags it must stay inside the
     [delay, delay + frame_ms) sawtooth — from the very first obs at reset on."""
     env = _pickplace(cfg, cam_latency=CAM, marker_always_visible=True)
-    delay_s = CAM["delay_ms"][0] * 1e-3
+    delay_s = CAM["marker_delay_ms"][0] * 1e-3
     frame_s = CAM["frame_ms"] * 1e-3
     obs, _ = env.reset(seed=0)
     ages = [obs[18:20].copy()]
@@ -259,6 +276,29 @@ def test_marker_age_obs_matches_latency_window(cfg):
     assert np.all(ages < delay_s + frame_s + 1e-6), ages.max()
     # Always-visible tags consume the same frames: identical ages per step.
     np.testing.assert_allclose(ages[:, 0], ages[:, 1], atol=1e-9)
+
+
+def test_object_ages_use_sam_and_dense_delay_windows(cfg):
+    """Live and BPS ages follow their longer measured processing pipelines,
+    rather than becoming available with the earlier AprilTag result."""
+    env = _pickplace(cfg, cam_latency=CAM, marker_always_visible=True)
+    obs, _ = env.reset(seed=0)
+    live_ages = [obs[23]]
+    precise_ages = [obs[env.state_dim + 67]]
+    for _ in range(30):
+        obs, *_ = env.step(_move_action())
+        live_ages.append(obs[23])
+        precise_ages.append(obs[env.state_dim + 67])
+
+    frame_s = CAM["frame_ms"] * 1e-3
+    live_ages = np.asarray(live_ages)
+    precise_ages = np.asarray(precise_ages)
+    live_delay_s = CAM["live_delay_ms"][0] * 1e-3
+    bps_delay_s = CAM["bps_delay_ms"][0] * 1e-3
+    assert np.all(live_ages >= live_delay_s - 1e-6), live_ages.min()
+    assert np.all(live_ages < live_delay_s + frame_s + 1e-6), live_ages.max()
+    assert np.all(precise_ages >= bps_delay_s - 1e-6), precise_ages.min()
+    assert np.all(precise_ages < bps_delay_s + frame_s + 1e-6), precise_ages.max()
 
 
 def test_qpos_is_fresh_under_camera_latency(cfg):
@@ -297,7 +337,7 @@ def test_reset_gives_fresh_initial_frame(cfg):
     cur_pos, _ = marker_world_poses(env.data, env.marker_site_ids)
     np.testing.assert_allclose(obs[12:18].reshape(2, 3), cur_pos, atol=1e-6)
     # ...but the frame still ages like a real one: delay + sawtooth phase.
-    assert np.all(obs[18:20] >= CAM["delay_ms"][0] * 1e-3 - 1e-6)
+    assert np.all(obs[18:20] >= CAM["marker_delay_ms"][0] * 1e-3 - 1e-6)
 
 
 def test_reward_uses_true_state_under_latency(cfg):

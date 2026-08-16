@@ -29,11 +29,15 @@ VALID_FRACTION = PRECISE_AGE + 1
 
 
 class RecordingLiftEnv(SO101LiftEnv):
-    """Logs every ingested camera frame (the raw measurement sequence)."""
+    """Logs every live/BPS delivery from the shared capture sequence."""
 
-    def _ingest_frame(self, capture_t, frame):
-        self.ingest_log.append((capture_t, frame))
-        super()._ingest_frame(capture_t, frame)
+    def _ingest_live_frame(self, capture_t, frame):
+        self.ingest_log.append(("live", capture_t, frame))
+        super()._ingest_live_frame(capture_t, frame)
+
+    def _ingest_bps_frame(self, capture_t, frame):
+        self.ingest_log.append(("bps", capture_t, frame))
+        super()._ingest_bps_frame(capture_t, frame)
 
 
 @pytest.fixture(scope="module")
@@ -54,19 +58,27 @@ def test_env_channels_match_standalone_driver_replay(lift_env_cfg):
 
     driver = ObjectChannelDriver()
     bps_state = BPSObsState()
+    bps_eligible = set()
     replayed = 0
 
     def replay_new_frames():
         nonlocal replayed
-        for capture_t, frame in env.ingest_log[replayed:]:
-            if frame.live_detected:
+        for modality, capture_t, frame in env.ingest_log[replayed:]:
+            if modality == "live" and frame.live_detected:
                 # The very first detection carries the pre-episode static
                 # evidence, exactly like env.reset / the real warmup.
-                if replayed == 0 and not driver._hist_t:
+                if not driver._hist_t:
                     driver.seed_static(capture_t - STATIC_DWELL_S, frame.live_gate)
                 driver.ingest_live(capture_t, frame.live,
                                    gate_point=frame.live_gate)
                 if driver.gate_open(frame.vis_frac):
+                    bps_eligible.add(capture_t)
+            elif modality == "bps":
+                eligible = capture_t in bps_eligible
+                bps_eligible.discard(capture_t)
+                if capture_t <= env._episode_start_t and frame.live_detected:
+                    eligible = driver.gate_open(frame.vis_frac)
+                if eligible:
                     bps_state.ingest(capture_t, frame.bps_measurement)
             replayed += 1
 

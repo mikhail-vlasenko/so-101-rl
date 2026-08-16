@@ -589,10 +589,11 @@ class SO101BaseEnv(SO101ArmEnv):
         # When false the marker rotation vectors are dropped from the obs (positions
         # only). Changes obs dim — see obs_dim_for / conf/config.yaml:marker_include_rot.
         self.marker_include_rot = bool(cfg.marker_include_rot)
-        # Camera latency model (sim2real): dict with keys frame_ms, delay_ms
-        # [lo, hi], jitter_ms (see conf/dr/full.yaml), or None for a synchronous
-        # zero-latency camera. Stored raw here; the CameraSim is built below
-        # once the control period is known.
+        # Camera latency model (sim2real): dict with frame_ms, marker_delay_ms for
+        # AprilTag markers, live_delay_ms for the dual-SAM centroid,
+        # bps_delay_ms for dense stereo, and jitter_ms (see conf/dr/full.yaml),
+        # or None for a synchronous zero-latency camera. Stored raw here; the
+        # CameraSim is built below once the control period is known.
         self.cam_latency = cfg.cam_latency
         # dict with keys qpos_sigma, marker_pos_sigma, marker_rot_sigma,
         # live_sigma, precise_sigma, marker_common_sigma; or
@@ -713,11 +714,19 @@ class SO101BaseEnv(SO101ArmEnv):
         else:
             self._camera = CameraSim(
                 frame_s=float(self.cam_latency["frame_ms"]) * 1e-3,
-                delay_range_s=(float(self.cam_latency["delay_ms"][0]) * 1e-3,
-                               float(self.cam_latency["delay_ms"][1]) * 1e-3),
+                marker_delay_range_s=(
+                    float(self.cam_latency["marker_delay_ms"][0]) * 1e-3,
+                    float(self.cam_latency["marker_delay_ms"][1]) * 1e-3),
+                live_delay_range_s=(
+                    float(self.cam_latency["live_delay_ms"][0]) * 1e-3,
+                    float(self.cam_latency["live_delay_ms"][1]) * 1e-3),
+                bps_delay_range_s=(
+                    float(self.cam_latency["bps_delay_ms"][0]) * 1e-3,
+                    float(self.cam_latency["bps_delay_ms"][1]) * 1e-3),
                 jitter_s=float(self.cam_latency["jitter_ms"]) * 1e-3,
                 control_dt=self._step_dt, substep_s=self.model.opt.timestep)
         self._cam_frame: CamFrame | None = None
+        self._live_detected = False
         # Hold-last-pose marker state: the obs serves each tag's most recent
         # detection plus its age; a last-capture time of -inf means never seen
         # this episode (zero pose, age pinned at MARKER_AGE_CAP_S).
@@ -728,6 +737,10 @@ class SO101BaseEnv(SO101ArmEnv):
         # the one current/held dense-surface block outside observation history.
         self._obj = ObjectChannelDriver()
         self._bps_state = BPSObsState()
+        # Dense processing starts from a live frame only when that frame passes
+        # the static/visibility gate. Its result arrives later on the BPS stream.
+        self._bps_eligible_capture_times: set[float] = set()
+        self._episode_start_t = 0.0
         # Privileged (always-fresh) mirror of the held state: every frame
         # overwrites it regardless of detection, so it serves exactly what a
         # marker_always_visible=true policy sees — same frames, same
@@ -882,12 +895,8 @@ class SO101BaseEnv(SO101ArmEnv):
                         vis_frac=state.cube_vis_frac.copy(),
                         bps_measurement=bps_measurement)
 
-    def _ingest_frame(self, capture_t, frame: CamFrame):
-        """Consume one camera frame: it becomes the current frame (render tint,
-        hidden metrics), each detected marker's measurement overwrites the
-        held pose the obs serves, a detected live measurement refreshes the
-        live channel and extends the static-gate history, and the BPS state
-        refreshes when the gate passes."""
+    def _ingest_marker_frame(self, capture_t: float, frame: CamFrame) -> None:
+        """Publish the AprilTag result for one captured frame."""
         self._cam_frame = frame
         det = frame.detected
         self._held_marker_pos[det] = frame.marker_pos[det]
@@ -895,30 +904,49 @@ class SO101BaseEnv(SO101ArmEnv):
         self._marker_last_capture_t[det] = capture_t
         self._set_marker_render_colors(det)
 
+        self._held_marker_pos_priv[:] = frame.marker_pos
+        self._held_marker_rot_priv[:] = frame.marker_rot
+        self._marker_last_capture_t_priv[:] = capture_t
+
+    def _ingest_live_frame(self, capture_t: float, frame: CamFrame) -> None:
+        """Publish the dual-SAM centroid and decide whether dense work starts."""
+        eligible = False
         if frame.live_detected:
             self._obj.ingest_live(capture_t, frame.live, gate_point=frame.live_gate)
-            # Dense refresh gate: static live track + both-view visibility.
-            if self.marker_always_visible or self._obj.gate_open(frame.vis_frac):
-                self._bps_state.ingest(capture_t, frame.bps_measurement)
+            eligible = self.marker_always_visible or self._obj.gate_open(frame.vis_frac)
         elif self.marker_always_visible:
             # Crutch with undetectable live geometry still serves noisy GT.
             self._obj.state.ingest_live(capture_t, frame.live)
-            self._bps_state.ingest(capture_t, frame.bps_measurement)
+            eligible = True
+        if eligible:
+            self._bps_eligible_capture_times.add(capture_t)
+
+        self._live_detected = frame.live_detected
         # Live-channel indicator on the legacy tag site: green while both
         # cameras measure the object, red while the live channel is stale.
         # Visual only — never read by obs.
         self.model.site_rgba[self.cube_tag_site_id] = \
             MARKER_VISIBLE_RGBA if frame.live_detected else MARKER_HIDDEN_RGBA
 
-        # Privileged mirror: fold everything in unconditionally — no dropout,
-        # no hold-last-pose, no static gate — so privileged_obs() serves
-        # exactly what a marker_always_visible=true policy would see on this
-        # same frame (same capture noise/bias/latency, ages that only reflect
-        # pipeline delay).
-        self._held_marker_pos_priv[:] = frame.marker_pos
-        self._held_marker_rot_priv[:] = frame.marker_rot
-        self._marker_last_capture_t_priv[:] = capture_t
         self._obj_state_priv.ingest_live(capture_t, frame.live_priv)
+
+    def _ingest_bps_frame(self, capture_t: float, frame: CamFrame) -> None:
+        """Publish dense stereo if its earlier live result opened the gate."""
+        eligible = capture_t in self._bps_eligible_capture_times
+        self._bps_eligible_capture_times.discard(capture_t)
+        # Reset reconstructs already-in-flight frames from the static
+        # pre-episode scene. Their live-stage gate ran before episode time, so
+        # evaluate it against the seeded static history when the result lands.
+        if capture_t <= self._episode_start_t and frame.live_detected:
+            eligible = self._obj.gate_open(frame.vis_frac)
+        if self.marker_always_visible or eligible:
+            self._bps_state.ingest(capture_t, frame.bps_measurement)
+
+    def _ingest_frame(self, capture_t, frame: CamFrame):
+        """Synchronously publish all modalities; used by direct contract tests."""
+        self._ingest_marker_frame(capture_t, frame)
+        self._ingest_live_frame(capture_t, frame)
+        self._ingest_bps_frame(capture_t, frame)
 
     def _get_cube_pos(self):
         return self.data.qpos[self.cube_qpos_idx:self.cube_qpos_idx + 3].copy()
@@ -1356,17 +1384,25 @@ class SO101BaseEnv(SO101ArmEnv):
         self._obj = ObjectChannelDriver()
         self._bps_state = BPSObsState()
         self._obj_state_priv = ObjectObsState()
-        capture_t, frame = self._camera.reset(self.np_random, self.data.time,
-                                              self._capture_camera_state(),
-                                              self._process_frame)
+        self._bps_eligible_capture_times.clear()
+        self._episode_start_t = self.data.time
+        deliveries = self._camera.reset(
+            self.np_random, self.data.time, self._capture_camera_state(),
+            self._process_frame)
+        marker_capture_t, marker_frame = deliveries.marker[0]
+        live_capture_t, live_frame = deliveries.live[0]
+        bps_capture_t, bps_frame = deliveries.bps[0]
+        self._ingest_marker_frame(marker_capture_t, marker_frame)
         # The pre-episode world is static (the CameraSim reset contract), so
         # the boot detection proves a full static dwell: seed the static-gate
         # history one dwell back with the same measurement, letting the boot
         # frame refresh the precise channel immediately — the real rollout's
         # settle-before-start warmup does the same thing physically.
-        if frame.live_detected:
-            self._obj.seed_static(capture_t - STATIC_DWELL_S, frame.live_gate)
-        self._ingest_frame(capture_t, frame)
+        if live_frame.live_detected:
+            self._obj.seed_static(
+                live_capture_t - STATIC_DWELL_S, live_frame.live_gate)
+        self._ingest_live_frame(live_capture_t, live_frame)
+        self._ingest_bps_frame(bps_capture_t, bps_frame)
 
         return self._serve_obs(reset=True), {}
 
@@ -1409,16 +1445,18 @@ class SO101BaseEnv(SO101ArmEnv):
         )
         info["task_name"] = self.TASK_NAME
 
-        # Advance the camera to the obs instant and ingest every frame that
-        # became available this tick (dropout/noise were frozen in at capture
-        # time): each detection — arm markers and cube tag alike — refreshes
-        # its held pose. Losing a tag freezes its pose while its age channel
-        # grows — there is deliberately no reward term for it.
-        for capture_t, frame in self._camera.observe(self.data.time,
-                                                     self._process_frame):
-            self._ingest_frame(capture_t, frame)
+        # Advance every camera-derived stream to this observation instant.
+        # All three reuse the same capture/noise sample, but become available
+        # after their measured marker, dual-SAM, and dense-stereo delays.
+        deliveries = self._camera.observe(self.data.time, self._process_frame)
+        for capture_t, frame in deliveries.marker:
+            self._ingest_marker_frame(capture_t, frame)
+        for capture_t, frame in deliveries.live:
+            self._ingest_live_frame(capture_t, frame)
+        for capture_t, frame in deliveries.bps:
+            self._ingest_bps_frame(capture_t, frame)
         self._markers_hidden_total += N_MARKERS - int(self._cam_frame.detected.sum())
-        self._live_hidden_total += not self._cam_frame.live_detected
+        self._live_hidden_total += not self._live_detected
         self._precise_age_sum += self._bps_state.serve(self.data.time).age_s
 
         truncated = self.step_count >= self.max_steps

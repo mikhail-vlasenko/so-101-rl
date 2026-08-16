@@ -15,7 +15,7 @@ world as it was around mid-exposure, one pipeline latency (exposure + sensor
 readout + USB transfer + MJPG decode) before t_recv. Scanning that shift for
 the least-squares alignment — after removing each axis's static offset, the
 mm-scale calibration residual — recovers tau = capture -> t_recv. The
-policy-visible delay for conf/dr/*.yaml `cam_latency.delay_ms` is
+policy-visible delay for conf/dr/*.yaml `cam_latency.marker_delay_ms` is
 tau + AprilTag detection time; both are printed, with the suggested config
 value. The further wait-for-consumption staleness rollouts measure
 (marker_age_ms) is the camera/control frame beat, which the sim's CameraSim
@@ -404,7 +404,7 @@ def main() -> int:
     print(f"\ntau (weighted)        : {tau * 1e3:6.1f} ms  (per-axis std {spread:.1f} ms)")
     print(f"AprilTag detect (mean): {detect_ms:6.1f} ms")
     print(f"capture -> pose available = tau + detect = {delay:.1f} ms")
-    print(f"-> conf/dr/*.yaml cam_latency.delay_ms should center on {delay:.0f}; "
+    print(f"-> conf/dr/*.yaml cam_latency.marker_delay_ms should center on {delay:.0f}; "
           f"repeat this probe a few times and set [lo, hi] to cover the spread.")
 
     OUT_DIR_CAM.mkdir(parents=True, exist_ok=True)

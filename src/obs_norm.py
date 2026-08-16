@@ -66,7 +66,7 @@ MARKER_ROT_BIAS_SCALE = 0.1     # rad; 2x full's obs_bias.marker_rot_sigma
 LIVE_BIAS_SCALE = 0.008         # m;   2x full's obs_bias.live_sigma
 PRECISE_BIAS_SCALE = 0.006      # m;   2x full's obs_bias.precise_sigma
 COMMON_BIAS_SCALE = 0.005       # m;   2x full's obs_bias.marker_common_sigma
-# Camera pipeline delay: [0, 0.05] s maps to [-1, 1], covering both the
+# Marker pipeline delay: [0, 0.05] s maps to [-1, 1], covering both the
 # measured 42-52 ms range and the synchronous camera's 0.
 CAM_DELAY_CENTER = 0.025
 CAM_DELAY_SCALE = 0.025

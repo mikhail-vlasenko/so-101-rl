@@ -1,27 +1,25 @@
 """Discrete-frame camera simulation for observation latency (sim2real).
 
-The real marker pipeline delivers poses from discrete camera frames: a frame
-samples the world at its capture instant, becomes available to the control
-loop `delay` seconds later (mid-exposure -> sensor readout -> USB transfer ->
-MJPG decode -> AprilTag detection; measure it with sysid/probe_cam_latency.py),
-and each policy tick then consumes the newest available frame
-(real/rollout/marker_obs.py). With a 30 fps camera against 15 Hz control the consumed
-pose is `delay` plus zero-to-one frame interval old, and that staleness
-follows a sawtooth that drifts as the camera and control clocks beat against
-each other. Joint encoders have no analog of any of this: the bus read is ~2 ms,
-effectively fresh at a 66.7 ms tick, so only camera-derived observations
-(markers, cube) go through this model.
+The real pipeline derives three observations from discrete camera frames at
+different rates: AprilTag arm markers first, the dual-SAM live centroid after
+both views have run, and dense BPS after StereoSGBM. A frame samples the world
+once at its capture instant, then each modality becomes available after its
+own capture-to-result delay. Each policy tick consumes the newest available
+result for every modality. With a 30 fps camera against 15 Hz control, each
+consumed result is its pipeline delay plus zero-to-one frame interval old; the
+staleness follows a sawtooth as the camera and control clocks beat. Joint
+encoders have no analog of this: the bus read is ~2 ms, effectively fresh at a
+66.7 ms tick.
 
 CameraSim reproduces the timing skeleton while staying agnostic of what a
 "frame" contains: the env records opaque world-state snapshots (`record`),
 CameraSim captures frames from that history on a fixed-period schedule —
-per-episode random phase, per-episode pipeline delay sampled from
-`delay_range_s`, per-frame capture-time jitter whose random walk stands in for
-real clock drift — and `observe` returns every frame whose availability time
-has passed since the last call, each tagged with its capture time so the
-consumer can age it. Each frame is processed exactly once, at capture time,
-through the env's `capture_fn` (detector dropout and measurement noise freeze
-per frame, like a real detection).
+per-episode random phase, per-episode marker/live/BPS delays sampled from their
+ranges, and per-frame capture-time jitter whose random walk stands in for real
+clock drift. `observe` returns a separate delivery stream for every modality,
+each tagged with the common capture time so the consumer can age it. Each frame
+is processed exactly once, at capture time, through the env's `capture_fn`
+(detector dropout and measurement noise freeze per frame, like real capture).
 
 The env only snapshots the substeps `needs_state` claims. A snapshot is
 expensive (occlusion raycasts against every camera, src/base_env.py
@@ -32,6 +30,16 @@ away four of every five.
 
 import math
 from collections import deque
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class CameraDeliveries:
+    """Frames newly available to each observation modality."""
+
+    marker: list[tuple[float, object]]
+    live: list[tuple[float, object]]
+    bps: list[tuple[float, object]]
 
 
 class CameraSim:
@@ -41,15 +49,22 @@ class CameraSim:
     # sim time and the frame schedule accumulate through different float sums.
     _EPS = 1e-6
 
-    def __init__(self, frame_s: float, delay_range_s: tuple[float, float],
+    def __init__(self, frame_s: float,
+                 marker_delay_range_s: tuple[float, float],
+                 live_delay_range_s: tuple[float, float],
+                 bps_delay_range_s: tuple[float, float],
                  jitter_s: float, control_dt: float, substep_s: float):
         frame_s = float(frame_s)
-        delay_lo, delay_hi = float(delay_range_s[0]), float(delay_range_s[1])
+        marker_delay = self._validate_delay_range("marker", marker_delay_range_s)
+        live_delay = self._validate_delay_range("live", live_delay_range_s)
+        bps_delay = self._validate_delay_range("bps", bps_delay_range_s)
         jitter_s = float(jitter_s)
         substep_s = float(substep_s)
         assert frame_s > 0.0, f"frame_s must be positive, got {frame_s}"
-        assert 0.0 <= delay_lo <= delay_hi, \
-            f"delay range must satisfy 0 <= lo <= hi, got ({delay_lo}, {delay_hi})"
+        assert marker_delay[1] <= live_delay[0], \
+            f"marker delay {marker_delay} must precede live delay {live_delay}"
+        assert live_delay[1] <= bps_delay[0], \
+            f"live delay {live_delay} must precede BPS delay {bps_delay}"
         assert 0.0 <= jitter_s < frame_s / 4, \
             f"jitter_s={jitter_s} must be well under frame_s={frame_s}"
         # A substep coarser than half a frame interval would let two captures
@@ -57,8 +72,9 @@ class CameraSim:
         assert 0.0 < substep_s <= frame_s / 2, \
             f"substep_s={substep_s} must be positive and at most frame_s/2={frame_s / 2}"
         self.frame_s = frame_s
-        self.delay_lo = delay_lo
-        self.delay_hi = delay_hi
+        self.marker_delay_range_s = marker_delay
+        self.live_delay_range_s = live_delay
+        self.bps_delay_range_s = bps_delay
         self.jitter_s = jitter_s
         # A capture instant is served by the snapshot nearest it in time, so a
         # substep claims every instant within half a substep of itself.
@@ -70,24 +86,48 @@ class CameraSim:
         self._random_phase = True
         self._hist: deque = deque()      # (t, state), t ascending
         self._due: deque = deque()       # capture times snapshotted, frame not yet built
-        self._pending: deque = deque()   # (avail_t, capture_t, frame), avail_t ascending
+        # Each queue contains (availability time, capture time, frame), ordered
+        # by capture/availability time. The frame object is shared across queues.
+        self._marker_pending: deque = deque()
+        self._live_pending: deque = deque()
+        self._bps_pending: deque = deque()
         self._next_capture_t = 0.0
-        self._delay = 0.0
+        self._marker_delay = 0.0
+        self._live_delay = 0.0
+        self._bps_delay = 0.0
+
+    @staticmethod
+    def _validate_delay_range(name: str,
+                              values: tuple[float, float]) -> tuple[float, float]:
+        lo, hi = float(values[0]), float(values[1])
+        assert 0.0 <= lo <= hi, \
+            f"{name} delay range must satisfy 0 <= lo <= hi, got ({lo}, {hi})"
+        return lo, hi
 
     @property
     def pipeline_delay_s(self) -> float:
-        """This episode's sampled capture->available delay (drawn in reset;
-        0.0 for a synchronous camera). A privileged DR latent for the
-        asymmetric critic (SO101BaseEnv._priv_tail)."""
-        return self._delay
+        """Sampled marker delay retained as the critic's camera-delay latent."""
+        return self._marker_delay
+
+    @property
+    def live_delay_s(self) -> float:
+        return self._live_delay
+
+    @property
+    def bps_delay_s(self) -> float:
+        return self._bps_delay
 
     @classmethod
     def synchronous(cls, control_dt: float, substep_s: float) -> "CameraSim":
         """Zero-latency camera (dr=none / plain env construction): one frame is
         captured exactly at every control tick and available immediately, so
         marker/cube obs equal the current state and reset consumes no RNG."""
-        cam = cls(frame_s=control_dt, delay_range_s=(0.0, 0.0), jitter_s=0.0,
-                  control_dt=control_dt, substep_s=substep_s)
+        cam = cls(
+            frame_s=control_dt,
+            marker_delay_range_s=(0.0, 0.0),
+            live_delay_range_s=(0.0, 0.0),
+            bps_delay_range_s=(0.0, 0.0),
+            jitter_s=0.0, control_dt=control_dt, substep_s=substep_s)
         cam._random_phase = False
         return cam
 
@@ -95,29 +135,50 @@ class CameraSim:
         """Start an episode at sim time `t` with the world in `state`. The
         pre-episode world is static, so every frame captured before `t` shows
         exactly the reset state. The schedule is extrapolated backward to
-        (a) the newest capture whose pipeline delay has elapsed by `t` —
-        returned as (capture_t, frame), aging exactly like a mid-episode one
-        (delay + sawtooth phase) — and (b) the captures still in the pipeline
-        at `t`, queued so they land during the first ticks like on a real
-        camera. Each frame is capture_fn-processed once, as always."""
+        (a) the newest capture available to each modality at `t`, aging exactly
+        like a mid-episode result, and (b) later captures still in each pipeline,
+        queued so they land during the first ticks. Each physical frame is
+        capture_fn-processed once and shared by the three delivery streams."""
         self._hist.clear()
         self._due.clear()
-        self._pending.clear()
+        self._marker_pending.clear()
+        self._live_pending.clear()
+        self._bps_pending.clear()
         self._hist.append((t, state))
         if self._random_phase:
-            self._delay = rng.uniform(self.delay_lo, self.delay_hi)
+            self._marker_delay = rng.uniform(*self.marker_delay_range_s)
+            self._live_delay = rng.uniform(*self.live_delay_range_s)
+            self._bps_delay = rng.uniform(*self.bps_delay_range_s)
             self._next_capture_t = t + rng.uniform(0.0, self.frame_s)
         else:
-            self._delay = 0.0
+            self._marker_delay = 0.0
+            self._live_delay = 0.0
+            self._bps_delay = 0.0
             self._next_capture_t = t + self.frame_s
         phase = self._next_capture_t - t
-        n_back = math.ceil((phase + self._delay) / self.frame_s - self._EPS)
-        capture_t = self._next_capture_t - n_back * self.frame_s
-        for k in range(1, n_back):
-            in_flight_t = capture_t + k * self.frame_s
-            self._pending.append((in_flight_t + self._delay, in_flight_t,
-                                  capture_fn(state)))
-        return capture_t, capture_fn(state)
+        max_delay = max(self._marker_delay, self._live_delay, self._bps_delay)
+        n_back = math.ceil((phase + max_delay) / self.frame_s - self._EPS)
+        oldest_t = self._next_capture_t - n_back * self.frame_s
+        captured = [
+            (oldest_t + k * self.frame_s, capture_fn(state))
+            for k in range(n_back)
+        ]
+
+        def seed_stream(delay: float, pending: deque) -> list[tuple[float, object]]:
+            available = [(capture_t, frame) for capture_t, frame in captured
+                         if capture_t + delay <= t + self._EPS]
+            assert available, f"no reset frame available for delay {delay}"
+            newest_t = available[-1][0]
+            for capture_t, frame in captured:
+                if capture_t > newest_t:
+                    pending.append((capture_t + delay, capture_t, frame))
+            return [available[-1]]
+
+        return CameraDeliveries(
+            marker=seed_stream(self._marker_delay, self._marker_pending),
+            live=seed_stream(self._live_delay, self._live_pending),
+            bps=seed_stream(self._bps_delay, self._bps_pending),
+        )
 
     def needs_state(self, t: float, rng) -> bool:
         """Whether the substep ending at sim time `t` is the nearest sample to
@@ -155,18 +216,25 @@ class CameraSim:
         return min(self._hist, key=lambda entry: abs(entry[0] - t))[1]
 
     def observe(self, t: float, capture_fn):
-        """Build a frame for every capture instant claimed since the last call
-        and return those whose availability time has passed, oldest first, as
-        (capture_t, frame) pairs — empty if no new frame is due yet. The
-        caller keeps the newest as its current frame and folds every one into
-        any per-tag held state, exactly like the real capture thread updates
-        per frame (real/rollout/marker_obs.py)."""
+        """Build every newly captured frame once and return per-modality results
+        whose availability time has passed, oldest first."""
         while self._due:
             capture_t = self._due.popleft()
             frame = capture_fn(self._state_at(capture_t))
-            self._pending.append((capture_t + self._delay, capture_t, frame))
-        available = []
-        while self._pending and self._pending[0][0] <= t + self._EPS:
-            _, capture_t, frame = self._pending.popleft()
-            available.append((capture_t, frame))
-        return available
+            self._marker_pending.append(
+                (capture_t + self._marker_delay, capture_t, frame))
+            self._live_pending.append((capture_t + self._live_delay, capture_t, frame))
+            self._bps_pending.append((capture_t + self._bps_delay, capture_t, frame))
+
+        def drain(pending: deque) -> list[tuple[float, object]]:
+            available = []
+            while pending and pending[0][0] <= t + self._EPS:
+                _, capture_t, frame = pending.popleft()
+                available.append((capture_t, frame))
+            return available
+
+        return CameraDeliveries(
+            marker=drain(self._marker_pending),
+            live=drain(self._live_pending),
+            bps=drain(self._bps_pending),
+        )

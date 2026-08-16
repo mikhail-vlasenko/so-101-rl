@@ -500,7 +500,8 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
         id="probe_cam_latency", title="Probe camera latency", page="sysid",
         module="sysid.probe_cam_latency", arg_style="argparse",
         description="Cross-correlate encoder-FK tag positions against camera-measured "
-                    "ones to recover the camera pipeline delay (feeds cam_latency.delay_ms "
+                    "ones to recover the marker pipeline delay (feeds "
+                    "cam_latency.marker_delay_ms "
                     "in conf/dr). Execute drives a sine on the chosen joint — the reliable "
                     "mode; dry-run records a hand-wiggle, a rough check only (back-driving "
                     "defeats the encoder ground truth).",
