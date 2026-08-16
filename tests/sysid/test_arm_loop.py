@@ -51,6 +51,9 @@ class FakeBus:
     def enable_torque_all(self) -> None:
         self.torque_on = True
 
+    def disable_torque_all(self) -> None:
+        self.torque_on = False
+
 
 @pytest.fixture(scope="module")
 def model():
@@ -102,6 +105,29 @@ def test_execute_boot_sets_gains_and_torque(model, jm):
     assert bus.kp == SERVO_POSITION_KP
     assert bus.deadzone == SERVO_POSITION_DEADZONE
     assert bus.torque_limit == SERVO_TORQUE_LIMIT
+
+
+def test_repeated_boot_resets_episode_state_and_end_disables_torque(model, jm):
+    bus = FakeBus(_mid_raw(jm))
+    loop = _make_loop(model, jm, bus, execute=True, ema_alpha=0.5,
+                      prev_actions_n=2)
+    loop.boot()
+    loop.tick(np.ones(6))
+    assert np.any(loop.prev_actions)
+    assert loop._action_ema is not None
+    assert loop._stream_deadline is not None
+
+    loop.end_episode()
+    assert not bus.torque_on
+
+    loop.boot()
+    assert bus.torque_on
+    np.testing.assert_array_equal(loop.prev_actions, np.zeros((2, 6)))
+    assert loop._action_ema is None
+    assert loop._stream_deadline is None
+    assert np.isnan(loop.last_stream_ms)
+    assert np.isnan(loop.last_read_ms)
+    assert np.isnan(loop.last_window_ms)
 
 
 def test_tick_matches_training_shaping(model, jm):

@@ -13,19 +13,29 @@ Usage:
     python -m real.rollout.rollout_lift --model best --execute  # best_model.zip
     python -m real.rollout.rollout_lift --seed 0                # reproducible fk cube spawn
     python -m real.rollout.rollout_lift --slow 3 --execute      # 1/3 physical speed, no retraining
+    python -m real.rollout.rollout_lift --marker-source camera --interactive --execute
 
 Setup, safety gating, and per-tick command shaping (training-matched
 quantization, raw clamp, sub-target streaming, --slow time dilation) all live
 in real.rollout.rollout_common — this script owns only observation construction,
 termination, and plots. --execute is OFF by default; Ctrl-C disables torque.
+In camera-mode ``--interactive``, the process keeps its model and camera stack
+warm, revalidates the stereo placement before every episode, and runs another
+episode whenever Enter is pressed. Ctrl-C during an episode stops that episode,
+disables torque, saves its partial log, and returns to the warm prompt; Ctrl-C
+at the prompt exits the session.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import dataclass
+import signal
+import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 import matplotlib.pyplot as plt
 import mujoco
@@ -33,6 +43,7 @@ import mujoco.viewer
 import numpy as np
 
 from src.base_env import (
+    CameraModel,
     JOINT_NAMES,
     MARKER_AGE_CAP_S,
     MARKER_SITE_NAMES,
@@ -50,7 +61,7 @@ from src.base_env import (
     tag_cam_model,
 )
 from src.obs_history import ObsHistory
-from src.bps import BPS_DISTANCE_DIM, BPSObsState, load_bps_config
+from src.bps import BPS_DISTANCE_DIM, BPSObservation, BPSObsState, load_bps_config
 from src.shape_obs import (
     STATIC_DWELL_S,
     VISIBLE_FRACTION_MIN,
@@ -67,8 +78,16 @@ from .rollout_common import (
 )
 
 from ..calib.calibration import load_calibration, load_compliance
-from ..twin.mapping import load_joint_maps
+from ..twin.mapping import JointMaps, load_joint_maps
 from ..twin.servo_io import ServoBus
+
+if TYPE_CHECKING:
+    from stable_baselines3 import PPO
+
+    from panel.sim_stream import SimStreamPublisher
+    from real.rollout.frame_bus import FrameBus
+    from real.rollout.marker_obs import StereoCameraMarkerSource
+    from real.rollout.object_obs import ObjectSource
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene_lift.xml"
@@ -191,7 +210,15 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
                    help="SAM3 text prompt used to acquire the object in camera mode.")
     p.add_argument("--sam2-model", default="tiny", choices=["tiny", "base+"],
                    help="Streaming mask tracker used in camera mode.")
-    return p.parse_args()
+    p.add_argument("--interactive", action="store_true",
+                   help="Keep the camera/model stack warm and run another "
+                        "camera episode each time Enter is pressed (terminal only).")
+    args = p.parse_args()
+    if args.interactive and args.marker_source != "camera":
+        p.error("--interactive requires --marker-source camera")
+    if args.interactive and not sys.stdin.isatty():
+        p.error("--interactive requires an attached terminal")
+    return args
 
 
 def build_state_frame(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
@@ -370,332 +397,616 @@ def write_csv(out_path: Path, rows: list[dict], control_hz: float) -> None:
                         f"{r['dense_ms']:.2f}"])
 
 
-def main() -> int:
-    lift_cfg, prev_actions_n, marker_include_rot, history_taps = load_env_cfg("lift")
-    action_scale = float(lift_cfg["action_scale"])
-    n_substeps = int(lift_cfg["n_substeps"])
-    cube_low = np.array(lift_cfg["cube_low"], dtype=np.float64)
-    cube_high = np.array(lift_cfg["cube_high"], dtype=np.float64)
-    target_height = float(lift_cfg["target_height"])
+@dataclass(frozen=True)
+class LiftRuntimeConfig:
+    action_scale: float
+    n_substeps: int
+    cube_low: np.ndarray
+    cube_high: np.ndarray
+    target_height: float
+    prev_actions_n: int
+    marker_include_rot: bool
+    history_taps: tuple[int, ...]
 
-    args = parse_args(lift_cfg)
 
-    model = mujoco.MjModel.from_xml_path(args.xml)
+@dataclass(frozen=True)
+class SceneHandles:
+    model: mujoco.MjModel
+    data: mujoco.MjData
+    qposadr: np.ndarray
+    joint_dofadr: np.ndarray
+    ee_site_id: int
+    marker_site_ids: tuple[int, ...]
+    tag_cam: CameraModel
+    cube_qposadr: int
+    cube_geom_id: int
+    cube_body_id: int
+
+
+@dataclass(frozen=True)
+class TickObservation:
+    marker_pos: np.ndarray
+    marker_rot: np.ndarray
+    marker_age: np.ndarray
+    marker_detected: np.ndarray
+    marker_fk: np.ndarray
+    live: np.ndarray
+    live_age: float
+    bps: BPSObservation
+    point_cloud: np.ndarray
+    marker_age_ms: float
+    cam_read_ms: float
+    detect_ms: float
+    sam_ms: float
+    dense_ms: float
+    dense_valid_count: int
+    dense_valid_fraction: float
+    correspondence_rejected_fraction: float
+    overall_rejected_fraction: float
+    dense_refreshes: int
+    dense_misses: int
+    rig_movement_mm: float
+    rig_movement_deg: float
+
+
+@dataclass(frozen=True)
+class EpisodeResult:
+    rows: list[dict]
+    interrupted: bool
+    viewer_closed: bool
+
+
+def build_scene_handles(
+        xml_path: str, calibration_path: str) -> tuple[SceneHandles, JointMaps]:
+    model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
-
-    jm = load_joint_maps(model, Path(args.cal))
-    qposadr = jm.qposadr()
-
-    joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n) for n in JOINT_NAMES]
+    joint_maps = load_joint_maps(model, Path(calibration_path))
+    joint_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        for name in JOINT_NAMES
+    ]
     joint_dofadr = model.jnt_dofadr[joint_ids]
-    ee_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
+    ee_site_id = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_SITE, "gripperframe")
     assert ee_site_id >= 0, "site 'gripperframe' not found in model"
     marker_site_ids = []
     for name in MARKER_SITE_NAMES:
-        sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
-        assert sid >= 0, f"site '{name}' not found in model"
-        marker_site_ids.append(sid)
-    tag_cam = tag_cam_model(model, data)
-    cube_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
-    cube_qposadr = int(model.jnt_qposadr[cube_joint_id])
-    cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
+        site_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_SITE, name)
+        assert site_id >= 0, f"site '{name}' not found in model"
+        marker_site_ids.append(site_id)
+    cube_joint_id = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
+    cube_geom_id = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
     assert cube_geom_id >= 0, "geom 'cube_geom' not found in model"
-    cube_body_id = int(model.geom_bodyid[cube_geom_id])
-
-    bps_config = load_bps_config()
-    policy = load_policy(
-        args.model, LOG_DIR,
-        obs_dim_for(prev_actions_n, marker_include_rot, history_taps)
-        + priv_dim_for(marker_include_rot),
-        bps_config=bps_config,
+    scene = SceneHandles(
+        model=model,
+        data=data,
+        qposadr=joint_maps.qposadr(),
+        joint_dofadr=joint_dofadr,
+        ee_site_id=ee_site_id,
+        marker_site_ids=tuple(marker_site_ids),
+        tag_cam=tag_cam_model(model, data),
+        cube_qposadr=int(model.jnt_qposadr[cube_joint_id]),
+        cube_geom_id=cube_geom_id,
+        cube_body_id=int(model.geom_bodyid[cube_geom_id]),
     )
-    # Lag-tap history over the actor block, the same convention as training
-    # (src/obs_history.py): seeded with the first tick's frame at boot — the
-    # env's reset does the identical thing — then advanced once per tick.
-    history = ObsHistory(history_taps,
-                         state_dim_for(prev_actions_n, marker_include_rot))
-    priv_pad = np.zeros(priv_dim_for(marker_include_rot), dtype=np.float32)
+    return scene, joint_maps
 
-    rng = np.random.default_rng(args.seed)
 
-    servo_bus = ServoBus(args.port, jm.servo_ids())
-    loop = ArmLoop(model=model, n_substeps=n_substeps, jm=jm, bus=servo_bus,
-                   action_scale=action_scale, prev_actions_n=prev_actions_n,
-                   execute=args.execute, ema_alpha=args.ema_alpha,
-                   slow=args.slow, interp_hz=args.interp_hz,
-                   qpos_bias=load_calibration(), compliance=load_compliance())
-    print(f"seed={args.seed} {loop.describe()}")
+class LiftRolloutSession:
+    """One warm process containing many independently reset lift episodes."""
 
-    fk_object = None
-    if args.marker_source == "fk":
-        fk_object = FkObjectSource(model, data, cube_geom_id, cube_body_id)
-        cube_pos_init, cube_quat_init = sample_visible_fk_spawn(
-            fk_object, data, cube_qposadr, rng, cube_low, cube_high)
-        print(f"sim cube spawn: ({cube_pos_init[0]:+.3f}, {cube_pos_init[1]:+.3f}, "
-              f"{cube_pos_init[2]:+.3f})  target_height={target_height}")
-    else:
-        cube_pos_init = np.array([
-            np.mean((cube_low[0], cube_high[0])),
-            np.mean((cube_low[1], cube_high[1])),
-            model.geom_size[cube_geom_id, 2],
-        ])
-        cube_quat_init = np.array([1.0, 0.0, 0.0, 0.0])
-        # Camera rollouts have no simulated object state. Keep the cube body in
-        # the model for checkpoint-compatible kinematics, but do not depict a
-        # fake sponge translated to the measured cloud center.
-        model.geom_rgba[cube_geom_id, 3] = 0.0
-
-    stopped = install_sigint_flag()
-
-    frame_bus = camera_markers = camera_object = None
-
-    viewer = None if args.no_view else mujoco.viewer.launch_passive(model, data)
-    publisher = None
-    if args.stream_port is not None:
-        from panel.sim_stream import SimStreamPublisher
-        publisher = SimStreamPublisher(model, args.stream_port)
-    # Overlay the camera's measured marker poses and the object channels in
-    # the passive viewer too, so calibration drift and the policy's object
-    # belief are visible. The stream draws them itself inside
-    # publisher.publish; the viewer needs the helpers directly.
-    draw_channels = draw_cloud = None
-    if viewer is not None:
-        from panel.sim_stream import (
-            draw_detected_markers,
-            draw_object_channels,
-            draw_point_cloud,
+    def __init__(self, args: argparse.Namespace,
+                 config: LiftRuntimeConfig) -> None:
+        self.args = args
+        self.config = config
+        self.scene, joint_maps = build_scene_handles(args.xml, args.cal)
+        self.policy: PPO = load_policy(
+            args.model,
+            LOG_DIR,
+            obs_dim_for(
+                config.prev_actions_n,
+                config.marker_include_rot,
+                config.history_taps,
+            ) + priv_dim_for(config.marker_include_rot),
+            bps_config=load_bps_config(),
         )
-        draw_channels = draw_object_channels
-        draw_cloud = draw_point_cloud
-    log_rows: list[dict] = []
-    try:
-        servo_bus.connect()
-        if args.marker_source == "camera":
-            from real.rollout.frame_bus import FrameBus
-            from real.rollout.marker_obs import StereoCameraMarkerSource
-            from real.rollout.object_obs import ObjectSource
-            from real.vision.stereo_rig import CAMERA_NAMES
+        self.history = ObsHistory(
+            config.history_taps,
+            state_dim_for(config.prev_actions_n, config.marker_include_rot),
+        )
+        self.priv_pad = np.zeros(
+            priv_dim_for(config.marker_include_rot), dtype=np.float32)
+        self.servo_bus = ServoBus(args.port, joint_maps.servo_ids())
+        self.loop = ArmLoop(
+            model=self.scene.model,
+            n_substeps=config.n_substeps,
+            jm=joint_maps,
+            bus=self.servo_bus,
+            action_scale=config.action_scale,
+            prev_actions_n=config.prev_actions_n,
+            execute=args.execute,
+            ema_alpha=args.ema_alpha,
+            slow=args.slow,
+            interp_hz=args.interp_hz,
+            qpos_bias=load_calibration(),
+            compliance=load_compliance(),
+        )
+        print(f"seed={args.seed} {self.loop.describe()}")
 
-            frame_bus = FrameBus(CAMERA_NAMES)
-            frame_bus.start()
-            camera_markers = StereoCameraMarkerSource(frame_bus.feeds)
-            camera_object = ObjectSource(
-                frame_bus.feeds, (cube_low, cube_high),
-                prompt=args.object_prompt, sam2_model=args.sam2_model)
-        loop.boot()
+        self.fk_object: FkObjectSource | None = None
+        self.cube_pos_init, self.cube_quat_init = self._initial_object_pose()
+        self.frame_bus: FrameBus | None = None
+        self.camera_markers: StereoCameraMarkerSource | None = None
+        self.camera_object: ObjectSource | None = None
+        self.viewer = None
+        self.publisher: SimStreamPublisher | None = None
+        self._draw_detected_markers: Callable | None = None
+        self._draw_channels: Callable | None = None
+        self._draw_cloud: Callable | None = None
 
-        # Sync the sim arm to the real arm and place the FK sponge.
-        data.qpos[qposadr] = loop.qpos
-        data.qvel[joint_dofadr] = 0.0
-        data.qpos[cube_qposadr:cube_qposadr + 3] = cube_pos_init
-        data.qpos[cube_qposadr + 3:cube_qposadr + 7] = cube_quat_init
-        # Init actuators (filter state) at current qpos so they don't snap.
-        data.ctrl[:6] = loop.qpos
-        if model.na > 0:
-            data.act[:] = loop.qpos
-        mujoco.mj_forward(model, data)
-        if args.marker_source == "fk":
-            fk_object.boot()
-        else:
-            camera_markers.start()
-            marker_warmup_s = camera_markers.warmup()
-            print(f"camera marker anchor ready after {marker_warmup_s:.2f}s")
-            camera_object.start()
+    def _initial_object_pose(self) -> tuple[np.ndarray, np.ndarray]:
+        if self.args.marker_source == "fk":
+            self.fk_object = FkObjectSource(
+                self.scene.model,
+                self.scene.data,
+                self.scene.cube_geom_id,
+                self.scene.cube_body_id,
+            )
+            position, quaternion = sample_visible_fk_spawn(
+                self.fk_object,
+                self.scene.data,
+                self.scene.cube_qposadr,
+                np.random.default_rng(self.args.seed),
+                self.config.cube_low,
+                self.config.cube_high,
+            )
+            print(
+                f"sim cube spawn: ({position[0]:+.3f}, {position[1]:+.3f}, "
+                f"{position[2]:+.3f})  "
+                f"target_height={self.config.target_height}")
+            return position, quaternion
 
-        dwell_count = 0
-        step = 0
-        prev_iter_t = None
-        # FK-branch hold-last state mirroring training (src/base_env.py): a tag
-        # turned away from tag_cam keeps its last visible pose while its age
-        # grows; never-yet-visible tags read zero with age at the cap.
-        fk_pos = np.zeros((N_MARKERS, 3))
-        fk_rot = np.zeros((N_MARKERS, 3))
-        fk_seen_t = np.full(N_MARKERS, -np.inf)
-        while not stopped["flag"] and step < args.max_steps:
-            iter_t = time.perf_counter()
-            # Realized control period (start-to-start of consecutive ticks).
-            loop_ms = (iter_t - prev_iter_t) * 1e3 if prev_iter_t is not None else float("nan")
-            prev_iter_t = iter_t
+        position = np.array([
+            np.mean((self.config.cube_low[0], self.config.cube_high[0])),
+            np.mean((self.config.cube_low[1], self.config.cube_high[1])),
+            self.scene.model.geom_size[self.scene.cube_geom_id, 2],
+        ])
+        self.scene.model.geom_rgba[self.scene.cube_geom_id, 3] = 0.0
+        return position, np.array([1.0, 0.0, 0.0, 0.0])
 
-            # FK marker poses at the same qpos remain in camera-mode logs as a
-            # direct calibration diagnostic against the measured markers.
-            now = time.monotonic()
-            fk_pos_now, fk_rot_now = marker_world_poses(data, marker_site_ids)
-            if args.marker_source == "fk":
-                vis = markers_visible(data, marker_site_ids, tag_cam)
-                fk_pos[vis] = fk_pos_now[vis]
-                fk_rot[vis] = fk_rot_now[vis]
-                fk_seen_t[vis] = now - FK_FRESH_AGE_S
-                marker_pos, marker_rot = fk_pos.copy(), fk_rot.copy()
-                marker_age = np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t)
-                marker_detected = vis
-                fk_object.tick()
-                (live, live_age), bps_obs = fk_object.object_obs()
-                point_cloud = fk_object.latest_cloud()
-                marker_age_ms = cam_read_ms = detect_ms = float("nan")
-                sam_ms = dense_ms = float("nan")
-                dense_valid_count = 0
-                dense_valid_fraction = float("nan")
-                dense_correspondence_rejected_fraction = float("nan")
-                dense_overall_rejected_fraction = float("nan")
-                dense_refreshes = dense_misses = 0
-                rig_movement_mm = rig_movement_deg = float("nan")
-            else:
-                marker_pos, marker_rot, marker_age, marker_detected = (
-                    camera_markers.marker_observation())
-                marker_staleness, cam_read_ms, detect_ms = camera_markers.frame_stats()
-                marker_age_ms = marker_staleness * 1e3
-                (live, live_age), bps_obs = camera_object.object_obs()
-                point_cloud = camera_object.latest_cloud()
-                object_stats = camera_object.stats()
-                sam_ms = object_stats.sam_ms
-                dense_ms = object_stats.dense_ms
-                dense_valid_count = object_stats.valid_count
-                dense_valid_fraction = object_stats.valid_fraction
-                dense_correspondence_rejected_fraction = (
-                    object_stats.correspondence_rejected_fraction)
-                dense_overall_rejected_fraction = (
-                    object_stats.overall_rejected_fraction)
-                dense_refreshes = object_stats.dense_refreshes
-                dense_misses = object_stats.dense_misses
-                rig_movement_mm = object_stats.rig_movement_mm
-                rig_movement_deg = object_stats.rig_movement_deg
+    def start(self) -> None:
+        """Open session resources and warm the camera/model pipeline once."""
+        self.servo_bus.connect()
+        if not self.args.no_view:
+            self.viewer = mujoco.viewer.launch_passive(
+                self.scene.model, self.scene.data)
+            from panel.sim_stream import (
+                draw_detected_markers,
+                draw_object_channels,
+                draw_point_cloud,
+            )
+            self._draw_detected_markers = draw_detected_markers
+            self._draw_channels = draw_object_channels
+            self._draw_cloud = draw_point_cloud
+        if self.args.stream_port is not None:
+            from panel.sim_stream import SimStreamPublisher
+            self.publisher = SimStreamPublisher(
+                self.scene.model, self.args.stream_port)
+        if self.args.marker_source == "camera":
+            self._start_camera_pipeline()
 
-            frame = build_state_frame(loop.qpos, loop.qvel, marker_pos, marker_rot,
-                                      marker_age, live, live_age,
-                                      loop.prev_actions, marker_include_rot)
-            tapped = history.reset(frame) if step == 0 else history.push(frame)
-            obs = np.concatenate([tapped, bps_obs.flat(), priv_pad])
-            t_pred = time.perf_counter()
-            raw_action, _ = policy.predict(obs, deterministic=True)
-            predict_ms = (time.perf_counter() - t_pred) * 1e3
-            action = loop.tick(raw_action)
+    def _start_camera_pipeline(self) -> None:
+        from real.rollout.frame_bus import FrameBus
+        from real.rollout.marker_obs import StereoCameraMarkerSource
+        from real.rollout.object_obs import ObjectSource
+        from real.vision.stereo_rig import CAMERA_NAMES
 
-            # Write the real arm's new state into the sim. FK mode steps the
-            # sponge through contacts; camera mode only mirrors measured state.
-            data.qpos[qposadr] = loop.qpos
-            data.qvel[joint_dofadr] = loop.qvel
-            if args.marker_source == "fk":
-                data.ctrl[:6] = loop.qpos
-                for _ in range(n_substeps):
-                    mujoco.mj_step(model, data)
-                data.qpos[qposadr] = loop.qpos
-                data.qvel[joint_dofadr] = loop.qvel
-            # Camera mode deliberately leaves the hidden, synthetic sponge at
-            # its boot pose; only the retained measured cloud is visualized.
-            mujoco.mj_forward(model, data)
-            set_marker_render_colors(model, marker_site_ids, marker_detected)
-            if publisher is not None:
-                publisher.publish(
-                    data,
-                    marker_pos if args.marker_source == "camera" else None,
-                    marker_rot if args.marker_source == "camera" else None,
-                    marker_include_rot,
-                    object_channels=(live, bps_obs.center_base),
-                    point_cloud=point_cloud)
+        self.frame_bus = FrameBus(CAMERA_NAMES)
+        self.frame_bus.start()
+        self.camera_markers = StereoCameraMarkerSource(self.frame_bus.feeds)
+        self.camera_object = ObjectSource(
+            self.frame_bus.feeds,
+            (self.config.cube_low, self.config.cube_high),
+            prompt=self.args.object_prompt,
+            sam2_model=self.args.sam2_model,
+        )
+        self.camera_markers.start()
+        marker_warmup_s = self.camera_markers.warmup()
+        print(f"camera marker anchor ready after {marker_warmup_s:.2f}s")
+        self.camera_object.start()
+        if self.args.interactive:
+            print("\nWarm rollout session ready; torque is disabled.")
 
-            cube_pos = data.qpos[cube_qposadr:cube_qposadr + 3].copy()
-            ee_pos = data.site_xpos[ee_site_id].copy()
+    def close(self) -> None:
+        """Release all resources retained by the warm session."""
+        self.servo_bus.close()
+        if self.camera_object is not None:
+            self.camera_object.stop()
+        if self.camera_markers is not None:
+            self.camera_markers.stop()
+        if self.frame_bus is not None:
+            self.frame_bus.stop()
+        if self.viewer is not None:
+            self.viewer.close()
+        if self.publisher is not None:
+            self.publisher.close()
 
-            ee_live = float(np.linalg.norm(ee_pos - live))
-            gripper_val = loop.qpos[JOINT_NAMES.index("gripper")]
-            grasped_sim = (args.marker_source == "fk"
-                           and ee_live < 0.05 and gripper_val < 0.3)
-            # Success = dwell on the live centroid height, counted only while
-            # the live channel is fresh — a frozen held value must not fake a
-            # lift (plan decision 9).
-            if live_age < CUBE_FRESH_DWELL_S and live[2] >= target_height:
-                dwell_count += 1
-            else:
-                dwell_count = 0
+    def run(self) -> None:
+        episode_index = 0
+        while True:
+            if self.args.interactive:
+                if not self._prompt_for_episode(episode_index):
+                    return
+                self._prepare_camera_episode()
 
-            log_rows.append({
-                "step": step, "action": action.copy(), "qpos": loop.qpos.copy(),
-                "ee": ee_pos.copy(), "cube": cube_pos.copy(), "grasped": grasped_sim,
-                "marker_obs": marker_pos.copy(), "marker_fk": fk_pos_now.copy(),
-                "marker_age": marker_age.copy(),
-                "live": live.copy(), "live_age": live_age,
-                "bps": bps_obs.distances.copy(),
-                "center": bps_obs.center_base.copy(),
-                "precise_age": bps_obs.age_s,
-                "valid_fraction": bps_obs.valid_fraction,
-                "dense_valid_count": dense_valid_count,
-                "dense_valid_fraction": dense_valid_fraction,
-                "dense_correspondence_rejected_fraction": (
-                    dense_correspondence_rejected_fraction),
-                "dense_overall_rejected_fraction": (
-                    dense_overall_rejected_fraction),
-                "dense_refreshes": dense_refreshes,
-                "dense_misses": dense_misses,
-                "rig_movement_mm": rig_movement_mm,
-                "rig_movement_deg": rig_movement_deg,
-                "loop_ms": loop_ms, "predict_ms": predict_ms,
-                "read_all_ms": loop.last_read_ms, "stream_ms": loop.last_stream_ms,
-                "window_ms": loop.last_window_ms,
-                "marker_age_ms": marker_age_ms, "cam_read_ms": cam_read_ms,
-                "detect_ms": detect_ms, "sam_ms": sam_ms, "dense_ms": dense_ms,
-            })
+            stopped = install_sigint_flag()
+            result = self._run_episode(stopped)
+            if self.args.interactive:
+                signal.signal(signal.SIGINT, signal.default_int_handler)
+            self._save_episode(result.rows, episode_index)
 
-            if viewer is not None:
-                viewer.user_scn.ngeom = 0
-                if args.marker_source == "camera":
-                    draw_detected_markers(
-                        viewer.user_scn, marker_pos, marker_rot,
-                        marker_include_rot)
-                draw_channels(viewer.user_scn, live, bps_obs.center_base)
-                draw_cloud(viewer.user_scn, point_cloud)
-                viewer.sync()
-                if not viewer.is_running():
-                    print("Viewer closed; stopping rollout.")
+            if result.viewer_closed or not self.args.interactive:
+                return
+            if result.interrupted:
+                print("Episode interrupted; returning to the warm prompt.")
+            episode_index += 1
+
+    @staticmethod
+    def _prompt_for_episode(episode_index: int) -> bool:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        while True:
+            try:
+                command = input(
+                    f"\n[episode {episode_index + 1}] "
+                    "Enter=run, q=quit > "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nStopping warm rollout session.")
+                return False
+            if command in ("", "run"):
+                return True
+            if command in ("q", "quit", "exit"):
+                return False
+            print("Enter starts an episode; q quits the warm session.")
+
+    def _prepare_camera_episode(self) -> None:
+        assert self.camera_markers is not None
+        assert self.camera_object is not None
+        marker_warmup_s = self.camera_markers.warmup()
+        print(f"episode marker anchors ready after {marker_warmup_s:.2f}s")
+        self.camera_object.prepare_episode()
+
+    def _run_episode(self, stopped: dict) -> EpisodeResult:
+        rows: list[dict] = []
+        viewer_closed = False
+        booted = False
+        try:
+            self.loop.boot()
+            booted = True
+            self._reset_episode_scene()
+            dwell_count = 0
+            step = 0
+            prev_iter_t = None
+            fk_pos = np.zeros((N_MARKERS, 3))
+            fk_rot = np.zeros((N_MARKERS, 3))
+            fk_seen_t = np.full(N_MARKERS, -np.inf)
+
+            while not stopped["flag"] and step < self.args.max_steps:
+                iter_t = time.perf_counter()
+                loop_ms = ((iter_t - prev_iter_t) * 1e3
+                           if prev_iter_t is not None else float("nan"))
+                prev_iter_t = iter_t
+                tick = self._capture_tick(fk_pos, fk_rot, fk_seen_t)
+                action, predict_ms = self._predict_and_tick(tick, step)
+                self._advance_scene(tick)
+
+                cube_pos = self.scene.data.qpos[
+                    self.scene.cube_qposadr:
+                    self.scene.cube_qposadr + 3].copy()
+                ee_pos = self.scene.data.site_xpos[
+                    self.scene.ee_site_id].copy()
+                ee_live = float(np.linalg.norm(ee_pos - tick.live))
+                gripper = self.loop.qpos[JOINT_NAMES.index("gripper")]
+                grasped_sim = (
+                    self.args.marker_source == "fk"
+                    and ee_live < 0.05 and gripper < 0.3)
+                if (tick.live_age < CUBE_FRESH_DWELL_S
+                        and tick.live[2] >= self.config.target_height):
+                    dwell_count += 1
+                else:
+                    dwell_count = 0
+
+                rows.append(self._log_row(
+                    step, tick, action, cube_pos, ee_pos, grasped_sim,
+                    loop_ms, predict_ms))
+                viewer_closed = self._publish_and_render(tick)
+                if viewer_closed:
+                    print("Viewer closed; stopping rollout session.")
                     break
-
-            if step % 15 == 0:
-                print(f"step={step:3d}  ee-live={ee_live:.3f}m  "
-                      f"live_z={live[2]:.3f}m  ages live={live_age:.2f}s "
-                      f"precise={bps_obs.age_s:.2f}s  grasped_sim={int(grasped_sim)}")
-                lat = (f"          lat[ms]: loop={loop_ms:.0f} predict={predict_ms:.2f} "
-                       f"read_all={loop.last_read_ms:.0f} stream={loop.last_stream_ms:.0f} "
-                       f"window={loop.last_window_ms:.0f}")
-                print(lat)
-                if args.marker_source == "camera":
+                if step % 15 == 0:
+                    self._print_step(
+                        step, tick, ee_live, grasped_sim, loop_ms, predict_ms)
+                step += 1
+                if dwell_count >= 5:
                     print(
-                        f"          dense: points={dense_valid_count} "
-                        f"valid={bps_obs.valid_fraction:.1%} "
-                        f"reject={dense_correspondence_rejected_fraction:.1%}/"
-                        f"{dense_overall_rejected_fraction:.1%} "
-                        f"refresh/miss={dense_refreshes}/{dense_misses}")
-            step += 1
+                        "live centroid held above "
+                        f"target_height={self.config.target_height} "
+                        f"at step {step}")
+                    break
+            else:
+                if not stopped["flag"]:
+                    print(f"TIMEOUT at step {step}")
+        finally:
+            if booted:
+                self.loop.end_episode()
+                if self.args.interactive:
+                    print("Episode finished; torque disabled.")
+        return EpisodeResult(
+            rows=rows,
+            interrupted=bool(stopped["flag"]),
+            viewer_closed=viewer_closed,
+        )
 
-            if dwell_count >= 5:
-                print(f"live centroid held above target_height={target_height} "
-                      f"at step {step}")
-                break
-        else:
-            if not stopped["flag"]:
-                print(f"TIMEOUT at step {step}")
-    finally:
-        if camera_object is not None:
-            camera_object.stop()
-        if camera_markers is not None:
-            camera_markers.stop()
-        if frame_bus is not None:
-            frame_bus.stop()
-        servo_bus.close()
-        if viewer is not None:
-            viewer.close()
-        if publisher is not None:
-            publisher.close()
+    def _reset_episode_scene(self) -> None:
+        data = self.scene.data
+        data.qpos[self.scene.qposadr] = self.loop.qpos
+        data.qvel[self.scene.joint_dofadr] = 0.0
+        start = self.scene.cube_qposadr
+        data.qpos[start:start + 3] = self.cube_pos_init
+        data.qpos[start + 3:start + 7] = self.cube_quat_init
+        data.ctrl[:6] = self.loop.qpos
+        if self.scene.model.na > 0:
+            data.act[:] = self.loop.qpos
+        mujoco.mj_forward(self.scene.model, data)
+        if self.fk_object is not None:
+            self.fk_object.boot()
 
-    if log_rows:
-        print_latency_summary(log_rows)
+    def _capture_tick(self, fk_pos: np.ndarray, fk_rot: np.ndarray,
+                      fk_seen_t: np.ndarray) -> TickObservation:
+        now = time.monotonic()
+        fk_pos_now, fk_rot_now = marker_world_poses(
+            self.scene.data, self.scene.marker_site_ids)
+        if self.args.marker_source == "fk":
+            assert self.fk_object is not None
+            visible = markers_visible(
+                self.scene.data,
+                self.scene.marker_site_ids,
+                self.scene.tag_cam,
+            )
+            fk_pos[visible] = fk_pos_now[visible]
+            fk_rot[visible] = fk_rot_now[visible]
+            fk_seen_t[visible] = now - FK_FRESH_AGE_S
+            self.fk_object.tick()
+            (live, live_age), bps = self.fk_object.object_obs()
+            return TickObservation(
+                marker_pos=fk_pos.copy(),
+                marker_rot=fk_rot.copy(),
+                marker_age=np.minimum(MARKER_AGE_CAP_S, now - fk_seen_t),
+                marker_detected=visible,
+                marker_fk=fk_pos_now,
+                live=live,
+                live_age=live_age,
+                bps=bps,
+                point_cloud=self.fk_object.latest_cloud(),
+                marker_age_ms=float("nan"),
+                cam_read_ms=float("nan"),
+                detect_ms=float("nan"),
+                sam_ms=float("nan"),
+                dense_ms=float("nan"),
+                dense_valid_count=0,
+                dense_valid_fraction=float("nan"),
+                correspondence_rejected_fraction=float("nan"),
+                overall_rejected_fraction=float("nan"),
+                dense_refreshes=0,
+                dense_misses=0,
+                rig_movement_mm=float("nan"),
+                rig_movement_deg=float("nan"),
+            )
+
+        assert self.camera_markers is not None
+        assert self.camera_object is not None
+        marker_pos, marker_rot, marker_age, detected = (
+            self.camera_markers.marker_observation())
+        marker_staleness, cam_read_ms, detect_ms = (
+            self.camera_markers.frame_stats())
+        (live, live_age), bps = self.camera_object.object_obs()
+        stats = self.camera_object.stats()
+        return TickObservation(
+            marker_pos=marker_pos,
+            marker_rot=marker_rot,
+            marker_age=marker_age,
+            marker_detected=detected,
+            marker_fk=fk_pos_now,
+            live=live,
+            live_age=live_age,
+            bps=bps,
+            point_cloud=self.camera_object.latest_cloud(),
+            marker_age_ms=marker_staleness * 1e3,
+            cam_read_ms=cam_read_ms,
+            detect_ms=detect_ms,
+            sam_ms=stats.sam_ms,
+            dense_ms=stats.dense_ms,
+            dense_valid_count=stats.valid_count,
+            dense_valid_fraction=stats.valid_fraction,
+            correspondence_rejected_fraction=(
+                stats.correspondence_rejected_fraction),
+            overall_rejected_fraction=stats.overall_rejected_fraction,
+            dense_refreshes=stats.dense_refreshes,
+            dense_misses=stats.dense_misses,
+            rig_movement_mm=stats.rig_movement_mm,
+            rig_movement_deg=stats.rig_movement_deg,
+        )
+
+    def _predict_and_tick(self, tick: TickObservation,
+                          step: int) -> tuple[np.ndarray, float]:
+        frame = build_state_frame(
+            self.loop.qpos,
+            self.loop.qvel,
+            tick.marker_pos,
+            tick.marker_rot,
+            tick.marker_age,
+            tick.live,
+            tick.live_age,
+            self.loop.prev_actions,
+            self.config.marker_include_rot,
+        )
+        tapped = (self.history.reset(frame) if step == 0
+                  else self.history.push(frame))
+        observation = np.concatenate([tapped, tick.bps.flat(), self.priv_pad])
+        started = time.perf_counter()
+        raw_action, _ = self.policy.predict(observation, deterministic=True)
+        predict_ms = (time.perf_counter() - started) * 1e3
+        return self.loop.tick(raw_action), predict_ms
+
+    def _advance_scene(self, tick: TickObservation) -> None:
+        data = self.scene.data
+        data.qpos[self.scene.qposadr] = self.loop.qpos
+        data.qvel[self.scene.joint_dofadr] = self.loop.qvel
+        if self.args.marker_source == "fk":
+            data.ctrl[:6] = self.loop.qpos
+            for _ in range(self.config.n_substeps):
+                mujoco.mj_step(self.scene.model, data)
+            data.qpos[self.scene.qposadr] = self.loop.qpos
+            data.qvel[self.scene.joint_dofadr] = self.loop.qvel
+        mujoco.mj_forward(self.scene.model, data)
+        set_marker_render_colors(
+            self.scene.model,
+            self.scene.marker_site_ids,
+            tick.marker_detected,
+        )
+
+    def _publish_and_render(self, tick: TickObservation) -> bool:
+        if self.publisher is not None:
+            self.publisher.publish(
+                self.scene.data,
+                tick.marker_pos if self.args.marker_source == "camera" else None,
+                tick.marker_rot if self.args.marker_source == "camera" else None,
+                self.config.marker_include_rot,
+                object_channels=(tick.live, tick.bps.center_base),
+                point_cloud=tick.point_cloud,
+            )
+        if self.viewer is None:
+            return False
+        assert self._draw_detected_markers is not None
+        assert self._draw_channels is not None
+        assert self._draw_cloud is not None
+        self.viewer.user_scn.ngeom = 0
+        if self.args.marker_source == "camera":
+            self._draw_detected_markers(
+                self.viewer.user_scn,
+                tick.marker_pos,
+                tick.marker_rot,
+                self.config.marker_include_rot,
+            )
+        self._draw_channels(
+            self.viewer.user_scn, tick.live, tick.bps.center_base)
+        self._draw_cloud(self.viewer.user_scn, tick.point_cloud)
+        self.viewer.sync()
+        return not self.viewer.is_running()
+
+    def _log_row(self, step: int, tick: TickObservation,
+                 action: np.ndarray, cube_pos: np.ndarray,
+                 ee_pos: np.ndarray, grasped_sim: bool,
+                 loop_ms: float, predict_ms: float) -> dict:
+        return {
+            "step": step,
+            "action": action.copy(),
+            "qpos": self.loop.qpos.copy(),
+            "ee": ee_pos.copy(),
+            "cube": cube_pos.copy(),
+            "grasped": grasped_sim,
+            "marker_obs": tick.marker_pos.copy(),
+            "marker_fk": tick.marker_fk.copy(),
+            "marker_age": tick.marker_age.copy(),
+            "live": tick.live.copy(),
+            "live_age": tick.live_age,
+            "bps": tick.bps.distances.copy(),
+            "center": tick.bps.center_base.copy(),
+            "precise_age": tick.bps.age_s,
+            "valid_fraction": tick.bps.valid_fraction,
+            "dense_valid_count": tick.dense_valid_count,
+            "dense_valid_fraction": tick.dense_valid_fraction,
+            "dense_correspondence_rejected_fraction": (
+                tick.correspondence_rejected_fraction),
+            "dense_overall_rejected_fraction": tick.overall_rejected_fraction,
+            "dense_refreshes": tick.dense_refreshes,
+            "dense_misses": tick.dense_misses,
+            "rig_movement_mm": tick.rig_movement_mm,
+            "rig_movement_deg": tick.rig_movement_deg,
+            "loop_ms": loop_ms,
+            "predict_ms": predict_ms,
+            "read_all_ms": self.loop.last_read_ms,
+            "stream_ms": self.loop.last_stream_ms,
+            "window_ms": self.loop.last_window_ms,
+            "marker_age_ms": tick.marker_age_ms,
+            "cam_read_ms": tick.cam_read_ms,
+            "detect_ms": tick.detect_ms,
+            "sam_ms": tick.sam_ms,
+            "dense_ms": tick.dense_ms,
+        }
+
+    def _print_step(self, step: int, tick: TickObservation,
+                    ee_live: float, grasped_sim: bool,
+                    loop_ms: float, predict_ms: float) -> None:
+        print(
+            f"step={step:3d}  ee-live={ee_live:.3f}m  "
+            f"live_z={tick.live[2]:.3f}m  ages live={tick.live_age:.2f}s "
+            f"precise={tick.bps.age_s:.2f}s  "
+            f"grasped_sim={int(grasped_sim)}")
+        print(
+            f"          lat[ms]: loop={loop_ms:.0f} "
+            f"predict={predict_ms:.2f} "
+            f"read_all={self.loop.last_read_ms:.0f} "
+            f"stream={self.loop.last_stream_ms:.0f} "
+            f"window={self.loop.last_window_ms:.0f}")
+        if self.args.marker_source == "camera":
+            print(
+                f"          dense: points={tick.dense_valid_count} "
+                f"valid={tick.bps.valid_fraction:.1%} "
+                f"reject={tick.correspondence_rejected_fraction:.1%}/"
+                f"{tick.overall_rejected_fraction:.1%} "
+                f"refresh/miss={tick.dense_refreshes}/{tick.dense_misses}")
+
+    def _save_episode(self, rows: list[dict], episode_index: int) -> None:
+        if not rows:
+            return
+        print_latency_summary(rows)
         out_dir = REPO_ROOT / "rollouts"
         out_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"rollout_lift_{int(time.time())}"
+        suffix = f"_e{episode_index + 1}" if self.args.interactive else ""
+        stem = f"rollout_lift_{int(time.time())}{suffix}"
         csv_path = out_dir / f"{stem}.csv"
         plot_path = out_dir / f"{stem}.png"
-        write_csv(csv_path, log_rows, loop.control_hz)
-        plot_rollout(plot_path, log_rows, target_height, loop.control_hz)
-        print(f"saved {csv_path.relative_to(REPO_ROOT)} {plot_path.relative_to(REPO_ROOT)}")
+        write_csv(csv_path, rows, self.loop.control_hz)
+        plot_rollout(
+            plot_path, rows, self.config.target_height, self.loop.control_hz)
+        print(
+            f"saved {csv_path.relative_to(REPO_ROOT)} "
+            f"{plot_path.relative_to(REPO_ROOT)}")
+
+
+def main() -> int:
+    lift_cfg, prev_actions_n, marker_include_rot, history_taps = load_env_cfg("lift")
+    args = parse_args(lift_cfg)
+    config = LiftRuntimeConfig(
+        action_scale=float(lift_cfg["action_scale"]),
+        n_substeps=int(lift_cfg["n_substeps"]),
+        cube_low=np.array(lift_cfg["cube_low"], dtype=np.float64),
+        cube_high=np.array(lift_cfg["cube_high"], dtype=np.float64),
+        target_height=float(lift_cfg["target_height"]),
+        prev_actions_n=prev_actions_n,
+        marker_include_rot=marker_include_rot,
+        history_taps=history_taps,
+    )
+    session = LiftRolloutSession(args, config)
+    try:
+        session.start()
+        session.run()
+    finally:
+        session.close()
     return 0
 
 

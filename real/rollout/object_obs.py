@@ -289,6 +289,7 @@ class ObjectSource:
             self.processor.config.static_mean_window_s)
         self._bps_state = BPSObsState()
         self._state_lock = threading.Lock()
+        self._processor_lock = threading.Lock()
         self._stop = threading.Event()
         self._job_condition = threading.Condition()
         self._job: tuple[int, DenseStereoJob] | None = None
@@ -310,6 +311,7 @@ class ObjectSource:
         self._dense_misses = 0
         self._rig_movement_mm = float("nan")
         self._rig_movement_deg = float("nan")
+        self._last_bps_capture_t = -np.inf
         self._latest_cloud = _readonly(np.empty((0, 3)), copy=False)
 
     def start(self, warmup_timeout_s: float = 60.0) -> None:
@@ -338,40 +340,73 @@ class ObjectSource:
             self._executor.submit(self._dense_loop),
         )
 
-        deadline = time.monotonic() + warmup_timeout_s
+        self.prepare_episode(warmup_timeout_s)
+
+    def prepare_episode(self, timeout_s: float = 60.0) -> tuple[float, float]:
+        """Revalidate the live rig and wait for a post-validation BPS cloud.
+
+        Each call requires a fresh run of accepted, paired table-board solves;
+        a placement that passed earlier in the process is never reused for a
+        new episode.  Dense jobs are withheld while the check runs, and the
+        ready gate only accepts a cloud captured after the new validation.
+        Returns the measured relative-camera movement in ``(mm, degrees)``.
+        """
+        self._raise_worker_errors()
         required_pairs = load_limits().min_detected_pairs
-        while True:
+        with self._state_lock:
+            initial_pairs = self._paired_anchor_updates
+            self._rig_validated = False
+        target_pairs = initial_pairs + required_pairs
+        deadline = time.monotonic() + timeout_s
+
+        poses = None
+        while poses is None:
             self._raise_worker_errors()
-            if not self._rig_validated:
-                with self._state_lock:
-                    paired = self._paired_anchor_updates
-                    poses = {
+            with self._state_lock:
+                paired = self._paired_anchor_updates
+                if paired >= target_pairs:
+                    current = {
                         name: self._anchors[name].value()
                         for name in CAMERA_NAMES
                         if self._anchors[name].seeded
                     }
-                if paired >= required_pairs and len(poses) == len(CAMERA_NAMES):
-                    movement = validate_rig_placement(poses, self.processor.preprocessor)
-                    disparity_range = self.processor.configure_for_pose(poses["main"])
-                    with self._state_lock:
-                        self._rig_movement_mm, self._rig_movement_deg = movement
-                        self._rig_validated = True
-                    print(
-                        "ObjectSource: stereo rig placement PASS "
-                        f"({movement[0]:.2f} mm / {movement[1]:.3f} deg), "
-                        f"disparity [{disparity_range[0]}, "
-                        f"{sum(disparity_range)})",
-                        flush=True,
-                    )
-            (live, live_age), bps = self.object_obs()
-            if (self._rig_validated and live_age < 0.5
-                    and bps.age_s < MARKER_AGE_CAP_S):
-                return
+                    if len(current) == len(CAMERA_NAMES):
+                        poses = current
             if time.monotonic() > deadline:
                 raise RuntimeError(
-                    f"object source not ready within {warmup_timeout_s:.0f} s "
-                    f"(paired anchors {self._paired_anchor_updates}/{required_pairs}, "
-                    f"rig_validated={self._rig_validated}, live_age={live_age:.2f} s, "
+                    f"stereo rig did not produce {required_pairs} new paired "
+                    f"table-anchor solves within {timeout_s:.0f} s "
+                    f"({paired - initial_pairs}/{required_pairs}); keep both "
+                    "complete table tags visible in both cameras")
+            if poses is None:
+                time.sleep(0.02)
+
+        movement = validate_rig_placement(poses, self.processor.preprocessor)
+        with self._processor_lock:
+            disparity_range = self.processor.configure_for_pose(poses["main"])
+        validated_t = time.monotonic()
+        with self._state_lock:
+            self._rig_movement_mm, self._rig_movement_deg = movement
+            self._rig_validated = True
+        print(
+            "ObjectSource: episode stereo rig placement PASS "
+            f"({movement[0]:.2f} mm / {movement[1]:.3f} deg), "
+            f"disparity [{disparity_range[0]}, {sum(disparity_range)})",
+            flush=True,
+        )
+
+        while True:
+            self._raise_worker_errors()
+            (live, live_age), bps = self.object_obs()
+            with self._state_lock:
+                bps_capture_t = self._last_bps_capture_t
+            if (live_age < 0.5 and bps.age_s < MARKER_AGE_CAP_S
+                    and bps_capture_t >= validated_t):
+                return movement
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"object source not episode-ready within {timeout_s:.0f} s "
+                    f"(live_age={live_age:.2f} s, "
                     f"cloud_age={bps.age_s:.2f} s); keep both complete table tags "
                     "and the still, unoccluded sponge visible in both cameras")
             time.sleep(0.02)
@@ -562,7 +597,8 @@ class ObjectSource:
                 if self._stop.is_set():
                     return
                 consumed_generation, job = self._job
-            result = self.processor.process(job)
+            with self._processor_lock:
+                result = self.processor.process(job)
             with self._state_lock:
                 self._dense_ms = result.inference_ms
                 self._valid_count = result.valid_count
@@ -575,6 +611,7 @@ class ObjectSource:
                     self._dense_misses += 1
                 else:
                     self._bps_state.ingest(job.capture_t, result.measurement)
+                    self._last_bps_capture_t = job.capture_t
                     self._dense_refreshes += 1
 
 

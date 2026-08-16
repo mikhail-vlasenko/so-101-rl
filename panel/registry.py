@@ -183,6 +183,7 @@ SCRIPTS: tuple[ScriptSpec, ...] = (
             ArgSpec("--object-prompt", "str", "SAM3 object prompt", default="sponge"),
             ArgSpec("--sam2-model", "choice", "SAM2 tracker size", default="tiny",
                     choices=("tiny", "base+")),
+            ArgSpec("--interactive", "flag", "Repeat episodes (attached terminal only)"),
             ArgSpec("--no-view", "flag", "Disable native MuJoCo viewer"),
         ),
         resources=(Resource.SERIAL, Resource.CAMERA),

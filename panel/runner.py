@@ -10,6 +10,8 @@ do torque-off / CSV+PNG saving), SIGKILL only after a grace period.
 
 Children run with `start_new_session=True`, so panel-process signals never
 reach them, and with PYTHONUNBUFFERED so log lines arrive as they happen.
+Their stdin is `/dev/null`; terminal-interactive tools must be launched from a
+terminal rather than through the panel.
 Streamed launches additionally get MUJOCO_GL=egl: offscreen rendering must
 not depend on the panel host's display.
 """
@@ -151,7 +153,8 @@ class Runner:
 
         proc = subprocess.Popen(
             argv, cwd=REPO_ROOT, env=env, start_new_session=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True)
         run = Run(run_id=run_id, spec=spec, argv=argv, values=values,
                   proc=proc, log_path=log_path, started_at=time.time(),
                   stream_port=stream_port)

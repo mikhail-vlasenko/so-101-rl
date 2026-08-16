@@ -133,9 +133,10 @@ class ArmLoop:
     """Control-loop state + per-tick command shaping for a real-arm rollout.
 
     Construct before `bus.connect()` (validates arguments, touches no
-    hardware), then call `boot()` once inside the caller's try/finally and
-    `tick(action)` once per policy step. `qpos`, `qvel` (sim-time units) and
-    `prev_actions` hold the state the task script needs to build observations.
+    hardware), then call `boot()` at the start of each episode,
+    `tick(action)` once per policy step, and `end_episode()` in the episode's
+    finally block. `qpos`, `qvel` (sim-time units) and `prev_actions` hold the
+    state the task script needs to build observations.
     """
 
     def __init__(self, model: mujoco.MjModel, n_substeps: int, jm: JointMaps,
@@ -230,8 +231,14 @@ class ArmLoop:
         return rad_to_raw(q_bc + self.qpos_bias, self.jm, self.direction)
 
     def boot(self) -> np.ndarray:
-        """Initial encoder read + calibration sanity check; on --execute also
-        set servo gains and enable torque. Returns the boot qpos (rad)."""
+        """Begin an episode from the arm's current pose.
+
+        The serial connection may stay open across episodes.  Every call
+        resets all policy-facing control history and the wall-clock streaming
+        schedule before enabling torque, so an interactive session has the
+        same boot observation and first-tick behavior as a fresh process.
+        Returns the boot qpos (rad).
+        """
         raw0 = self.bus.read_all()
         qpos = self._encoder_to_true(raw0)
         if not (np.all(qpos >= self.xml_low - INIT_RANGE_SLACK)
@@ -239,6 +246,12 @@ class ArmLoop:
             raise SystemExit(
                 "ABORT: initial qpos outside MuJoCo joint range; check calibration."
             )
+        self.prev_actions.fill(0.0)
+        self._action_ema = None
+        self._stream_deadline = None
+        self.last_stream_ms = float("nan")
+        self.last_read_ms = float("nan")
+        self.last_window_ms = float("nan")
         if self.execute:
             self.bus.set_position_kp(SERVO_POSITION_KP)
             self.bus.set_position_deadzone(SERVO_POSITION_DEADZONE)
@@ -248,6 +261,11 @@ class ArmLoop:
         self.qpos = qpos
         self.qvel = np.zeros(self.n_joints, dtype=np.float64)
         return qpos
+
+    def end_episode(self) -> None:
+        """Disable torque without closing the session's serial connection."""
+        if self.execute:
+            self.bus.disable_torque_all()
 
     def _write_raw(self, raw: np.ndarray) -> None:
         if self.execute:

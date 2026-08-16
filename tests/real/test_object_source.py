@@ -3,7 +3,8 @@
 from concurrent.futures import Future
 from dataclasses import replace
 import threading
-from types import MappingProxyType
+import time
+from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -228,3 +229,66 @@ def test_worker_exception_is_rethrown_by_public_reads():
 
     with pytest.raises(RuntimeError, match="dense worker died"):
         source.object_obs()
+
+
+def test_prepare_episode_revalidates_fresh_pairs_and_waits_for_new_cloud(
+        monkeypatch):
+    class Anchor:
+        seeded = True
+
+        def value(self):
+            return np.eye(4)
+
+    class Processor:
+        preprocessor = object()
+
+        def __init__(self):
+            self.configured = 0
+
+        def configure_for_pose(self, pose):
+            self.configured += 1
+            return 3, 4
+
+    source = ObjectSource.__new__(ObjectSource)
+    source._futures = ()
+    source._state_lock = threading.Lock()
+    source._processor_lock = threading.Lock()
+    source._paired_anchor_updates = 0
+    source._rig_validated = False
+    source._anchors = {name: Anchor() for name in ("main", "aux")}
+    source.processor = Processor()
+    source._rig_movement_mm = float("nan")
+    source._rig_movement_deg = float("nan")
+    source._last_bps_capture_t = -np.inf
+    source.object_obs = lambda: (
+        (np.zeros(3), 0.0), SimpleNamespace(age_s=0.0))
+
+    validations = []
+    monkeypatch.setattr(
+        "real.rollout.object_obs.load_limits",
+        lambda: SimpleNamespace(min_detected_pairs=1))
+    monkeypatch.setattr(
+        "real.rollout.object_obs.validate_rig_placement",
+        lambda poses, preprocessor: validations.append(poses) or (0.1, 0.2))
+
+    def publish_new_episode_evidence():
+        time.sleep(0.01)
+        with source._state_lock:
+            source._paired_anchor_updates += 1
+        while True:
+            with source._state_lock:
+                if source._rig_validated:
+                    source._last_bps_capture_t = time.monotonic()
+                    return
+            time.sleep(0.001)
+
+    for _ in range(2):
+        worker = threading.Thread(target=publish_new_episode_evidence)
+        worker.start()
+        movement = source.prepare_episode(timeout_s=1.0)
+        worker.join()
+        assert movement == (0.1, 0.2)
+
+    assert len(validations) == 2
+    assert source.processor.configured == 2
+    assert source._paired_anchor_updates == 2
