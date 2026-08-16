@@ -34,6 +34,10 @@ SAM2_MODELS = {
 SESSION_MAX_FRAMES = 200
 
 
+class SAMPromptNoMatchError(RuntimeError):
+    """The requested object was absent from a SAM text-prompt frame."""
+
+
 def load_sam3():
     """Load the SAM 3 model + processor for one-shot text prompting.
 
@@ -74,7 +78,7 @@ def text_to_mask(sam3, frame_bgr, prompt):
     must fail loud at rollout startup, not silently track an empty mask."""
     found = find_text_mask(sam3, frame_bgr, prompt)
     if found is None:
-        raise RuntimeError(f"SAM3 found no match for {prompt!r}")
+        raise SAMPromptNoMatchError(f"SAM3 found no match for {prompt!r}")
     return found
 
 

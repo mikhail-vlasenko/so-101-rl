@@ -6,6 +6,20 @@ Single source of truth for bus-level settings. Anything derived from
 and is computed at runtime from the composed config — not hard-coded here.
 """
 
+# Folded pose used when a real-arm rollout parks the arm. Captured from the
+# torque-off arm in a mechanically supported configuration on 2026-08-16,
+# through the same encoder-bias + gravity-compliance correction as ArmLoop.
+# All-zero joint angles put the links straight out in front of the base, so
+# they are not a safe or useful resting target.
+FOLDED_REST_QPOS = (
+    -0.735780,
+    -0.517607,
+    1.323839,
+    -0.599568,
+    1.365305,
+    0.300000,
+)
+
 # SyncWritePosEx speed argument. Range 0-32767 (BIT15 = direction), units
 # 0.732 RPM. 1500 -> ~1100 RPM ceiling; well above what the policy commands,
 # leaves headroom so speed is never the binding limit.

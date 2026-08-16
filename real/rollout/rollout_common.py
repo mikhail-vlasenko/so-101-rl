@@ -18,6 +18,7 @@ shaping fix lands, it lands here once and every rollout gets it.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import signal
 import time
 from pathlib import Path
@@ -266,6 +267,85 @@ class ArmLoop:
         """Disable torque without closing the session's serial connection."""
         if self.execute:
             self.bus.disable_torque_all()
+
+    def set_execute(self, execute: bool) -> None:
+        """Select dry-run or servo execution for the next episode.
+
+        Interactive callers invoke this only at the warm prompt, where torque
+        is already disabled. ``boot`` applies the hardware settings when the
+        newly selected mode is executable.
+        """
+        self.execute = bool(execute)
+
+    def return_to_rest(self, rest_qpos: np.ndarray, duration_s: float,
+                       rest_action_scale: float, settle_s: float,
+                       should_stop: Callable[[], bool]) -> bool:
+        """Gently drive an executable episode to a folded resting pose.
+
+        The joint-space cosine ramp has zero endpoint velocity. Each waypoint
+        is additionally constrained by a raw-unit delta derived from
+        ``rest_action_scale`` and uses the normal sub-target servo stream. The
+        final-target loop handles a clamp-limited ramp without stopping short.
+        Torque remains enabled for the caller's subsequent ``end_episode``.
+        Returns false if a stop request aborts the move between streamed ticks.
+        """
+        if not self.execute:
+            return True
+        rest_qpos = np.asarray(rest_qpos, dtype=np.float64)
+        if rest_qpos.shape != (self.n_joints,):
+            raise ValueError(
+                f"rest_qpos must be ({self.n_joints},), got {rest_qpos.shape}")
+        if not (np.all(rest_qpos >= self.xml_low)
+                and np.all(rest_qpos <= self.xml_high)):
+            raise ValueError("rest_qpos is outside the MuJoCo joint range")
+        if duration_s <= 0.0:
+            raise ValueError(f"duration_s must be positive, got {duration_s}")
+        if rest_action_scale <= 0.0:
+            raise ValueError(
+                f"rest_action_scale must be positive, got {rest_action_scale}")
+        if settle_s < 0.0:
+            raise ValueError(f"settle_s must be non-negative, got {settle_s}")
+        assert self.qpos is not None and self.prev_raw_target is not None, \
+            "boot must run before return_to_rest"
+
+        start_qpos = self.qpos.copy()
+        final_raw = self._true_to_encoder_raw(rest_qpos)
+        max_delta = max_raw_delta_per_step(rest_action_scale)
+        n_steps = max(1, int(round(duration_s / self.control_dt)))
+        phase = np.linspace(0.0, np.pi, n_steps + 1)[1:]
+        blend = (1.0 - np.cos(phase)) / 2.0
+        targets = start_qpos[None, :] + blend[:, None] * (
+            rest_qpos - start_qpos)[None, :]
+
+        for target_qpos in targets:
+            if should_stop():
+                return False
+            self._stream_rest_target(
+                self._true_to_encoder_raw(target_qpos), max_delta)
+        while not np.array_equal(self.prev_raw_target, final_raw):
+            if should_stop():
+                return False
+            self._stream_rest_target(final_raw, max_delta)
+        for _ in range(int(round(settle_s / self.control_dt))):
+            if should_stop():
+                return False
+            self._stream_rest_target(final_raw, max_delta)
+        self.qvel.fill(0.0)
+        return True
+
+    def _stream_rest_target(self, requested_raw: np.ndarray,
+                            max_delta: int) -> None:
+        target_raw = clamp_raw_delta(
+            self.prev_raw_target, requested_raw, max_delta)
+        stream_sub_targets(
+            self.prev_raw_target,
+            target_raw,
+            self.n_interp,
+            self.sub_dt,
+            self._write_raw,
+        )
+        self.prev_raw_target = target_raw
+        self.qpos = self._encoder_to_true(self.bus.read_all())
 
     def _write_raw(self, raw: np.ndarray) -> None:
         if self.execute:

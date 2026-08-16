@@ -21,9 +21,14 @@ in real.rollout.rollout_common — this script owns only observation constructio
 termination, and plots. --execute is OFF by default; Ctrl-C disables torque.
 In camera-mode ``--interactive``, the process keeps its model and camera stack
 warm, revalidates the stereo placement before every episode, and runs another
-episode whenever Enter is pressed. Ctrl-C during an episode stops that episode,
-disables torque, saves its partial log, and returns to the warm prompt; Ctrl-C
-at the prompt exits the session.
+episode whenever Enter is pressed. A failed initial object prompt asks for Enter
+to retry. At the warm prompt, ``e`` switches the next episode between execute
+and dry-run while preserving the CLI's initial mode, and ``r`` parks the arm
+when execute mode is selected. A normally completed execute episode also
+gently parks at the folded rest pose before disabling torque. Ctrl-C during an
+episode or rest move stops immediately and disables torque; an interrupted
+episode saves its partial log and returns to the warm prompt. Ctrl-C at either
+interactive prompt exits the session.
 """
 
 from __future__ import annotations
@@ -79,6 +84,7 @@ from .rollout_common import (
 )
 
 from ..calib.calibration import load_calibration, load_compliance
+from ..twin.constants import FOLDED_REST_QPOS
 from ..twin.mapping import JointMaps, load_joint_maps
 from ..twin.servo_io import ServoBus
 
@@ -408,6 +414,10 @@ class LiftRuntimeConfig:
     cube_low: np.ndarray
     cube_high: np.ndarray
     target_height: float
+    rest_qpos: np.ndarray
+    rest_duration_s: float
+    rest_action_scale: float
+    rest_settle_s: float
     prev_actions_n: int
     marker_include_rot: bool
     history_taps: tuple[int, ...]
@@ -581,7 +591,7 @@ class LiftRolloutSession:
         self.scene.model.geom_rgba[self.scene.cube_geom_id, 3] = 0.0
         return position, np.array([1.0, 0.0, 0.0, 0.0])
 
-    def start(self) -> None:
+    def start(self) -> bool:
         """Open session resources and warm the camera/model pipeline once."""
         self.servo_bus.connect()
         if not self.args.no_view:
@@ -600,9 +610,10 @@ class LiftRolloutSession:
             self.publisher = SimStreamPublisher(
                 self.scene.model, self.args.stream_port)
         if self.args.marker_source == "camera":
-            self._start_camera_pipeline()
+            return self._start_camera_pipeline()
+        return True
 
-    def _start_camera_pipeline(self) -> None:
+    def _start_camera_pipeline(self) -> bool:
         from real.rollout.frame_bus import FrameBus
         from real.rollout.marker_obs import StereoCameraMarkerSource
         from real.rollout.object_obs import ObjectSource
@@ -620,9 +631,25 @@ class LiftRolloutSession:
         self.camera_markers.start()
         marker_warmup_s = self.camera_markers.warmup()
         print(f"camera marker anchor ready after {marker_warmup_s:.2f}s")
-        self.camera_object.start()
+        if not self._start_object_source():
+            return False
         if self.args.interactive:
             print("\nWarm rollout session ready; torque is disabled.")
+        return True
+
+    def _start_object_source(self) -> bool:
+        from real.tracking.sam_seg import SAMPromptNoMatchError
+
+        assert self.camera_object is not None
+        while True:
+            try:
+                self.camera_object.start()
+                return True
+            except SAMPromptNoMatchError as error:
+                if not self.args.interactive:
+                    raise
+                if not self._prompt_for_object_retry(error):
+                    return False
 
     def close(self) -> None:
         """Release all resources retained by the warm session."""
@@ -659,22 +686,74 @@ class LiftRolloutSession:
             episode_index += 1
 
     @staticmethod
-    def _prompt_for_episode(episode_index: int) -> bool:
-        signal.signal(signal.SIGINT, signal.default_int_handler)
+    def _prompt_for_object_retry(error: RuntimeError) -> bool:
         while True:
             try:
                 command = input(
-                    f"\n[episode {episode_index + 1}] "
-                    "Enter=run, q=quit > "
+                    f"\n{error}. Reposition the sponge, then "
+                    "Enter=retry, Ctrl-C=quit > "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nStopping warm rollout session.")
+                return False
+            if command in ("", "retry"):
+                return True
+            print("Enter retries object acquisition; Ctrl-C quits the warm session.")
+
+    def _prompt_for_episode(self, episode_index: int) -> bool:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        while True:
+            mode = "EXECUTE" if self.loop.execute else "DRY-RUN"
+            try:
+                command = input(
+                    f"\n[episode {episode_index + 1}] [{mode}] "
+                    "Enter=run, e=toggle execute, r=rest, Ctrl-C=quit > "
                 ).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print("\nStopping warm rollout session.")
                 return False
             if command in ("", "run"):
                 return True
-            if command in ("q", "quit", "exit"):
-                return False
-            print("Enter starts an episode; q quits the warm session.")
+            if command in ("e", "execute", "toggle"):
+                self.loop.set_execute(not self.loop.execute)
+                next_mode = "EXECUTE" if self.loop.execute else "DRY-RUN"
+                print(f"Next episode mode: {next_mode}.")
+                continue
+            if command in ("r", "rest", "park"):
+                self._return_to_rest_from_prompt()
+                continue
+            print("Enter starts an episode; e toggles execute; r parks; Ctrl-C quits.")
+
+    def _return_to_rest_from_prompt(self) -> None:
+        if not self.loop.execute:
+            print("Rest move is disabled in DRY-RUN; press e to enable execute.")
+            return
+
+        stopped = install_sigint_flag()
+        booted = False
+        try:
+            self.loop.boot()
+            booted = True
+            self._return_to_rest(stopped)
+        finally:
+            if booted:
+                self.loop.end_episode()
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+        if stopped["flag"]:
+            print("Rest move interrupted; torque disabled.")
+        else:
+            print("Arm at folded rest; torque disabled.")
+
+    def _return_to_rest(self, stopped: dict) -> bool:
+        if self.loop.execute:
+            print("Returning arm to folded rest pose...")
+        return self.loop.return_to_rest(
+            self.config.rest_qpos,
+            self.config.rest_duration_s,
+            self.config.rest_action_scale,
+            self.config.rest_settle_s,
+            lambda: bool(stopped["flag"]),
+        )
 
     def _prepare_camera_episode(self) -> None:
         assert self.camera_markers is not None
@@ -687,6 +766,7 @@ class LiftRolloutSession:
         rows: list[dict] = []
         viewer_closed = False
         booted = False
+        completed_normally = False
         try:
             self.loop.boot()
             booted = True
@@ -743,9 +823,14 @@ class LiftRolloutSession:
             else:
                 if not stopped["flag"]:
                     print(f"TIMEOUT at step {step}")
+            completed_normally = True
         finally:
             if booted:
-                self.loop.end_episode()
+                try:
+                    if completed_normally and not stopped["flag"]:
+                        self._return_to_rest(stopped)
+                finally:
+                    self.loop.end_episode()
                 if self.args.interactive:
                     print("Episode finished; torque disabled.")
         return EpisodeResult(
@@ -1002,14 +1087,18 @@ def main() -> int:
         cube_low=np.array(lift_cfg["cube_low"], dtype=np.float64),
         cube_high=np.array(lift_cfg["cube_high"], dtype=np.float64),
         target_height=float(lift_cfg["target_height"]),
+        rest_qpos=np.array(FOLDED_REST_QPOS, dtype=np.float64),
+        rest_duration_s=float(lift_cfg["rest_duration_s"]),
+        rest_action_scale=float(lift_cfg["rest_action_scale"]),
+        rest_settle_s=float(lift_cfg["rest_settle_s"]),
         prev_actions_n=prev_actions_n,
         marker_include_rot=marker_include_rot,
         history_taps=history_taps,
     )
     session = LiftRolloutSession(args, config)
     try:
-        session.start()
-        session.run()
+        if session.start():
+            session.run()
     finally:
         session.close()
     return 0

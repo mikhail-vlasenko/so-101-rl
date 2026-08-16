@@ -25,6 +25,7 @@ from real.tracking.dense_stereo import (
     ProcessingGeometry,
     SGBMCandidate,
 )
+from real.tracking.sam_seg import SAMPromptNoMatchError
 
 
 def _config():
@@ -94,6 +95,65 @@ def _job():
         masks=MappingProxyType(masks),
         T_base_main=np.eye(4),
     )
+
+
+def test_start_reuses_sam3_and_builds_no_trackers_until_both_masks_exist(
+        monkeypatch):
+    class Feed:
+        camera_matrix = np.eye(3)
+        dist_coeffs = np.zeros(5)
+
+        def latest(self):
+            return 1, 0.0, np.zeros((2, 2, 3), dtype=np.uint8)
+
+    class Tracker:
+        def __init__(self, model):
+            self.model = model
+
+        def prime(self, frame, mask):
+            pass
+
+    source = ObjectSource.__new__(ObjectSource)
+    source.feeds = {name: Feed() for name in ("main", "aux")}
+    source.prompt = "sponge"
+    source.sam2_model = "tiny"
+    source._anchors = {}
+    source._trackers = {}
+    source._sam3 = None
+    source._track_loop = lambda: None
+    source._dense_loop = lambda: None
+    source.prepare_episode = lambda timeout: None
+
+    loaded = []
+    detections = iter((
+        (np.ones((2, 2), dtype=bool), 0.9),
+        None,
+        (np.ones((2, 2), dtype=bool), 0.8),
+        (np.ones((2, 2), dtype=bool), 0.7),
+    ))
+
+    def detect(sam3, frame, prompt):
+        found = next(detections)
+        if found is None:
+            raise SAMPromptNoMatchError("no match")
+        return found
+
+    monkeypatch.setattr(
+        "real.rollout.object_obs.TableAnchorTracker", lambda *args: object())
+    monkeypatch.setattr(
+        "real.rollout.object_obs.load_sam3", lambda: loaded.append(True) or object())
+    monkeypatch.setattr("real.rollout.object_obs.text_to_mask", detect)
+    monkeypatch.setattr("real.rollout.object_obs.MaskTracker", Tracker)
+
+    with pytest.raises(SAMPromptNoMatchError, match="no match"):
+        source.start()
+    assert source._trackers == {}
+
+    source.start()
+    source._executor.shutdown(wait=True)
+
+    assert loaded == [True]
+    assert set(source._trackers) == {"main", "aux"}
 
 
 def test_relative_pose_uses_complete_main_and_aux_transforms():

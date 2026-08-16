@@ -11,6 +11,13 @@ lift_env:
   cube_smallest_face_only: ${cube_smallest_face_only}   # defined in config.yaml
   cube_no_flat_spawns: ${cube_no_flat_spawns}           # defined in config.yaml
   target_height: 0.10
+  # Real lift rollout only. The target is FOLDED_REST_QPOS in
+  # real/twin/constants.py. The return uses a cosine ramp and the same raw clamp /
+  # sub-target servo stream as policy commands. Duration is in policy time, so
+  # --slow stretches it by the same factor as an episode.
+  rest_duration_s: 5.0
+  rest_action_scale: 0.025
+  rest_settle_s: 1.0
   # floor_contact_penalty / floor_proximity_* / floor_force_coeff / poke_force_coeff / cube_tip_coeff are
   # careful-behavior shaping, owned by the `shaping` config group
   # (conf/shaping/{full,light,none}.yaml) so they can be toggled off for stage 1.

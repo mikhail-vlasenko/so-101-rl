@@ -324,13 +324,25 @@ class ObjectSource:
                 feed.camera_matrix, feed.dist_coeffs)
 
         print(f"ObjectSource: prompting SAM3 with {self.prompt!r} ...", flush=True)
-        self._sam3 = load_sam3()
+        if self._sam3 is None:
+            self._sam3 = load_sam3()
+        frames = {}
+        masks = {}
         for name in CAMERA_NAMES:
-            _, _, frame = self.feeds[name].latest()
-            mask, score = text_to_mask(self._sam3, frame, self.prompt)
-            print(f"  {name}: score {score:.2f}, area {int(mask.sum())} px", flush=True)
+            _, _, frames[name] = self.feeds[name].latest()
+            masks[name], score = text_to_mask(
+                self._sam3, frames[name], self.prompt)
+            print(
+                f"  {name}: score {score:.2f}, area {int(masks[name].sum())} px",
+                flush=True,
+            )
+
+        # Do not load/prime either SAM 2 tracker until both prompt masks are
+        # available. An interactive retry after one camera misses therefore
+        # reuses the resident SAM 3 model and leaves no half-started worker.
+        for name in CAMERA_NAMES:
             tracker = MaskTracker(self.sam2_model)
-            tracker.prime(frame, mask)
+            tracker.prime(frames[name], masks[name])
             self._trackers[name] = tracker
 
         self._executor = ThreadPoolExecutor(
