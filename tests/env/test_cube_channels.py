@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from src.base_env import (
+    EE_OBJECT_DELTA_DIM,
     MARKER_AGE_CAP_S,
     _OCCLUDER_GEOMGROUP,
     RuntimeEnvConfig,
@@ -32,6 +33,7 @@ def _cfg():
 STATE_DIM = state_dim_for(2, False)
 LIVE = slice(20, 23)
 LIVE_AGE = 23
+EE_OBJECT_DELTA = slice(STATE_DIM - EE_OBJECT_DELTA_DIM, STATE_DIM)
 BPS = slice(STATE_DIM, STATE_DIM + BPS_DISTANCE_DIM)
 CENTER = slice(BPS.stop, BPS.stop + 3)
 PRECISE_AGE = CENTER.stop
@@ -71,6 +73,22 @@ def test_bps_block_matches_shared_state(env):
     np.testing.assert_array_equal(obs[CENTER], served.center_base)
     assert obs[PRECISE_AGE] == served.age_s
     assert obs[VALID_FRACTION] == served.valid_fraction
+
+
+def test_ee_object_delta_uses_held_live_centroid(env):
+    """The derived feature must use the same deployable held live channel in
+    the observation, never the simulator's ground-truth sponge position."""
+    obs, _ = env.reset(seed=7)
+    np.testing.assert_allclose(
+        obs[EE_OBJECT_DELTA], env._get_ee_pos() - obs[LIVE], atol=1e-7)
+
+    held_live = obs[LIVE].copy()
+    env.data.qpos[env.cube_qpos_idx:env.cube_qpos_idx + 3] = (-1.0, -1.0, 0.0125)
+    mujoco.mj_forward(env.model, env.data)
+    obs, *_ = env.step(_zero(env))
+    np.testing.assert_array_equal(obs[LIVE], held_live)
+    np.testing.assert_allclose(
+        obs[EE_OBJECT_DELTA], env._get_ee_pos() - held_live, atol=1e-7)
 
 
 def test_out_of_view_holds_and_ages(env):

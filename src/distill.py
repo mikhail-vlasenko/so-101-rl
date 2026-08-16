@@ -11,7 +11,7 @@ student's own deployment DR. DAgger — not plain behavior cloning — because t
 covariate shift that BC suffers is worst exactly in the states the still-bad
 student visits, which is where it needs the teacher's supervision.
 
-Four regimes, selected by `distill.teacher_obs` (conf/config.yaml):
+Five regimes, selected by `distill.teacher_obs` (conf/config.yaml):
 
   identical  — the teacher sees the student's own observation (architecture-only
                change, e.g. a wider net). Requires matching obs spaces.
@@ -22,6 +22,10 @@ Four regimes, selected by `distill.teacher_obs` (conf/config.yaml):
                teacher, its history inputs start useless and get trained
                toward zero weight, and the mandatory PPO fine-tune learns to
                use them. Requires a single-frame teacher.
+  pre_ee_delta — the teacher sees the same single-frame BPS layout with the
+               final (EE - held live sponge centroid) state feature removed.
+               This is the migration bridge for checkpoints trained before
+               that derived feature was added.
   privileged — the teacher sees the always-fresh-tag privileged view
                (SO101BaseEnv.privileged_obs: what a marker_always_visible=true
                policy sees) while the student trains on the camera obs with
@@ -46,6 +50,8 @@ Usage:
     python -m src.distill env=lift distill.teacher=old.zip distill.net_arch=[512,512,512,512]
     python -m src.distill env=lift 'history_taps=[0,4,16,48]' \
         distill.teacher=old.zip distill.teacher_obs=current
+    python -m src.distill env=lift distill.teacher=old.zip \
+        distill.teacher_obs=pre_ee_delta
     python -m src.distill env=lift distill.teacher=priv.zip distill.teacher_obs=privileged
 then fine-tune (same history_taps override):
     python -m src.train env=lift resume=distilled.zip
@@ -221,8 +227,9 @@ def distill(cfg: DictConfig, orig_dir: str):
         f"distill.teacher_obs must be one of {TEACHER_OBS_MODES}, got {teacher_obs_mode!r}"
 
     # Single-frame layout dims for the teacher views that slice or bypass the
-    # student's lag-tapped obs (current / privileged): tap 0 leads the obs, the
-    # privileged tail ends it. Reach has neither tags nor tail.
+    # student's lag-tapped obs (current / pre_ee_delta / privileged): tap 0
+    # leads the obs, the privileged tail ends it. Reach has neither tags nor
+    # tail.
     if cfg.env_name == "reach":
         assert teacher_obs_mode == "identical", \
             "reach has no tag/privileged pipeline; only identical distillation applies"

@@ -15,7 +15,7 @@ from gymnasium import spaces
 from hydra import compose, initialize
 from stable_baselines3 import PPO, SAC
 
-from src.base_env import obs_dim_for, priv_dim_for, state_dim_for
+from src.base_env import EE_OBJECT_DELTA_DIM, obs_dim_for, priv_dim_for, state_dim_for
 from src.lift_env import SO101LiftEnv
 from src.networks import LayerNormActorCriticPolicy, LayerNormSACPolicy, ObsNorm
 from src.obs_norm import build_obs_norm, build_reach_obs_norm
@@ -42,6 +42,16 @@ def test_shapes_match_obs_layout():
             assert center.shape == scale.shape == (expected,)
             assert np.all(scale > 0)
             assert np.all(np.isfinite(center)) and np.all(np.isfinite(scale))
+
+
+def test_ee_object_delta_norm_is_zero_centered_workspace_scale():
+    center, scale = build_obs_norm(1, False, ACTION_SCALE, N_SUBSTEPS)
+    state_dim = state_dim_for(1, False)
+    np.testing.assert_array_equal(
+        center[state_dim - EE_OBJECT_DELTA_DIM:state_dim], np.zeros(3))
+    np.testing.assert_array_equal(
+        scale[state_dim - EE_OBJECT_DELTA_DIM:state_dim],
+        np.array([0.35, 0.35, 0.25], dtype=np.float32))
 
 
 def test_obs_norm_for_tiles_state_block_per_tap():

@@ -43,13 +43,21 @@ from src.surface_cloud import (
 from src.units import action_to_target
 from real.marker_spec import ARM_TAG_TO_SITE, TAG_SIZE_MM
 
+EE_OBJECT_DELTA_DIM = 3
+
+
+def ee_object_delta(ee_pos: np.ndarray, object_center: np.ndarray) -> np.ndarray:
+    """Deployable relative-position feature shared by sim and real rollouts."""
+    return np.asarray(ee_pos) - np.asarray(object_center)
+
 
 def state_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
     """Width of one historical actor-state frame.
 
     The frame contains qpos/qvel, arm marker poses/ages, the fast live object
-    centroid/age, task extras, and previous actions.  The current BPS block is
-    deliberately outside this frame so history taps never duplicate it.
+    centroid/age, task extras, previous actions, and the derived end-effector
+    minus held live-centroid vector.  The current BPS block is deliberately
+    outside this frame so history taps never duplicate it.
 
     Each marker contributes its world xyz (M=3); when marker_include_rot is true it
     also contributes a world rotation vector (axis-angle, +3 dims, M=6) — the same
@@ -64,7 +72,8 @@ def state_dim_for(prev_actions_n: int, marker_include_rot: bool = False) -> int:
     by :mod:`src.bps` and appended exactly once after all state taps.
     """
     marker_dim = 6 if marker_include_rot else 3
-    return 12 + N_MARKERS * marker_dim + N_MARKERS + 8 + prev_actions_n * 6
+    return (12 + N_MARKERS * marker_dim + N_MARKERS + 8
+            + prev_actions_n * 6 + EE_OBJECT_DELTA_DIM)
 
 
 def obs_dim_for(prev_actions_n: int, marker_include_rot: bool = False,
@@ -1036,15 +1045,21 @@ class SO101BaseEnv(SO101ArmEnv):
         qpos/qvel take the encoder path (fresh; qvel differenced like
         real/rollout_common.ArmLoop); markers serve the held per-tag
         detections with their ages; the live object channel uses the shared
-        hold/age state. The BPS block and privileged tail are separate."""
+        hold/age state. The final derived vector is the current kinematic EE
+        position minus that same held live centroid, so it remains deployable
+        and inherits object-channel staleness/noise. The BPS block and
+        privileged tail are separate."""
         qpos, qvel = self._encoder_obs()
         markers, marker_age = self._tag_obs(
             self._held_marker_pos, self._held_marker_rot,
             self._marker_last_capture_t)
         live, live_age = self._obj.serve(self.data.time)
-        return np.concatenate([qpos, qvel, markers, marker_age,
-                               live, [live_age], self._obs_extra(live),
-                               self._prev_actions.flatten()]).astype(np.float32)
+        return np.concatenate([
+            qpos, qvel, markers, marker_age,
+            live, [live_age], self._obs_extra(live),
+            self._prev_actions.flatten(),
+            ee_object_delta(self._get_ee_pos(), live),
+        ]).astype(np.float32)
 
     def _serve_obs(self, reset: bool):
         """Return ``[state taps | current BPS | privileged tail]``.
@@ -1078,6 +1093,7 @@ class SO101BaseEnv(SO101ArmEnv):
                                live, [live_age],
                                self._obs_extra(live),
                                self._prev_actions.flatten(),
+                               ee_object_delta(self._get_ee_pos(), live),
                                self._bps_state.serve(self.data.time).flat(),
                                self._priv_tail()]).astype(np.float32)
 

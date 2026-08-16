@@ -51,6 +51,7 @@ from src.base_env import (
     TAG_CAM_AUX_NAME,
     cube_surface_points_world,
     cube_visible_surface,
+    ee_object_delta,
     marker_world_poses,
     markers_visible,
     obs_dim_for,
@@ -224,7 +225,7 @@ def parse_args(lift_cfg: dict) -> argparse.Namespace:
 def build_state_frame(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray,
                       marker_rot: np.ndarray, marker_age: np.ndarray,
                       live: np.ndarray, live_age: float,
-                      prev_actions: np.ndarray,
+                      prev_actions: np.ndarray, ee_pos: np.ndarray,
                       marker_include_rot: bool) -> np.ndarray:
     """Match one historical state frame in SO101LiftEnv.
 
@@ -241,14 +242,17 @@ def build_state_frame(qpos: np.ndarray, qvel: np.ndarray, marker_pos: np.ndarray
     extra = np.array([0.0, 0.0, 0.0, LIFT_TASK_ID], dtype=np.float32)
     markers = (np.hstack([marker_pos, marker_rot]).flatten()
                if marker_include_rot else marker_pos.flatten())
-    return np.concatenate([qpos.astype(np.float32),
-                           qvel.astype(np.float32),
-                           markers.astype(np.float32),
-                           marker_age.astype(np.float32),
-                           live.astype(np.float32),
-                           np.array([live_age], dtype=np.float32),
-                           extra,
-                           prev_actions.flatten().astype(np.float32)]).astype(np.float32)
+    return np.concatenate([
+        qpos.astype(np.float32),
+        qvel.astype(np.float32),
+        markers.astype(np.float32),
+        marker_age.astype(np.float32),
+        live.astype(np.float32),
+        np.array([live_age], dtype=np.float32),
+        extra,
+        prev_actions.flatten().astype(np.float32),
+        ee_object_delta(ee_pos, live).astype(np.float32),
+    ]).astype(np.float32)
 
 
 def plot_rollout(out_path: Path, rows: list[dict], target_height: float,
@@ -851,6 +855,7 @@ class LiftRolloutSession:
             tick.live,
             tick.live_age,
             self.loop.prev_actions,
+            self.scene.data.site_xpos[self.scene.ee_site_id],
             self.config.marker_include_rot,
         )
         tapped = (self.history.reset(frame) if step == 0

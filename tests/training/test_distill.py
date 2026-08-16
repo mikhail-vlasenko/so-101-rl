@@ -15,12 +15,13 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.base_env import (
+    EE_OBJECT_DELTA_DIM,
     legacy_tag_actor_dim_for,
     obs_dim_for,
     priv_dim_for,
     state_dim_for,
 )
-from src.bps import bps_fingerprint
+from src.bps import BPS_OBS_DIM, bps_fingerprint
 from src.distill import DistillBuffer, _policy_outputs, distill, regress
 from src.lift_env import SO101LiftEnv
 from src.legacy_tag_env import LegacyTagActorObs
@@ -68,6 +69,36 @@ def test_actor_only_legacy_teacher_view_matches_checkpoint_layout(lift_cfg):
     assert teacher_obs.shape == (1, legacy_actor_dim)
     np.testing.assert_allclose(
         teacher_obs[0], venv.envs[0].legacy_tag_obs()[:legacy_actor_dim])
+    venv.close()
+
+
+def test_pre_ee_delta_teacher_view_removes_only_new_feature(lift_cfg):
+    """The migration view keeps tap-0 state, BPS, and critic tail byte-exact,
+    dropping only the final three values of the new state frame."""
+    venv = _lift_venv(lift_cfg)
+    student_obs = venv.reset()
+    prev_actions_n = int(lift_cfg.prev_actions_n)
+    include_rot = bool(lift_cfg.marker_include_rot)
+    state_dim = state_dim_for(prev_actions_n, include_rot)
+    actor_dim = obs_dim_for(prev_actions_n, include_rot)
+    priv_dim = priv_dim_for(include_rot)
+    legacy_actor_dim = legacy_tag_actor_dim_for(prev_actions_n, include_rot)
+    teacher_dim = actor_dim - EE_OBJECT_DELTA_DIM + priv_dim
+
+    validate_teacher_obs_dim(
+        "pre_ee_delta", teacher_dim, student_obs.shape[1], actor_dim,
+        priv_dim, legacy_actor_dim)
+    teacher_obs = teacher_observation(
+        venv, student_obs, "pre_ee_delta", state_dim, priv_dim,
+        legacy_actor_dim, teacher_dim)
+
+    expected = np.concatenate([
+        student_obs[:, :state_dim - EE_OBJECT_DELTA_DIM],
+        student_obs[:, state_dim:state_dim + BPS_OBS_DIM],
+        student_obs[:, -priv_dim:],
+    ], axis=1)
+    np.testing.assert_array_equal(teacher_obs, expected)
+    assert teacher_obs.shape == (1, teacher_dim)
     venv.close()
 
 
@@ -148,7 +179,7 @@ def test_regress_drives_student_toward_teacher(lift_cfg):
     student.policy.log_std.data.copy_(teacher.policy.log_std.data)
     params = [p for n, p in student.policy.named_parameters() if n != "log_std"]
     opt = torch.optim.Adam(params, lr=1e-3)
-    for _ in range(40):
+    for _ in range(50):
         regress(student, buf, epochs=1, batch_size=512, vf_coef=1.0,
                 optimizer=opt, device=device, rng=rng)
 

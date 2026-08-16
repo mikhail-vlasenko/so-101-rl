@@ -10,10 +10,13 @@ uses for supervision.
 
 import numpy as np
 
+from src.base_env import EE_OBJECT_DELTA_DIM
 from src.bps import BPS_OBS_DIM
 
 
-TEACHER_OBS_MODES = ("identical", "current", "privileged", "legacy_tag")
+TEACHER_OBS_MODES = (
+    "identical", "current", "pre_ee_delta", "privileged", "legacy_tag",
+)
 
 
 def validate_teacher_obs_dim(teacher_obs_mode: str, teacher_obs_dim: int,
@@ -33,6 +36,12 @@ def validate_teacher_obs_dim(teacher_obs_mode: str, teacher_obs_dim: int,
             "legacy_tag teacher view needs either the symmetric actor-only "
             "tag layout or its later asymmetric-critic form: "
             f"teacher {teacher_obs_dim} not in {valid_dims}")
+    elif teacher_obs_mode == "pre_ee_delta":
+        expected = single_actor_dim - EE_OBJECT_DELTA_DIM + priv_dim
+        assert teacher_obs_dim == expected, (
+            "pre_ee_delta teacher view needs the single-frame BPS layout "
+            "from before the EE-object delta was appended: "
+            f"teacher {teacher_obs_dim} != {expected}")
     else:
         assert teacher_obs_dim == single_actor_dim + priv_dim, (
             f"{teacher_obs_mode} teacher view needs a single-frame teacher "
@@ -46,9 +55,12 @@ def teacher_observation(venv, student_obs, teacher_obs_mode: str,
     """Build the checkpoint-shaped view of the current environment state."""
     if teacher_obs_mode == "identical":
         return student_obs
-    if teacher_obs_mode == "current":
+    if teacher_obs_mode in ("current", "pre_ee_delta"):
+        teacher_state_dim = state_dim
+        if teacher_obs_mode == "pre_ee_delta":
+            teacher_state_dim -= EE_OBJECT_DELTA_DIM
         return np.concatenate(
-            [student_obs[:, :state_dim],
+            [student_obs[:, :teacher_state_dim],
              student_obs[:, student_obs.shape[1] - priv_dim - BPS_OBS_DIM:
                          student_obs.shape[1] - priv_dim],
              student_obs[:, student_obs.shape[1] - priv_dim:]], axis=1)

@@ -17,8 +17,9 @@ slow_factor: 2
 render: true   # eval.py only: false for headless metric collection
 stream_port: null  # eval/show_starts: serve sim view as MJPEG on this port (web panel)
 # eval.py only: adapt the current env to a migration teacher's observation.
-# null evaluates a current BPS checkpoint; legacy_tag evaluates the final
-# pre-BPS tag policy family through the same bridge used by distillation.
+# null evaluates a current BPS checkpoint; pre_ee_delta evaluates a BPS
+# checkpoint from before the derived EE-object vector; legacy_tag evaluates
+# the final pre-BPS tag policy family through the distillation bridge.
 teacher_obs: null
 
 # Per-step joint-space delta (rad) when |action|=1. Shared across all envs so
@@ -177,6 +178,7 @@ marker_include_rot: false
 
 # Lag taps served as observation history (src/obs_history.py): the policy
 # input carries the state block at [t - tap] control ticks for each entry —
+# each state ends with FK EE position minus the held live sponge centroid —
 # geometric spacing per .claude/plans/obs_history_features.md, e.g.
 # [0, 4, 16, 48] ≈ 0/0.27/1.07/3.2 s at 15 Hz — while the privileged tail
 # and current BPS block each stay a single copy. Must start at 0, strictly
@@ -253,6 +255,10 @@ distill:
   #                sliced out of the student's lag-tapped obs — its own trained
   #                single-frame layout. The warm start for a history_taps
   #                migration; the teacher must be a single-frame checkpoint.
+  #   pre_ee_delta — teacher sees the current single-frame BPS layout with the
+  #                new final (EE - held live sponge centroid) vector removed.
+  #                Use this to migrate the last checkpoint from before that
+  #                derived feature was added.
   #   privileged — teacher sees the always-fresh-tag privileged view
   #                (SO101BaseEnv.privileged_obs), i.e. what a
   #                marker_always_visible=true policy sees, while the student

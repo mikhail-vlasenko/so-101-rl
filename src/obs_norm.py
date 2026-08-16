@@ -22,7 +22,14 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from src.base_env import JOINT_NAMES, MARKER_AGE_CAP_S, N_MARKERS, obs_dim_for, priv_dim_for
+from src.base_env import (
+    EE_OBJECT_DELTA_DIM,
+    JOINT_NAMES,
+    MARKER_AGE_CAP_S,
+    N_MARKERS,
+    obs_dim_for,
+    priv_dim_for,
+)
 from src.bps import BPS_DISTANCE_DIM
 from src.units import max_joint_speed_rad_s
 
@@ -128,6 +135,8 @@ def build_obs_norm(prev_actions_n: int, marker_include_rot: bool,
     scale.append(EXTRA_SCALE)
     center.append(np.zeros(prev_actions_n * n_joints))  # already in [-1, 1]
     scale.append(np.ones(prev_actions_n * n_joints))
+    center.append(np.zeros(EE_OBJECT_DELTA_DIM))
+    scale.append(POS_SCALE)
 
     # Current/held BPS block, included once outside history. Distances and
     # valid_fraction already live in [0,1].

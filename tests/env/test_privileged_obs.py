@@ -9,8 +9,9 @@ stale tags leaking in, or a desynced encoder read — silently corrupts every
 label.
 
 Obs layout is ``[one state frame | one current BPS block | privileged tail]``.
-Only arm markers, live centroid/age, and live-derived task extras differ in the
-always-fresh teacher view; BPS and the critic tail are shared.
+Only arm markers, live centroid/age, live-derived task extras, and the derived
+EE-object delta differ in the always-fresh teacher view; BPS and the critic
+tail are shared.
 """
 
 import numpy as np
@@ -19,6 +20,7 @@ from hydra import compose, initialize
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.base_env import (
+    EE_OBJECT_DELTA_DIM,
     RuntimeEnvConfig,
     legacy_tag_actor_dim_for,
     obs_dim_for,
@@ -35,6 +37,7 @@ LIVE_AGE = 23
 EXTRA = slice(24, 28)
 PREV_ACTIONS = slice(28, 34)
 _STATE_DIM = state_dim_for(1, False)
+EE_OBJECT_DELTA = slice(_STATE_DIM - EE_OBJECT_DELTA_DIM, _STATE_DIM)
 CENTER = slice(_STATE_DIM + 64, _STATE_DIM + 67)
 PRECISE_AGE = CENTER.stop
 MARKER_AGE_CAP_S = 1.0
@@ -132,6 +135,10 @@ def test_privileged_shares_encoder_and_prev_actions():
     assert np.array_equal(student[PREV_ACTIONS], priv[PREV_ACTIONS])
     # The tag region genuinely diverged (student stale, privileged fresh).
     assert not np.allclose(student[TAGS], priv[TAGS])
+    # Each view derives the delta from its own held/fresh live centroid.
+    np.testing.assert_allclose(
+        priv[EE_OBJECT_DELTA] - student[EE_OBJECT_DELTA],
+        student[LIVE_POS] - priv[LIVE_POS], atol=1e-7)
 
 
 def test_privileged_extra_uses_privileged_cube_on_pickplace():
