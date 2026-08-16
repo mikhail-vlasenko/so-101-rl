@@ -26,6 +26,7 @@ SUBSTEP = CONTROL_DT / 10.0
 # One-tick-scale camera config with a deterministic delay for exact assertions.
 CAM = {
     "frame_ms": 33.3,
+    "bps_frame_ms": 55.6,
     "marker_delay_ms": [45.0, 45.0],
     "live_delay_ms": [115.0, 115.0],
     "bps_delay_ms": [150.0, 150.0],
@@ -55,7 +56,7 @@ def _move_action():
 def _camera(frame_s, delay_range_s, jitter_s=0.0):
     """CameraSim with one common delay for schedule-only unit tests."""
     return CameraSim(
-        frame_s=frame_s,
+        frame_s=frame_s, bps_frame_s=frame_s,
         marker_delay_range_s=delay_range_s,
         live_delay_range_s=delay_range_s,
         bps_delay_range_s=delay_range_s,
@@ -68,7 +69,8 @@ def _run_camera(cam, rng, n_ticks=30):
     """Drive a CameraSim like the env does — state = its own timestamp, only
     the substeps needs_state claims get snapshotted — and return the newest
     consumed frame (== its captured state's time) at each control tick."""
-    frame = cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s).marker[0][1]
+    frame = cam.reset(
+        rng, 0.0, 0.0, 0.0, capture_fn=lambda s: s).marker[0][1]
     consumed = []
     t = 0.0
     for _ in range(n_ticks):
@@ -130,7 +132,7 @@ def test_snapshots_are_taken_per_capture_not_per_substep():
     frame_s = CAM["frame_ms"] * 1e-3
     cam = _camera(frame_s, (0.045, 0.045))
     rng = np.random.default_rng(7)
-    cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
+    cam.reset(rng, 0.0, 0.0, 0.0, capture_fn=lambda s: s)
     n_ticks, claimed, substeps = 60, 0, 0
     t = 0.0
     for _ in range(n_ticks):
@@ -146,6 +148,92 @@ def test_snapshots_are_taken_per_capture_not_per_substep():
     assert claimed < substeps / 4
 
 
+def test_bps_stream_is_bounded_below_camera_rate():
+    """BPS selects the real worker's 18 Hz subset of the 30 Hz frames."""
+    cam = CameraSim(
+        frame_s=0.0333, bps_frame_s=0.0556,
+        marker_delay_range_s=(0.0, 0.0),
+        live_delay_range_s=(0.0, 0.0),
+        bps_delay_range_s=(0.0, 0.0),
+        jitter_s=0.0, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    rng = np.random.default_rng(9)
+    cam.reset(rng, 0.0, 0.0, 0.0, capture_fn=lambda state: state)
+    marker_count = 0
+    bps_count = 0
+    dense_snapshots = 0
+    t = 0.0
+    for _ in range(150):
+        for _ in range(10):
+            t += SUBSTEP
+            if cam.needs_state(t, rng):
+                dense_snapshots += int(cam.record_bps)
+                cam.record(t, t)
+        deliveries = cam.observe(t, capture_fn=lambda state: state)
+        marker_count += len(deliveries.marker)
+        bps_count += len(deliveries.bps)
+
+    duration_s = 150 * CONTROL_DT
+    assert marker_count / duration_s == pytest.approx(30.0, abs=0.2)
+    assert bps_count / duration_s == pytest.approx(18.0, abs=0.2)
+    assert dense_snapshots == bps_count
+
+
+def test_bps_delivery_uses_its_selected_capture_snapshot():
+    """Dense geometry is frozen at capture, not rebuilt when delivered."""
+    cam = CameraSim(
+        frame_s=0.0333, bps_frame_s=0.0556,
+        marker_delay_range_s=(0.0, 0.0),
+        live_delay_range_s=(0.0, 0.0),
+        bps_delay_range_s=(0.150, 0.150),
+        jitter_s=0.0015, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+    rng = np.random.default_rng(11)
+    cam.reset(rng, 0.0, ("plain", 0.0), ("dense", 0.0),
+              capture_fn=lambda state: state)
+    t = 0.0
+    delivered = []
+    for _ in range(60):
+        for _ in range(10):
+            t += SUBSTEP
+            if cam.needs_state(t, rng):
+                kind = "dense" if cam.record_bps else "plain"
+                cam.record(t, (kind, t))
+        delivered.extend(cam.observe(t, capture_fn=lambda state: state).bps)
+
+    for capture_t, (kind, snapshot_t) in delivered:
+        assert kind == "dense", (capture_t, snapshot_t)
+        if capture_t <= 0.0:
+            continue  # reset reconstructs the static pre-episode scene
+        assert abs(snapshot_t - capture_t) <= SUBSTEP / 2 + 1e-9
+
+
+def test_bps_age_distribution_matches_clean_real_rollout():
+    """The bounded cadence and adjusted delay retain the clean rollout's
+    measured 174.1 ms mean / 204.6 ms p95 dense age."""
+    rng = np.random.default_rng(10)
+    ages = []
+    for _ in range(64):
+        cam = CameraSim(
+            frame_s=0.0333, bps_frame_s=0.0556,
+            marker_delay_range_s=(0.042, 0.052),
+            live_delay_range_s=(0.110, 0.140),
+            bps_delay_range_s=(0.140, 0.155),
+            jitter_s=0.0015, control_dt=CONTROL_DT, substep_s=SUBSTEP)
+        capture_t = cam.reset(
+            rng, 0.0, 0.0, 0.0, capture_fn=lambda state: state).bps[0][0]
+        t = 0.0
+        for _ in range(150):
+            for _ in range(10):
+                t += SUBSTEP
+                if cam.needs_state(t, rng):
+                    cam.record(t, t)
+            for delivered_t, _ in cam.observe(t, capture_fn=lambda state: state).bps:
+                capture_t = delivered_t
+            ages.append(t - capture_t)
+
+    assert np.mean(ages) == pytest.approx(0.1741, abs=0.006)
+    assert np.percentile(ages, 95) == pytest.approx(0.2046, abs=0.006)
+
+
 def test_consumed_frames_come_from_the_nearest_snapshot():
     """Sparse snapshotting must not degrade which state a frame is built from:
     every consumed capture still resolves to the recorded substep nearest its
@@ -153,7 +241,7 @@ def test_consumed_frames_come_from_the_nearest_snapshot():
     frame_s = CAM["frame_ms"] * 1e-3
     cam = _camera(frame_s, (0.045, 0.045), jitter_s=0.0015)
     rng = np.random.default_rng(8)
-    cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
+    cam.reset(rng, 0.0, 0.0, 0.0, capture_fn=lambda s: s)
     t = 0.0
     for _ in range(120):
         for _ in range(10):
@@ -170,7 +258,7 @@ def test_consumed_frames_come_from_the_nearest_snapshot():
 def test_camera_sim_delay_sampled_per_episode():
     """Each delay is sampled per episode; marker draws span their range."""
     cam = CameraSim(
-        frame_s=0.0333,
+        frame_s=0.0333, bps_frame_s=0.0556,
         marker_delay_range_s=(0.030, 0.060),
         live_delay_range_s=(0.070, 0.090),
         bps_delay_range_s=(0.100, 0.120),
@@ -178,7 +266,7 @@ def test_camera_sim_delay_sampled_per_episode():
     rng = np.random.default_rng(3)
     delays = []
     for _ in range(20):
-        cam.reset(rng, 0.0, 0.0, capture_fn=lambda s: s)
+        cam.reset(rng, 0.0, 0.0, 0.0, capture_fn=lambda s: s)
         delays.append(cam.pipeline_delay_s)
     delays = np.array(delays)
     assert delays.min() >= 0.030 and delays.max() <= 0.060
@@ -196,7 +284,7 @@ def test_camera_sim_reset_frame_ages_like_midstream():
     t0 = 5.0
     for _ in range(50):
         capture_t, _ = cam.reset(
-            rng, t0, 0.0, capture_fn=lambda s: s).marker[0]
+            rng, t0, 0.0, 0.0, capture_fn=lambda s: s).marker[0]
         age = t0 - capture_t
         assert delay_s - 1e-9 <= age < delay_s + frame_s + 1e-9, age
 
@@ -209,6 +297,7 @@ def test_default_config_has_cam_latency(cfg):
     lat = cfg.cam_latency
     assert lat is not None
     assert float(lat.frame_ms) > 0.0
+    assert float(lat.bps_frame_ms) >= float(lat.frame_ms)
     lo, hi = map(float, lat.marker_delay_ms)
     assert 0.0 < lo <= hi
     live_lo, live_hi = map(float, lat.live_delay_ms)
@@ -298,7 +387,10 @@ def test_object_ages_use_sam_and_dense_delay_windows(cfg):
     assert np.all(live_ages >= live_delay_s - 1e-6), live_ages.min()
     assert np.all(live_ages < live_delay_s + frame_s + 1e-6), live_ages.max()
     assert np.all(precise_ages >= bps_delay_s - 1e-6), precise_ages.min()
-    assert np.all(precise_ages < bps_delay_s + frame_s + 1e-6), precise_ages.max()
+    bps_frame_s = CAM["bps_frame_ms"] * 1e-3
+    assert np.all(precise_ages < bps_delay_s + bps_frame_s + frame_s + 1e-6), \
+        precise_ages.max()
+    assert len(env._bps_eligible_capture_times) <= 8
 
 
 def test_qpos_is_fresh_under_camera_latency(cfg):

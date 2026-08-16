@@ -594,7 +594,8 @@ class SO101BaseEnv(SO101ArmEnv):
         # When false the marker rotation vectors are dropped from the obs (positions
         # only). Changes obs dim — see obs_dim_for / conf/config.yaml:marker_include_rot.
         self.marker_include_rot = bool(cfg.marker_include_rot)
-        # Camera latency model (sim2real): dict with frame_ms, marker_delay_ms for
+        # Camera latency model (sim2real): dict with frame_ms, bps_frame_ms,
+        # marker_delay_ms for
         # AprilTag markers, live_delay_ms for the dual-SAM centroid,
         # bps_delay_ms for dense stereo, and jitter_ms (see conf/dr/full.yaml),
         # or None for a synchronous zero-latency camera. Stored raw here; the
@@ -719,6 +720,7 @@ class SO101BaseEnv(SO101ArmEnv):
         else:
             self._camera = CameraSim(
                 frame_s=float(self.cam_latency["frame_ms"]) * 1e-3,
+                bps_frame_s=float(self.cam_latency["bps_frame_ms"]) * 1e-3,
                 marker_delay_range_s=(
                     float(self.cam_latency["marker_delay_ms"][0]) * 1e-3,
                     float(self.cam_latency["marker_delay_ms"][1]) * 1e-3),
@@ -775,7 +777,7 @@ class SO101BaseEnv(SO101ArmEnv):
         Visual only (site rgba) — no effect on physics or observations."""
         set_marker_render_colors(self.model, self.marker_site_ids, detected)
 
-    def _capture_camera_state(self):
+    def _capture_camera_state(self, include_bps: bool = True):
         """CamState snapshot of the current MjData — recorded per substep so
         CameraSim can capture frames at any past instant of the tick."""
         marker_pos, marker_rot = marker_world_poses(self.data, self.marker_site_ids)
@@ -791,9 +793,11 @@ class SO101BaseEnv(SO101ArmEnv):
             if centroid is not None:
                 vis_centroid[i] = centroid
                 seen[i] = True
-        bps_capture = self._bps_generator.capture(
-            self.model, self.data, self.cube_cams, self.cube_geom_id,
-            self.cube_body_id, self.cube_half_extents, self.np_random)
+        bps_capture = None
+        if include_bps:
+            bps_capture = self._bps_generator.capture(
+                self.model, self.data, self.cube_cams, self.cube_geom_id,
+                self.cube_body_id, self.cube_half_extents, self.np_random)
         return CamState(marker_pos=marker_pos, marker_rot=marker_rot,
                         marker_normal=marker_world_normals(self.data, self.marker_site_ids),
                         cube_center=self.data.geom_xpos[self.cube_geom_id].copy(),
@@ -938,7 +942,13 @@ class SO101BaseEnv(SO101ArmEnv):
     def _ingest_bps_frame(self, capture_t: float, frame: CamFrame) -> None:
         """Publish dense stereo if its earlier live result opened the gate."""
         eligible = capture_t in self._bps_eligible_capture_times
-        self._bps_eligible_capture_times.discard(capture_t)
+        # Marker/live consume every camera frame, while the bounded dense
+        # worker selects only a subset. Once a selected result arrives, older
+        # eligibility records can never produce a BPS delivery.
+        self._bps_eligible_capture_times = {
+            eligible_t for eligible_t in self._bps_eligible_capture_times
+            if eligible_t > capture_t
+        }
         # Reset reconstructs already-in-flight frames from the static
         # pre-episode scene. Their live-stage gate ran before episode time, so
         # evaluate it against the seeded static history when the result lands.
@@ -1399,8 +1409,9 @@ class SO101BaseEnv(SO101ArmEnv):
         self._bps_eligible_capture_times.clear()
         self._episode_start_t = self.data.time
         deliveries = self._camera.reset(
-            self.np_random, self.data.time, self._capture_camera_state(),
-            self._process_frame)
+            self.np_random, self.data.time,
+            self._capture_camera_state(include_bps=False),
+            self._capture_camera_state(include_bps=True), self._process_frame)
         marker_capture_t, marker_frame = deliveries.marker[0]
         live_capture_t, live_frame = deliveries.live[0]
         bps_capture_t, bps_frame = deliveries.bps[0]
@@ -1430,7 +1441,9 @@ class SO101BaseEnv(SO101ArmEnv):
         # dominant cost of a substep), so only do it for the substeps the frame
         # schedule will actually capture from.
         if self._camera.needs_state(self.data.time, self.np_random):
-            self._camera.record(self.data.time, self._capture_camera_state())
+            self._camera.record(
+                self.data.time,
+                self._capture_camera_state(include_bps=self._camera.record_bps))
 
     def step(self, action):
         self.step_count += 1
@@ -1458,8 +1471,8 @@ class SO101BaseEnv(SO101ArmEnv):
         info["task_name"] = self.TASK_NAME
 
         # Advance every camera-derived stream to this observation instant.
-        # All three reuse the same capture/noise sample, but become available
-        # after their measured marker, dual-SAM, and dense-stereo delays.
+        # Marker/live reuse every capture/noise sample; BPS receives the
+        # separately bounded dense-worker subset after its longer delay.
         deliveries = self._camera.observe(self.data.time, self._process_frame)
         for capture_t, frame in deliveries.marker:
             self._ingest_marker_frame(capture_t, frame)

@@ -3,6 +3,7 @@
 import time
 
 import numpy as np
+import pytest
 from hydra import compose, initialize
 from stable_baselines3.common.vec_env import DummyVecEnv
 
@@ -38,3 +39,38 @@ def test_vectorized_bps_geometry_path_stays_above_rendering_floor():
         assert transitions_per_s > 15.0, transitions_per_s
     finally:
         venv.close()
+
+
+def test_light_dr_constructs_dense_clouds_at_worker_rate(monkeypatch):
+    with initialize(config_path="../../conf", version_base=None):
+        cfg = compose(config_name="config", overrides=["env=lift", "dr=light"])
+    env = SO101LiftEnv(
+        env_cfg=cfg.lift_env,
+        xml_path="so101/scene_lift.xml",
+        cfg=runtime_cfg_from_hydra(cfg),
+    )
+    original_capture = env._bps_generator.capture
+    capture_times = []
+
+    def count_capture(model, data, cameras, cube_geom_id, cube_body_id,
+                      half_extents, rng):
+        capture_times.append(float(data.time))
+        return original_capture(
+            model, data, cameras, cube_geom_id, cube_body_id, half_extents, rng)
+
+    monkeypatch.setattr(env._bps_generator, "capture", count_capture)
+    try:
+        env.reset(seed=123)
+        action = np.zeros(6, dtype=np.float32)
+        n_steps = 60
+        for _ in range(n_steps):
+            env.step(action)
+
+        duration_s = n_steps * env._step_dt
+        # One boot capture plus the measured 18 Hz worker schedule, allowing
+        # one capture of phase slack at either end.
+        expected = 1.0 + duration_s / env._camera.bps_frame_s
+        assert len(capture_times) == pytest.approx(expected, abs=2.0)
+        assert len(capture_times) < duration_s / env._camera.frame_s * 0.7
+    finally:
+        env.close()

@@ -66,6 +66,11 @@ synthetic_cloud:
 # the frame schedule adds capture/control phase staleness on top.
 cam_latency:
   frame_ms: 33.3           # C922 @ 30 fps (probe run: 30.0 fps, p95 gap 36 ms)
+  # rollout_lift_1786825926.csv completed 252 dense refreshes in 14.0 s
+  # (18.0 Hz). The 27.3 ms mean dense worker time was below the tracked-pair
+  # interval, so the producer cadence was the sustained bound; transient
+  # backlog still keeps only the newest pair in real/rollout/object_obs.py.
+  bps_frame_ms: 55.6
   # Measured by sysid/probe_cam_latency.py (run probe_1783181402, driven
   # wrist_flex sine, residual 0.9 mm): capture -> cap.read() tau = 39.5 ms,
   # + ~7 ms AprilTag detect = ~46.5 ms capture -> pose available. Range covers
@@ -86,7 +91,10 @@ cam_latency:
   # On the clean continuously-refreshed run, dense BPS age was 174.1 ms mean /
   # 204.6 ms p95. StereoSGBM/BPS added 27.3 ms mean / 31.2 ms p95 to the
   # live-centroid path; the remaining mean publication overhead was ~1 ms.
-  bps_delay_ms: [145.0, 175.0]
+  # The separate 18 Hz capture phase contributes more age than the 30 Hz camera
+  # phase. This reduced processing range keeps the composed simulated age at
+  # the measured 174.1 ms mean / 204.6 ms p95.
+  bps_delay_ms: [140.0, 155.0]
   jitter_ms: 1.5
 
 # AprilTag detector dropout: per-frame probability a geometrically-visible tag is

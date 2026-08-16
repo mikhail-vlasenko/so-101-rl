@@ -35,9 +35,10 @@ synthetic_cloud:
 # Same as dr=full: latency is measured hardware timing, not a difficulty knob.
 cam_latency:
   frame_ms: 33.3
+  bps_frame_ms: 55.6
   marker_delay_ms: [42.0, 52.0]
   live_delay_ms: [110.0, 140.0]
-  bps_delay_ms: [145.0, 175.0]
+  bps_delay_ms: [140.0, 155.0]
   jitter_ms: 1.5
 
 marker_dropout:
