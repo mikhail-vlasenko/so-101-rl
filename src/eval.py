@@ -94,6 +94,8 @@ def main(cfg: DictConfig):
 
     drag_ratios = []
     successes = []
+    grasp_ratios = []
+    two_jaw_contact_ratios = []
     try:
         for ep in range(episodes):
             seed = (base_seed + ep) if base_seed is not None else int(np.random.SeedSequence().entropy % (2**31))
@@ -120,7 +122,11 @@ def main(cfg: DictConfig):
                 extras += f"  placed={info['placed']}"
             elif "lift_success" in info:
                 successes.append(float(info["lift_success"]))
+                grasp_ratios.append(info["grasp_ratio"])
+                two_jaw_contact_ratios.append(info["two_jaw_contact_ratio"])
                 extras += f"  lift_success={info['lift_success']}"
+                extras += f"  grasp={info['grasp_ratio']:.3f}"
+                extras += f"  two_jaw={info['two_jaw_contact_ratio']:.3f}"
             if "max_cube_height" in info:
                 extras += f"  max_height={info['max_cube_height']:.3f}"
             if "cube_drag_ratio" in info:
@@ -129,6 +135,10 @@ def main(cfg: DictConfig):
             print(f"Episode {ep + 1}/{episodes}: return={total_reward:.2f}{extras}")
         if successes:
             print(f"\nSuccess rate over {len(successes)} episodes: {np.mean(successes):.3f}")
+        if grasp_ratios:
+            print(f"Mean proper grasp_ratio: {np.mean(grasp_ratios):.3f}")
+            print(f"Mean raw two_jaw_contact_ratio: "
+                  f"{np.mean(two_jaw_contact_ratios):.3f}")
         if drag_ratios:
             print(f"Mean cube_drag_ratio over {len(drag_ratios)} episodes: {np.mean(drag_ratios):.3f}")
     except KeyboardInterrupt:

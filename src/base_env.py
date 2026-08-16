@@ -37,6 +37,7 @@ from src.sim_bps import (
     clean_synthetic_cloud_config,
 )
 from src.surface_cloud import (
+    OCCLUDER_GEOMGROUP as _OCCLUDER_GEOMGROUP,
     transform_box_surface_points_world,
     unit_box_surface_points,
     visible_surface as cube_visible_surface,
@@ -121,6 +122,46 @@ N_MARKERS = len(MARKER_SITE_NAMES)
 # it, see TODO.md). MARKER_AGE_CAP_S itself lives in src/shape_obs.py (shared
 # with the real pipeline) and is re-exported here for the marker path.
 CUBE_TAG_SITE_NAME = "cube_tag"
+
+
+def _dominant_loaded_cube_face(
+        cube_rotation: np.ndarray,
+        world_normals: list[np.ndarray],
+        normal_forces: list[float],
+) -> tuple[int, int] | None:
+    """Return the cube face carrying most of one jaw's normal contact load.
+
+    A face is ``(axis, sign)`` in the cube-local frame.  Summing load per face
+    makes the result insensitive to the number of small collision geoms used
+    to approximate each jaw.  Unloaded/touching-only contacts do not constitute
+    a grip.
+    """
+    if len(world_normals) != len(normal_forces):
+        raise ValueError("world_normals and normal_forces must have equal length")
+    face_loads = np.zeros((3, 2))
+    for world_normal, normal_force in zip(world_normals, normal_forces):
+        if normal_force < 0.0:
+            raise ValueError("normal contact force must be non-negative")
+        local_normal = cube_rotation.T @ world_normal
+        axis = int(np.argmax(np.abs(local_normal)))
+        sign_index = int(local_normal[axis] > 0.0)
+        face_loads[axis, sign_index] += normal_force
+    flat_index = int(np.argmax(face_loads))
+    axis, sign_index = np.unravel_index(flat_index, face_loads.shape)
+    if face_loads[axis, sign_index] <= 0.0:
+        return None
+    return int(axis), 1 if sign_index else -1
+
+
+def _cube_faces_opposed(
+        fixed_face: tuple[int, int] | None,
+        moving_face: tuple[int, int] | None,
+) -> bool:
+    """Whether two loaded jaw contacts act on opposite faces of the box."""
+    return (fixed_face is not None
+            and moving_face is not None
+            and fixed_face[0] == moving_face[0]
+            and fixed_face[1] == -moving_face[1])
 
 # Fixed cameras in so101.xml standing in for the two physical webcams: tag_cam
 # (main) watches the AprilTags, and together with tag_cam_aux drives the
@@ -1245,6 +1286,48 @@ class SO101BaseEnv(SO101ArmEnv):
         """Check if cube_geom is in contact with both jaws simultaneously."""
         return self._n_jaw_contacts() == 2
 
+    def _has_opposed_gripper_contact(self):
+        """Whether both jaws carry load on opposite faces of the sponge.
+
+        Two jaws touching adjacent faces at one corner is not a force-closure
+        pinch, even though the sponge's high friction can make it lift in sim.
+        MuJoCo's contact normal points from geom1 to geom2; orient it outward
+        from the cube, transform it into the cube frame, and compare the
+        dominant load-bearing face for each jaw.
+        """
+        fixed_normals = []
+        fixed_forces = []
+        moving_normals = []
+        moving_forces = []
+        wrench = np.zeros(6)
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            if contact.geom1 == self.cube_geom_id:
+                other = contact.geom2
+                cube_normal = contact.frame[:3]
+            elif contact.geom2 == self.cube_geom_id:
+                other = contact.geom1
+                cube_normal = -contact.frame[:3]
+            else:
+                continue
+            if other not in self.gripper_geom_ids:
+                continue
+            mujoco.mj_contactForce(self.model, self.data, i, wrench)
+            normal_force = abs(float(wrench[0]))
+            if other in self.fixed_jaw_geom_ids:
+                fixed_normals.append(cube_normal.copy())
+                fixed_forces.append(normal_force)
+            else:
+                moving_normals.append(cube_normal.copy())
+                moving_forces.append(normal_force)
+
+        cube_rotation = self.data.geom_xmat[self.cube_geom_id].reshape(3, 3)
+        fixed_face = _dominant_loaded_cube_face(
+            cube_rotation, fixed_normals, fixed_forces)
+        moving_face = _dominant_loaded_cube_face(
+            cube_rotation, moving_normals, moving_forces)
+        return _cube_faces_opposed(fixed_face, moving_face)
+
     def _arm_cube_contact_force(self):
         """Sum of normal contact force magnitudes (N) between any arm geom and the cube."""
         total = 0.0
@@ -1269,14 +1352,14 @@ class SO101BaseEnv(SO101ArmEnv):
         return float(np.linalg.norm(w))
 
     def _detect_grasp(self):
-        """Grasp = cube close to EE + gripper closing + contact."""
+        """Grasp = cube close to EE + gripper closing + opposing jaw contact."""
         ee_pos = self._get_ee_pos()
         cube_pos = self._get_cube_pos()
         dist = np.linalg.norm(ee_pos - cube_pos)
         gripper_val = self.data.qpos[self.joint_ids[self.gripper_idx]]
         return (dist < 0.05
                 and gripper_val < 0.3
-                and self._has_gripper_contact())
+                and self._has_opposed_gripper_contact())
 
     def _gripper_closedness(self):
         """Fraction the gripper is closed, in [0, 1]. 0 = fully open, 1 = fully closed.
@@ -1456,6 +1539,7 @@ class SO101BaseEnv(SO101ArmEnv):
         self.step_count = 0
         self._max_cube_height = cube_pos[2]
         self._grasp_steps = 0
+        self._two_jaw_contact_steps = 0
         self._floor_contact_steps = 0
         self._cube_drag_steps = 0
         self._markers_hidden_total = 0
@@ -1546,6 +1630,8 @@ class SO101BaseEnv(SO101ArmEnv):
         grasped = self._detect_grasp()
         if grasped:
             self._grasp_steps += 1
+        if self._has_gripper_contact():
+            self._two_jaw_contact_steps += 1
         floor_contact = self._has_floor_contact() if self.floor_contact_penalty else False
         if floor_contact:
             self._floor_contact_steps += 1
@@ -1583,6 +1669,10 @@ class SO101BaseEnv(SO101ArmEnv):
             # whether the policy is on the path at all.
             info["ever_grasped"] = float(self._grasp_steps > 0)
             info["grasp_ratio"] = self._grasp_steps / self.step_count
+            # Compare this raw two-jaw contact ratio with grasp_ratio (which
+            # requires opposing loaded faces) to expose corner-pinch shortcuts.
+            info["two_jaw_contact_ratio"] = \
+                self._two_jaw_contact_steps / self.step_count
             if self.floor_contact_penalty:
                 info["floor_contact_ratio"] = self._floor_contact_steps / self.step_count
             info["cube_drag_ratio"] = self._cube_drag_steps / self.step_count

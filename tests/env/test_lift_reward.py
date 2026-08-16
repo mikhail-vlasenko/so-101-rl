@@ -3,7 +3,11 @@
 import numpy as np
 import pytest
 
-from src.base_env import RuntimeEnvConfig
+from src.base_env import (
+    RuntimeEnvConfig,
+    _cube_faces_opposed,
+    _dominant_loaded_cube_face,
+)
 from src.lift_env import (
     SO101LiftEnv, CUBE_MOTION_COEFF, CUBE_MOTION_DEADZONE,
     HEIGHT_PROGRESS_COEFF, GRASP_HOLD_REWARD, LIFT_BONUS, TIME_PENALTY,
@@ -38,6 +42,20 @@ def test_env_resets_and_steps():
     for _ in range(5):
         obs, reward, term, trunc, info = env.step(env.action_space.sample())
         assert np.isfinite(reward)
+
+
+def test_episode_info_separates_two_jaw_contact_from_proper_grasp(monkeypatch):
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
+    env.reset(seed=0)
+    env.step_count = env.max_steps - 1
+    monkeypatch.setattr(env, "_detect_grasp", lambda: False)
+    monkeypatch.setattr(env, "_has_gripper_contact", lambda: True)
+
+    _, _, _, truncated, info = env.step(np.zeros(6, dtype=np.float32))
+
+    assert truncated
+    assert info["grasp_ratio"] == 0.0
+    assert info["two_jaw_contact_ratio"] == pytest.approx(1.0 / env.max_steps)
 
 
 def test_height_progress_gated_on_grasp(monkeypatch):
@@ -155,23 +173,68 @@ def test_cube_motion_penalty_pregrasp(monkeypatch):
 
 
 def test_grasp_contact_ladder_pregrasp(monkeypatch):
-    """Pre-grasp reward rises with jaw contact: touch one jaw, then close on both."""
+    """Pre-grasp reward rises from one jaw to a closed opposing-face pinch."""
     env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     monkeypatch.setattr(env, "_gripper_closedness", lambda: 1.0)
     kwargs = dict(ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
                   ee_cube_dist=0.02, grasped=False, floor_contact=False)
 
-    def step_with(n_jaw):
+    def step_with(n_jaw, opposed=False):
         env._prev_cube_pos = np.array([0.20, 0.0, 0.05])  # stationary: no motion penalty
         monkeypatch.setattr(env, "_n_jaw_contacts", lambda: n_jaw)
+        monkeypatch.setattr(env, "_has_opposed_gripper_contact", lambda: opposed)
         r, _, _ = env._compute_step(**kwargs)
         return r
 
-    r0, r1, r2 = step_with(0), step_with(1), step_with(2)
-    # One jaw earns the contact reward; both jaws additionally earn the close reward.
+    r0, r1 = step_with(0), step_with(1)
+    r_corner = step_with(2, opposed=False)
+    r_opposed = step_with(2, opposed=True)
+    # A corner pinch earns only the generic contact rung. The close reward is
+    # reserved for two jaws loading opposite faces.
     assert r1 == pytest.approx(r0 + JAW_CONTACT_REWARD)
-    assert r2 == pytest.approx(r0 + JAW_CONTACT_REWARD + GRIPPER_CLOSE_COEFF)  # closedness=1
+    assert r_corner == pytest.approx(r1)
+    assert r_opposed == pytest.approx(
+        r0 + JAW_CONTACT_REWARD + GRIPPER_CLOSE_COEFF)  # closedness=1
+
+
+def test_loaded_contact_faces_are_classified_in_cube_frame():
+    """Jaw contact quality follows the sponge faces, including under rotation."""
+    angle = np.pi / 3.0
+    cube_rotation = np.array([
+        [np.cos(angle), -np.sin(angle), 0.0],
+        [np.sin(angle), np.cos(angle), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    world_pos_x = cube_rotation @ np.array([1.0, 0.0, 0.0])
+    world_neg_x = cube_rotation @ np.array([-1.0, 0.0, 0.0])
+    world_pos_y = cube_rotation @ np.array([0.0, 1.0, 0.0])
+
+    pos_x_face = _dominant_loaded_cube_face(
+        cube_rotation, [world_pos_x, world_pos_y], [4.0, 1.0])
+    neg_x_face = _dominant_loaded_cube_face(
+        cube_rotation, [world_neg_x], [3.0])
+    pos_y_face = _dominant_loaded_cube_face(
+        cube_rotation, [world_pos_y], [3.0])
+
+    assert pos_x_face == (0, 1)
+    assert neg_x_face == (0, -1)
+    assert _cube_faces_opposed(pos_x_face, neg_x_face)
+    assert not _cube_faces_opposed(pos_x_face, pos_y_face)
+    assert not _cube_faces_opposed(pos_x_face, pos_x_face)
+
+
+def test_detect_grasp_rejects_adjacent_face_corner_pinch(monkeypatch):
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
+    env.reset(seed=0)
+    cube_pos = env._get_cube_pos().copy()
+    monkeypatch.setattr(env, "_get_ee_pos", lambda: cube_pos.copy())
+    env.data.qpos[env.joint_ids[env.gripper_idx]] = 0.0
+
+    monkeypatch.setattr(env, "_has_opposed_gripper_contact", lambda: False)
+    assert not env._detect_grasp()
+    monkeypatch.setattr(env, "_has_opposed_gripper_contact", lambda: True)
+    assert env._detect_grasp()
 
 
 def test_poke_force_penalty_pregrasp(monkeypatch):

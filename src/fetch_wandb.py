@@ -28,7 +28,8 @@ PROJECT = "robot-arm"
 METRIC = "rollout/lift/success_rate"             # PRIMARY, higher is better
 LADDER_METRICS = (
     ("rollout/lift/ever_grasped", "higher=better, leads success"),
-    ("rollout/lift/grasp_ratio", "higher=better, grasp stability"),
+    ("rollout/lift/grasp_ratio", "higher=better, opposing-face grasp stability"),
+    ("rollout/lift/two_jaw_contact_ratio", "compare with grasp_ratio; excess is corner contact"),
     ("rollout/lift/mean_max_cube_height", "higher=better, leads grasp"),
     ("rollout/lift/mean_ep_length", "diagnostic; pinned at max_steps until success>0"),
 )

@@ -25,8 +25,10 @@ LIFT_BONUS = 15.0
 # Contact-quality bridge reach -> grasp (the gradient out of the local optima).
 # Both rungs are gated on real cube↔jaw contact so the bonus can't be farmed by
 # shoving the sponge with a closed gripper near it (which is what proximity-only
-# shaping produced). Only horizontal flinging is penalized; gentle grasp contact
-# is free.
+# shaping produced). The close rung and every proper-grasp reward additionally
+# require load on opposing sponge faces, so a high-friction corner pinch cannot
+# solve the task. Only horizontal flinging is penalized; gentle grasp contact is
+# free.
 JAW_CONTACT_REWARD = 0.05        # one+ gripper jaw touching the cube, pre-grasp
 GRIPPER_CLOSE_COEFF = 0.05       # per unit closedness, only once BOTH jaws straddle the cube
 CUBE_MOTION_COEFF = -1.0         # per m/s of horizontal cube speed past the deadzone, pre-grasp
@@ -43,7 +45,7 @@ class SO101LiftEnv(SO101BaseEnv):
     def _parse_config(self, cfg):
         self.target_height = float(cfg["target_height"])
         # Careful-behavior shaping (floor avoidance + gentle grasp). Owned by the
-        # `shaping` config group (conf/shaping/{full,none}.yaml); zeroed for the
+        # `shaping` config group (conf/shaping/{full,light,none}.yaml); zeroed for the
         # from-scratch stage so it can't block learning to grasp at all. Each term
         # is gated on its coefficient below, so `shaping=none` skips the extra work.
         self.floor_proximity_thresh = float(cfg["floor_proximity_thresh"])
@@ -72,7 +74,7 @@ class SO101LiftEnv(SO101BaseEnv):
             n_jaw = self._n_jaw_contacts()
             if n_jaw >= 1:
                 reward += JAW_CONTACT_REWARD
-            if n_jaw == 2:
+            if n_jaw == 2 and self._has_opposed_gripper_contact():
                 reward += GRIPPER_CLOSE_COEFF * self._gripper_closedness()
             # Gentle approach: penalize hard pokes and rolling the sponge over,
             # pre-grasp only (after grasp the cube rides with the gripper).
