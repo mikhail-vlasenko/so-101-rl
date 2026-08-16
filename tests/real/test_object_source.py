@@ -264,6 +264,8 @@ def test_processor_treats_too_few_points_as_measurement_miss(monkeypatch):
 
 def test_pending_dense_job_is_replaced_by_newest_pair():
     source = ObjectSource.__new__(ObjectSource)
+    source._active = threading.Event()
+    source._active.set()
     source._job_condition = threading.Condition()
     source._job_generation = 0
     source._job = None
@@ -279,6 +281,35 @@ def test_pending_dense_job_is_replaced_by_newest_pair():
     assert generation == 2
     assert job.capture_t == 2.0
     assert not job.frames["main"].flags.writeable
+
+
+def test_pause_discards_dense_work_and_requires_fresh_rig_validation():
+    source = ObjectSource.__new__(ObjectSource)
+    source._active = threading.Event()
+    source._active.set()
+    source._stop = threading.Event()
+    source._state_lock = threading.Lock()
+    source._rig_validated = True
+    source._job_condition = threading.Condition()
+    source._job_generation = 1
+    source._job = (1, _job())
+
+    source.pause()
+
+    assert not source._active.is_set()
+    assert not source._rig_validated
+    assert source._job is None
+
+    frames = {name: np.zeros((2, 2, 3), dtype=np.uint8)
+              for name in ("main", "aux")}
+    masks = {name: np.ones((2, 2), dtype=bool)
+             for name in ("main", "aux")}
+    source._queue_dense_job(2.0, frames, masks, np.eye(4))
+    assert source._job is None
+
+    source.resume()
+    source._queue_dense_job(3.0, frames, masks, np.eye(4))
+    assert source._job[1].capture_t == 3.0
 
 
 def test_worker_exception_is_rethrown_by_public_reads():

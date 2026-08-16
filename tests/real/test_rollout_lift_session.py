@@ -177,9 +177,11 @@ def test_interrupted_episode_returns_to_prompt(monkeypatch):
         EpisodeResult([], interrupted=False, viewer_closed=False),
     ))
     prepared = []
+    paused = []
     saved = []
     session._prompt_for_episode = lambda episode: next(prompts)
     session._prepare_camera_episode = lambda: prepared.append(True)
+    session._pause_camera_pipeline = lambda: paused.append(True)
     session._run_episode = lambda stopped: next(results)
     session._save_episode = lambda rows, episode: saved.append(episode)
     monkeypatch.setattr(
@@ -192,4 +194,46 @@ def test_interrupted_episode_returns_to_prompt(monkeypatch):
     session.run()
 
     assert len(prepared) == 2
+    assert len(paused) == 2
     assert saved == [0, 1]
+
+
+def test_camera_pipeline_resumes_for_validation_and_pauses_at_prompt():
+    calls = []
+
+    class Markers:
+        def resume(self):
+            calls.append("markers resume")
+
+        def warmup(self):
+            calls.append("markers warmup")
+            return 0.0
+
+        def pause(self):
+            calls.append("markers pause")
+
+    class Object:
+        def resume(self):
+            calls.append("object resume")
+
+        def prepare_episode(self):
+            calls.append("object prepare")
+
+        def pause(self):
+            calls.append("object pause")
+
+    session = LiftRolloutSession.__new__(LiftRolloutSession)
+    session.camera_markers = Markers()
+    session.camera_object = Object()
+
+    session._prepare_camera_episode()
+    session._pause_camera_pipeline()
+
+    assert calls == [
+        "markers resume",
+        "object resume",
+        "markers warmup",
+        "object prepare",
+        "object pause",
+        "markers pause",
+    ]

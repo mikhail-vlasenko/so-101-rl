@@ -3,6 +3,7 @@ measurement: losing the tag to an occluding sponge or arm must not stale every
 arm marker at once (real/rollout/marker_obs.CameraMarkerSource._poses_to_base).
 """
 
+import threading
 import time
 
 import numpy as np
@@ -144,3 +145,20 @@ def test_stereo_source_holds_last_fused_pose_when_both_views_lose_tag():
     np.testing.assert_allclose(held[0], pos[0])
     np.testing.assert_array_equal(visible, [False, False])
     assert held_age[0] >= age[0]
+
+
+def test_marker_processing_can_pause_without_discarding_detector_state():
+    source = object.__new__(CameraMarkerSource)
+    source._active = threading.Event()
+    source._active.set()
+    source._stop = threading.Event()
+
+    source.pause()
+    assert not source._active.is_set()
+
+    source.resume()
+    assert source._active.is_set()
+
+    source._stop.set()
+    with pytest.raises(RuntimeError, match="stopped"):
+        source.resume()

@@ -19,11 +19,12 @@ Setup, safety gating, and per-tick command shaping (training-matched
 quantization, raw clamp, sub-target streaming, --slow time dilation) all live
 in real.rollout.rollout_common — this script owns only observation construction,
 termination, and plots. --execute is OFF by default; Ctrl-C disables torque.
-In camera-mode ``--interactive``, the process keeps its model and camera stack
-warm, revalidates the stereo placement before every episode, and runs another
-episode whenever Enter is pressed. A failed initial object prompt asks for Enter
-to retry. At the warm prompt, ``e`` switches the next episode between execute
-and dry-run while preserving the CLI's initial mode, and ``r`` parks the arm
+In camera-mode ``--interactive``, the process keeps its models and cameras
+open but pauses vision inference at the prompt. It resumes the workers and
+revalidates the stereo placement before every episode, then runs whenever
+Enter is pressed. A failed initial object prompt asks for Enter to retry. At
+the warm prompt, ``e`` switches the next episode between execute and dry-run
+while preserving the CLI's initial mode, and ``r`` parks the arm
 when execute mode is selected. A normally completed execute episode also
 gently parks at the folded rest pose before disabling torque. Ctrl-C during an
 episode or rest move stops immediately and disables torque; an interrupted
@@ -635,6 +636,7 @@ class LiftRolloutSession:
         if not self._start_object_source():
             return False
         if self.args.interactive:
+            self._pause_camera_pipeline()
             print("\nWarm rollout session ready; torque is disabled.")
         return True
 
@@ -678,6 +680,7 @@ class LiftRolloutSession:
             result = self._run_episode(stopped)
             if self.args.interactive:
                 signal.signal(signal.SIGINT, signal.default_int_handler)
+                self._pause_camera_pipeline()
             self._save_episode(result.rows, episode_index)
 
             if result.viewer_closed or not self.args.interactive:
@@ -759,9 +762,17 @@ class LiftRolloutSession:
     def _prepare_camera_episode(self) -> None:
         assert self.camera_markers is not None
         assert self.camera_object is not None
+        self.camera_markers.resume()
+        self.camera_object.resume()
         marker_warmup_s = self.camera_markers.warmup()
         print(f"episode marker anchors ready after {marker_warmup_s:.2f}s")
         self.camera_object.prepare_episode()
+
+    def _pause_camera_pipeline(self) -> None:
+        assert self.camera_markers is not None
+        assert self.camera_object is not None
+        self.camera_object.pause()
+        self.camera_markers.pause()
 
     def _run_episode(self, stopped: dict) -> EpisodeResult:
         rows: list[dict] = []

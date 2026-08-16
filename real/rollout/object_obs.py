@@ -2,9 +2,11 @@
 
 ``ObjectSource`` is a consumer of the existing :mod:`real.rollout.frame_bus`;
 it never opens a camera and therefore cannot contend with the arm-marker
-consumer.  SAM3 remains resident on the GPU after the initial text prompt,
-while one SAM2 tracker per view follows the sponge at camera rate.  The mask
-centroids provide the held live position and its static gate.
+consumer.  SAM3 and both SAM2 trackers remain resident on the GPU after the
+initial text prompt. During an active episode, one SAM2 tracker per view
+follows the sponge at camera rate; interactive rollouts pause inference while
+waiting at the warm prompt. The mask centroids provide the held live position
+and its static gate.
 
 When that gate opens, the newest eligible full-resolution frame pair replaces
 any older pending pair.  A separate CPU worker rectifies the images and masks,
@@ -291,6 +293,8 @@ class ObjectSource:
         self._state_lock = threading.Lock()
         self._processor_lock = threading.Lock()
         self._stop = threading.Event()
+        self._active = threading.Event()
+        self._active.set()
         self._job_condition = threading.Condition()
         self._job: tuple[int, DenseStereoJob] | None = None
         self._job_generation = 0
@@ -425,11 +429,27 @@ class ObjectSource:
 
     def stop(self) -> None:
         self._stop.set()
+        self._active.set()
         with self._job_condition:
             self._job_condition.notify_all()
         if self._executor is not None:
             self._executor.shutdown(wait=True)
         self.detector.close()
+
+    def pause(self) -> None:
+        """Suspend GPU tracking and dense CPU work while retaining models."""
+        self._active.clear()
+        with self._state_lock:
+            self._rig_validated = False
+        with self._job_condition:
+            self._job = None
+            self._job_condition.notify_all()
+
+    def resume(self) -> None:
+        """Resume frame processing before fresh episode validation."""
+        if self._stop.is_set():
+            raise RuntimeError("cannot resume a stopped object source")
+        self._active.set()
 
     def object_obs(self):
         """Return ``((live, live_age), BPSObservation)`` at this instant."""
@@ -498,10 +518,15 @@ class ObjectSource:
     def _track_loop(self) -> None:
         sequences = {name: 0 for name in CAMERA_NAMES}
         while not self._stop.is_set():
+            self._active.wait()
+            if self._stop.is_set():
+                return
             # Wait for both feeds to advance, then take the newest pair so a
             # slower consumer skips backlog instead of making stereo stale.
             for name in CAMERA_NAMES:
                 sequences[name], _, _ = self.feeds[name].wait_next(sequences[name])
+            if not self._active.is_set():
+                continue
             snapshots = {name: self.feeds[name].latest() for name in CAMERA_NAMES}
             sequences = {name: snapshots[name][0] for name in CAMERA_NAMES}
             capture_t = float(np.mean([snapshots[name][1] for name in CAMERA_NAMES]))
@@ -594,6 +619,8 @@ class ObjectSource:
             T_base_main=_readonly(T_base_main, copy=True),
         )
         with self._job_condition:
+            if not self._active.is_set():
+                return
             self._job_generation += 1
             self._job = (self._job_generation, job)
             self._job_condition.notify()
@@ -601,13 +628,19 @@ class ObjectSource:
     def _dense_loop(self) -> None:
         consumed_generation = 0
         while not self._stop.is_set():
+            self._active.wait()
+            if self._stop.is_set():
+                return
             with self._job_condition:
                 while (not self._stop.is_set()
+                       and self._active.is_set()
                        and (self._job is None
                             or self._job[0] == consumed_generation)):
                     self._job_condition.wait(0.5)
                 if self._stop.is_set():
                     return
+                if not self._active.is_set():
+                    continue
                 consumed_generation, job = self._job
             with self._processor_lock:
                 result = self.processor.process(job)

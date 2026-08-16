@@ -19,7 +19,8 @@ convention training used for undetected tags (src/base_env.py); a tag never
 seen this session reads all-zero with age pinned at MARKER_AGE_CAP_S.
 
 This source serves the ARM tags and the table anchor only. The dense-stereo
-object source consumes the same frame bus independently.
+object source consumes the same frame bus independently. Interactive rollouts
+pause both consumers at the warm prompt while leaving camera capture running.
 """
 import threading
 import time
@@ -126,6 +127,8 @@ class CameraMarkerSource:
         self._detect_ms = float("nan")
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._active = threading.Event()
+        self._active.set()
         self._thread = None
         self.error = None      # set if the consumer loop dies; readers re-raise it
         self.estimator = None  # built in start() from the feed's intrinsics
@@ -156,7 +159,12 @@ class CameraMarkerSource:
         try:
             seq = 0
             while not self._stop.is_set():
+                self._active.wait()
+                if self._stop.is_set():
+                    return
                 seq, t_capture, frame = self.feed.wait_next(seq)
+                if not self._active.is_set():
+                    continue
                 _, read_ms = self.feed.stats()
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 t_det = time.monotonic()
@@ -284,8 +292,19 @@ class CameraMarkerSource:
         """Stop the consumer thread; the CameraFeed (and its device) belongs
         to the caller."""
         self._stop.set()
+        self._active.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+
+    def pause(self) -> None:
+        """Suspend tag detection while retaining the detector and feed."""
+        self._active.clear()
+
+    def resume(self) -> None:
+        """Resume tag detection on the newest camera frame."""
+        if self._stop.is_set():
+            raise RuntimeError("cannot resume a stopped camera marker source")
+        self._active.set()
 
 
 class StereoCameraMarkerSource:
@@ -349,3 +368,11 @@ class StereoCameraMarkerSource:
     def stop(self) -> None:
         for name in CAMERA_NAMES:
             self._sources[name].stop()
+
+    def pause(self) -> None:
+        for name in CAMERA_NAMES:
+            self._sources[name].pause()
+
+    def resume(self) -> None:
+        for name in CAMERA_NAMES:
+            self._sources[name].resume()
