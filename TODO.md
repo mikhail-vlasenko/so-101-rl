@@ -42,6 +42,14 @@ Unresolved, actionable work only. Not a changelog or project-status document.
   curriculum training and `dr=full` refinement, then decide whether to retain
   it.
 
+## Lift policy deployment
+
+- **Harden the upright BPS lift candidate against observation DR.** Resume
+  `logs/ppo_lift/bps_upright_reliability_polish_run462/best_model.zip` with
+  `cube_smallest_face_only=true`, step through `dr=light` and then `dr=full`,
+  and require greater than 90% deterministic success on a disjoint seed set at
+  each stage before treating the policy as robust to the real camera pipeline.
+
 ## Train a policy in PWM / torque-ish mode
 
 STS3215 servos expose a PWM / "current" mode via register writes. Bypassing the internal position PID lets the policy command motor effort directly — no trapezoidal-profile reset every tick (see `SERVO_ACCEL` comment), no 15 Hz lower bound, and a control interface much closer to what most MuJoCo-trained policies use.
