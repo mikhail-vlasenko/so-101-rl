@@ -15,6 +15,7 @@ a fabricated cloud.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cache
 import hashlib
 import itertools
 import json
@@ -92,6 +93,7 @@ def load_bps_config(path: Path = CONFIG_PATH) -> BPSConfig:
     return config
 
 
+@cache
 def basis_points(config: BPSConfig) -> np.ndarray:
     """The lexicographically ordered Cartesian product ``(x, y, z)``."""
     basis = np.asarray(
@@ -99,6 +101,7 @@ def basis_points(config: BPSConfig) -> np.ndarray:
         dtype=np.float64,
     )
     assert basis.shape == (BPS_DISTANCE_DIM, 3)
+    basis.setflags(write=False)
     return basis
 
 
@@ -148,7 +151,15 @@ def voxel_first_indices(points: np.ndarray, voxel_size_m: float) -> np.ndarray:
     if points.shape[0] == 0:
         return np.empty(0, dtype=np.int64)
     voxels = np.floor(points / voxel_size_m).astype(np.int64)
-    _, first = np.unique(voxels, axis=0, return_index=True)
+    shifted = voxels - voxels.min(axis=0)
+    spans = shifted.max(axis=0) + 1
+    max_int = np.iinfo(np.int64).max
+    if spans[0] > max_int // spans[1] or \
+            spans[0] * spans[1] > max_int // spans[2]:
+        raise ValueError("cloud voxel index range is too large to encode")
+    keys = ((shifted[:, 0] * spans[1] + shifted[:, 1]) * spans[2]
+            + shifted[:, 2])
+    _, first = np.unique(keys, return_index=True)
     first.sort()
     return first
 
@@ -170,8 +181,16 @@ def encode_bps(points_base: np.ndarray, valid_fraction: float,
     ordered = points[order]
     center = ordered.mean(axis=0)
     centered = ordered - center
-    delta = basis_points(config)[:, None, :] - centered[None, :, :]
-    raw_distances = np.sqrt(np.min(np.einsum("bij,bij->bi", delta, delta), axis=1))
+    basis = basis_points(config)
+    squared_distances = (
+        np.einsum("ij,ij->i", basis, basis)[:, None]
+        + np.einsum("ij,ij->i", centered, centered)[None, :]
+        - 2.0 * basis @ centered.T
+    )
+    # Roundoff can make an exact zero slightly negative in the expanded
+    # squared-distance identity.
+    nearest_squared = np.maximum(np.min(squared_distances, axis=1), 0.0)
+    raw_distances = np.sqrt(nearest_squared)
     distances = np.clip(raw_distances / config.distance_cap_m, 0.0, 1.0)
     return BPSMeasurement(
         distances=distances.astype(np.float32),

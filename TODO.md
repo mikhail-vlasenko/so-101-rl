@@ -4,6 +4,12 @@ Unresolved, actionable work only. Not a changelog or project-status document.
 
 ## Tag-free object tracking (dual C922 + SAM), follow-ups
 
+- **Match simulated BPS scheduling to the real dense worker.** Measure the
+  sustained completion cadence and latest-job replacement behavior of
+  `ObjectSource` on the rollout host, then give sim a separately bounded BPS
+  capture schedule instead of constructing a cloud for every 30 Hz camera
+  frame. Preserve capture-time occlusion and cover the resulting age/hold
+  distribution with sim/real twin tests.
 - **Pickplace dense-stereo rollout.** Add the equivalent camera object source to
   pickplace with a real-table target, ring pose, and phase-aware termination on
   `ArmLoop`.

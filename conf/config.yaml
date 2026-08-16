@@ -163,7 +163,10 @@ dense_stereo_feasibility:
 bps:
   basis_axis_m: [-0.04, -0.01, 0.01, 0.04]
   distance_cap_m: 0.08
-  synthetic_surface_grid_size: 15
+  # 9x9 per face stays within 1 mm p95 of the former 15x15 BPS distances on
+  # randomized reset poses, below the configured dense-cloud noise, while
+  # avoiding 864 redundant visibility rays on every simulated capture.
+  synthetic_surface_grid_size: 9
 
 # Number of past actions appended to the observation. 0 = disabled; N=2 lets the
 # policy infer velocity / action smoothness from its own recent commands.

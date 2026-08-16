@@ -206,7 +206,10 @@ def test_per_step_noise_magnitude_matches_derived_sigmas(cfg):
 
     # After dividing by its own derived sigma, the depth component is unit-normal.
     np.testing.assert_allclose(norm_depth.std(), 1.0, rtol=0.15)
-    np.testing.assert_allclose(norm_depth.mean(), 0.0, atol=0.15)
+    # Bound the sample mean in standard-error units rather than relying on one
+    # particular RNG stream from unrelated camera-cloud sampling.
+    np.testing.assert_allclose(
+        norm_depth.mean(), 0.0, atol=4.0 / np.sqrt(len(norm_depth)))
     # The lateral part spans the 2D image plane: |lateral|^2/lateral_sigma^2 is
     # chi-squared with 2 dof, mean 2.
     np.testing.assert_allclose(norm_lat_sq.mean(), 2.0, rtol=0.15)

@@ -23,7 +23,7 @@ from src.bps import (
 CONFIG = BPSConfig(
     basis_axis_m=(-0.04, -0.01, 0.01, 0.04),
     distance_cap_m=0.08,
-    synthetic_surface_grid_size=15,
+    synthetic_surface_grid_size=9,
 )
 
 
@@ -127,4 +127,12 @@ def test_voxel_selection_contract_is_deterministic():
     points = np.array([[0.001, 0.001, 0.001],
                        [0.009, 0.009, 0.009],
                        [0.011, 0.001, 0.001]])
+    np.testing.assert_array_equal(voxel_first_indices(points, 0.01), [0, 2])
+
+
+def test_voxel_selection_handles_negative_coordinates_and_keeps_first_input():
+    points = np.array([[-0.021, 0.019, -0.001],
+                       [-0.029, 0.011, -0.009],
+                       [0.001, -0.001, 0.001],
+                       [0.009, -0.009, 0.009]])
     np.testing.assert_array_equal(voxel_first_indices(points, 0.01), [0, 2])
