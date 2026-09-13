@@ -23,9 +23,10 @@ In camera-mode ``--interactive``, the process keeps its models and cameras
 open but pauses vision inference at the prompt. It resumes the workers and
 revalidates the stereo placement before every episode, then runs whenever
 Enter is pressed. A failed initial object prompt asks for Enter to retry. At
-the warm prompt, ``e`` switches the next episode between execute and dry-run
-while preserving the CLI's initial mode, and ``r`` parks the arm
-when execute mode is selected. A normally completed execute episode also
+the warm prompt, the single keys ``e`` and ``r`` act immediately without
+Enter: ``e`` switches the next episode between execute and dry-run while
+preserving the CLI's initial mode, and ``r`` parks the arm when execute mode is
+selected. A normally completed execute episode also
 gently parks at the folded rest pose before disabling torque. Ctrl-C during an
 episode or rest move stops immediately and disables torque; an interrupted
 episode saves its partial log and returns to the warm prompt. Ctrl-C at either
@@ -39,7 +40,9 @@ import csv
 from dataclasses import dataclass
 import signal
 import sys
+import termios
 import time
+import tty
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -112,6 +115,28 @@ FK_FRESH_AGE_S = 0.06
 # that lost the object mid-lift freezes its held value, which must not keep
 # faking "above target height" (plan decision 9).
 CUBE_FRESH_DWELL_S = 0.15
+
+
+def read_prompt_command(prompt: str) -> str:
+    """Read one prompt key immediately when attached to a terminal."""
+    if not sys.stdin.isatty():
+        return input(prompt).strip().lower()
+
+    fd = sys.stdin.fileno()
+    previous = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        print(prompt, end="", flush=True)
+        command = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+
+    if command == "":
+        raise EOFError
+    print()
+    if command in ("\n", "\r"):
+        return ""
+    return command.lower()
 
 
 class FkObjectSource:
@@ -674,7 +699,15 @@ class LiftRolloutSession:
             if self.args.interactive:
                 if not self._prompt_for_episode(episode_index):
                     return
-                self._prepare_camera_episode()
+                try:
+                    self._prepare_camera_episode()
+                except KeyboardInterrupt:
+                    self._pause_camera_pipeline()
+                    print(
+                        "\nCamera preparation interrupted; stopping warm "
+                        "rollout session."
+                    )
+                    return
 
             stopped = install_sigint_flag()
             result = self._run_episode(stopped)
@@ -693,10 +726,10 @@ class LiftRolloutSession:
     def _prompt_for_object_retry(error: RuntimeError) -> bool:
         while True:
             try:
-                command = input(
+                command = read_prompt_command(
                     f"\n{error}. Reposition the sponge, then "
                     "Enter=retry, Ctrl-C=quit > "
-                ).strip().lower()
+                )
             except (EOFError, KeyboardInterrupt):
                 print("\nStopping warm rollout session.")
                 return False
@@ -709,10 +742,10 @@ class LiftRolloutSession:
         while True:
             mode = "EXECUTE" if self.loop.execute else "DRY-RUN"
             try:
-                command = input(
+                command = read_prompt_command(
                     f"\n[episode {episode_index + 1}] [{mode}] "
                     "Enter=run, e=toggle execute, r=rest, Ctrl-C=quit > "
-                ).strip().lower()
+                )
             except (EOFError, KeyboardInterrupt):
                 print("\nStopping warm rollout session.")
                 return False

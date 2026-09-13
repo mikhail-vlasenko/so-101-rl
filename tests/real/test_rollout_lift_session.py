@@ -1,11 +1,17 @@
 """Warm lift-session lifecycle contracts without camera or arm hardware."""
 
 from argparse import Namespace
+import termios
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from real.rollout.rollout_lift import EpisodeResult, LiftRolloutSession
+from real.rollout.rollout_lift import (
+    EpisodeResult,
+    LiftRolloutSession,
+    read_prompt_command,
+)
 from real.tracking.sam_seg import SAMPromptNoMatchError
 from real.twin.constants import FOLDED_REST_QPOS
 
@@ -31,6 +37,46 @@ class FakeLoop:
 
     def set_execute(self, execute):
         self.execute = execute
+
+
+def test_terminal_prompt_reads_without_enter_and_restores_mode(monkeypatch):
+    class FakeStdin:
+        @staticmethod
+        def isatty():
+            return True
+
+        @staticmethod
+        def fileno():
+            return 7
+
+        @staticmethod
+        def read(size):
+            assert size == 1
+            return "e"
+
+    restored = []
+    monkeypatch.setattr("real.rollout.rollout_lift.sys.stdin", FakeStdin())
+    monkeypatch.setattr(
+        "real.rollout.rollout_lift.termios.tcgetattr", lambda fd: ["saved"])
+    monkeypatch.setattr(
+        "real.rollout.rollout_lift.tty.setcbreak", lambda fd: None)
+    monkeypatch.setattr(
+        "real.rollout.rollout_lift.termios.tcsetattr",
+        lambda fd, when, attrs: restored.append((fd, when, attrs)),
+    )
+
+    assert read_prompt_command("command > ") == "e"
+    assert restored == [(7, termios.TCSADRAIN, ["saved"])]
+
+    restored.clear()
+    monkeypatch.setattr(
+        FakeStdin,
+        "read",
+        staticmethod(lambda size: (_ for _ in ()).throw(KeyboardInterrupt)),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        read_prompt_command("command > ")
+    assert restored == [(7, termios.TCSADRAIN, ["saved"])]
 
 
 def test_interrupted_episode_disables_torque_boundary():
@@ -196,6 +242,21 @@ def test_interrupted_episode_returns_to_prompt(monkeypatch):
     assert len(prepared) == 2
     assert len(paused) == 2
     assert saved == [0, 1]
+
+
+def test_ctrl_c_during_camera_preparation_stops_session_cleanly(monkeypatch):
+    session = LiftRolloutSession.__new__(LiftRolloutSession)
+    session.args = Namespace(interactive=True)
+    session._prompt_for_episode = lambda episode: True
+    session._prepare_camera_episode = lambda: (_ for _ in ()).throw(
+        KeyboardInterrupt)
+    paused = []
+    session._pause_camera_pipeline = lambda: paused.append(True)
+    session._run_episode = lambda stopped: pytest.fail("episode must not start")
+
+    session.run()
+
+    assert paused == [True]
 
 
 def test_camera_pipeline_resumes_for_validation_and_pauses_at_prompt():
