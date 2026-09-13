@@ -44,11 +44,27 @@ Unresolved, actionable work only. Not a changelog or project-status document.
 
 ## Lift policy deployment
 
-- **Harden the upright BPS lift candidate against observation DR.** Resume
-  `logs/ppo_lift/bps_upright_reliability_polish_run462/best_model.zip` with
-  `cube_smallest_face_only=true`, step through `dr=light` and then `dr=full`,
-  and require greater than 90% deterministic success on a disjoint seed set at
-  each stage before treating the policy as robust to the real camera pipeline.
+- **Fine-tune and benchmark the corrected baseline.** Resume
+  `logs/ppo_lift/bps_proper_grasp_light3/final_model.zip` with the EE/control fixes;
+  compare paired sim starts and real first-attempt pickups with unchanged perception.
+- **Improve clearance and retention.** Train wider jaw/depth margins, require
+  sustained unsupported lift, and prevent repeated height credit after drops.
+  Resolve the lift cases in `tests/env/test_review_regressions.py`.
+- **Preserve reward normalization on resume.** Save/load `VecNormalize` reward
+  statistics, test resume parity, and define their handling across curriculum changes.
+- **Check object-perception parity.** Compare real/sim centroids and static gates
+  during approach/occlusion; measure stereo timing errors before adding more noise.
+- **Revisit policy memory if failures persist.** Measure clamp binding and compare
+  last-target observations or short history against the corrected baseline;
+  migrate checkpoints if the observation layout changes.
+
+## Object generalization and stacking
+
+- **Support more objects.** Add boxes/cylinders with matching surface observations
+  and physical properties; replace sponge-specific grasp checks.
+- **Build a two-sponge placement primitive.** Require released, stable placement
+  in pickplace (resolve its review regression), then add a separately observed
+  fixed base sponge and evaluate stacking after hand withdrawal.
 
 ## Train a policy in PWM / torque-ish mode
 

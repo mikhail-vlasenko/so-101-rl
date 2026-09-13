@@ -18,7 +18,7 @@ qpos-calib sweep it roughly halves the held-out marker error (3.6 -> 2.0 mm mean
 import mujoco
 import numpy as np
 
-from real.twin.mapping import JOINT_NAMES
+from real.twin.mapping import JOINT_NAMES, JointMaps, rad_to_raw, raw_to_rad
 
 # The joints whose links measurably deflect under gravity load: shoulder_lift,
 # elbow_flex, wrist_flex. shoulder_pan (vertical axis: no gravity torque), wrist_roll
@@ -69,3 +69,17 @@ def encoder_from_true(model, data, qposadr, q_true, compliance):
     for _ in range(_INVERT_ITERS):
         q_bc = q_true + gravity_deflection(model, data, qposadr, q_bc, compliance)
     return q_bc
+
+
+def encoder_raw_to_true(model, data, jm: JointMaps, direction, raw,
+                        qpos_bias, compliance):
+    """Decode a bus position into the corrected joint coordinates used by policy/sim."""
+    q_bc = raw_to_rad(raw, jm, direction) - qpos_bias
+    return q_bc - gravity_deflection(model, data, jm.qposadr(), q_bc, compliance)
+
+
+def true_to_encoder_raw(model, data, jm: JointMaps, direction, qpos_true,
+                        qpos_bias, compliance):
+    """Encode a corrected target before the shared raw previous-command clamp."""
+    q_bc = encoder_from_true(model, data, jm.qposadr(), qpos_true, compliance)
+    return rad_to_raw(q_bc + qpos_bias, jm, direction)

@@ -83,8 +83,7 @@ def test_terminates_after_dwell_when_snapped_to_target():
     if env.model.na > 0:
         env.data.act[:] = env.target_qpos
     mujoco.mj_forward(env.model, env.data)
-    env._servo_profile.reset(env.target_qpos)
-    env._ctrl_target = env.target_qpos.copy()
+    env._reset_control(env.target_qpos)
     env._prev_dist = 0.0
 
     terminated = False

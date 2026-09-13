@@ -127,8 +127,7 @@ class SO101ReachEnv(SO101ArmEnv):
         self.target_qpos = self.waypoints[self.waypoint_idx].copy()
 
         q0 = self._sample_safe_init()
-        self._servo_profile.reset(q0)
-        self._ctrl_target = q0.copy()
+        self._reset_control(q0)
 
         self.step_count = 0
         self.dwell_count = 0

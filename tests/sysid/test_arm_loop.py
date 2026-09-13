@@ -19,6 +19,10 @@ from real.twin.constants import (
 from real.twin.mapping import load_joint_maps, rad_to_raw, raw_to_rad
 from src.units import action_to_target
 from real.twin.control import clamp_raw_delta
+from real.calib.calibration import load_calibration, load_compliance
+from src.base_env import RuntimeEnvConfig
+from src.train import ENV_REGISTRY
+from hydra import compose, initialize
 
 
 class FakeBus:
@@ -53,6 +57,63 @@ class FakeBus:
 
     def disable_torque_all(self) -> None:
         self.torque_on = False
+
+
+class StalledBus(FakeBus):
+    """Record commands while a load prevents the encoder position from moving."""
+
+    def write_all(self, raw: np.ndarray, speed: int, accel: int) -> None:
+        self.writes.append(np.array(raw, dtype=np.int64))
+
+
+@pytest.mark.parametrize("env_name", ["lift", "pickplace", "reach"])
+@pytest.mark.parametrize("use_servo_profile", [False, True])
+def test_sim_targets_match_stalled_real_loop(env_name, use_servo_profile, monkeypatch):
+    with initialize(config_path="../../conf", version_base=None):
+        cfg = compose(config_name="config", overrides=[f"env={env_name}"])
+    env_cfg = cfg[f"{env_name}_env"]
+    env_cfg.use_servo_profile = use_servo_profile
+    env = ENV_REGISTRY[env_name](env_cfg=env_cfg, cfg=RuntimeEnvConfig())
+    jm = load_joint_maps(env.model, DEFAULT_CAL)
+    bus = StalledBus(_mid_raw(jm))
+    loop = _make_loop(env.model, jm, bus, qpos_bias=load_calibration(),
+                      compliance=load_compliance(), action_scale=env.action_scale,
+                      prev_actions_n=env.prev_actions_n)
+    # Simulate a perfectly stalled joint while retaining the real command path.
+    monkeypatch.setattr(mujoco, "mj_step", lambda model, data: None)
+    try:
+        env.reset(seed=0)
+        current = loop.boot()
+        env._write_arm_pose(current)
+        env._reset_control(current)
+        np.testing.assert_array_equal(env._target_limiter.previous_raw, bus.raw)
+        limited_ticks = 0
+        for magnitude in (1.0, -1.0, -1.0, 0.0, 1.0, -1.0):
+            action = np.full(env.n_joints, magnitude, dtype=np.float32)
+            previous_raw = loop.prev_raw_target.copy()
+            requested = action_to_target(current, action, env.action_scale,
+                                         env.joint_low, env.joint_high)
+            requested_raw = loop._true_to_encoder_raw(requested)
+            limited_ticks += int(np.any(np.abs(requested_raw - previous_raw)
+                                       > loop.max_raw_delta))
+            loop.tick(action)
+            env._apply_action(action)
+            np.testing.assert_array_equal(
+                env._target_limiter.previous_raw, loop.prev_raw_target)
+            np.testing.assert_array_equal(
+                env._ctrl_target, loop._encoder_to_true(loop.prev_raw_target))
+            assert np.all(np.abs(loop.prev_raw_target - previous_raw)
+                          <= loop.max_raw_delta)
+            np.testing.assert_array_equal(env._prev_actions, loop.prev_actions)
+        assert limited_ticks >= 2, "exercise binding reversals, not just ordinary commands"
+
+        # Reset must clear limiter history even after a binding command.
+        env.reset(seed=1)
+        expected_raw = loop._true_to_encoder_raw(env._get_joint_pos())
+        np.testing.assert_array_equal(env._target_limiter.previous_raw, expected_raw)
+    finally:
+        loop.end_episode()
+        env.close()
 
 
 @pytest.fixture(scope="module")

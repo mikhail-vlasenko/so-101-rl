@@ -24,6 +24,7 @@ from src.marker_noise import CameraIntrinsics, anisotropic_pos_noise, load_camer
 from src.obs_history import ObsHistory
 from src.robot_spec import EE_SITE_NAME, JOINT_NAMES
 from src.servo_profile import ServoProfile
+from src.servo_target import ServoTargetLimiter
 from src.shape_obs import (
     MARKER_AGE_CAP_S,
     STATIC_DWELL_S,
@@ -431,7 +432,7 @@ MOVING_JAW_NAMES = [
 ]
 class SO101ArmEnv(gym.Env):
     """Shared SO-101 arm machinery: model/joint setup, the clip ->
-    action_to_target -> servo-profile -> substep drive (_apply_action),
+    action_to_target -> calibrated raw clamp -> servo-profile -> substep drive,
     prev-actions bookkeeping, collision/floor checks, and rendering.
 
     Task envs own observation, reward, and reset on top: SO101BaseEnv layers
@@ -479,6 +480,7 @@ class SO101ArmEnv(gym.Env):
         # Firmware motion-profile model: ctrl carries the profiled setpoint,
         # not the raw tick target (see src/servo_profile.py).
         self._servo_profile = ServoProfile(self.n_joints)
+        self._target_limiter = ServoTargetLimiter(self.model, self.action_scale)
         self._ctrl_target = None
 
         self.action_space = spaces.Box(low=-1.0, high=1.0,
@@ -551,11 +553,18 @@ class SO101ArmEnv(gym.Env):
         """Hook after each physics substep of _apply_action (SO101BaseEnv
         records camera states here)."""
 
+    def _reset_control(self, qpos):
+        """Start each episode's profile and previous-command limit at the arm pose."""
+        self._servo_profile.reset(qpos)
+        self._ctrl_target = qpos.copy()
+        self._target_limiter.reset(qpos)
+
     def _apply_action(self, action):
         """Clip the raw policy action, record it in the prev-actions buffer,
-        and drive the sim one control tick (action_to_target quantization, the
-        servo profile when enabled, n_substeps physics steps). Returns the
-        clipped action."""
+        and drive the sim one control tick: action_to_target quantization,
+        calibrated raw previous-command clamp, optional servo profile, then
+        n_substeps physics steps. Returns the clipped requested action, matching
+        ArmLoop's previous-action observation convention."""
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
 
         if self.prev_actions_n > 0:
@@ -566,6 +575,7 @@ class SO101ArmEnv(gym.Env):
         current = self.data.qpos[self.joint_qposadr].copy()
         target = action_to_target(current, action, self.action_scale,
                                   self.joint_low, self.joint_high)
+        target = self._target_limiter.limit(target)
         if self.use_servo_profile:
             setpoints = self._servo_profile.tick(self._ctrl_target, target,
                                                  self.n_substeps, self.model.opt.timestep)
@@ -573,12 +583,12 @@ class SO101ArmEnv(gym.Env):
                 self.data.ctrl[:self.n_joints] = setpoints[k]
                 mujoco.mj_step(self.model, self.data)
                 self._on_substep()
-            self._ctrl_target = target
         else:
             self.data.ctrl[:self.n_joints] = target
             for _ in range(self.n_substeps):
                 mujoco.mj_step(self.model, self.data)
                 self._on_substep()
+        self._ctrl_target = target
         return action
 
     def _render_human(self):
@@ -611,6 +621,10 @@ class SO101BaseEnv(SO101ArmEnv):
         super().__init__(render_mode=render_mode, slow_factor=slow_factor,
                          xml_path=xml_path, prev_actions_n=cfg.prev_actions_n,
                          env_cfg=env_cfg)
+        # Deployment reconstructs FK from the observed motor joints, with
+        # unobserved passive joints at their model defaults. Copying the
+        # physical state's loaded gear-play pose here would leak true state.
+        self._obs_fk_data = mujoco.MjData(self.model)
         # dict with keys qpos_sigma, marker_rot_sigma, tag_px_noise,
         # tag_depth_factor, live_sigma, precise_sigma; or
         # None. Marker position noise is anisotropic in the camera frame
@@ -1165,16 +1179,28 @@ class SO101BaseEnv(SO101ArmEnv):
                       [self._camera.pipeline_delay_s], self.cube_half_extents])
         return np.concatenate(parts)
 
+    def _observed_ee_pos(self, qpos):
+        """FK from this observation's joint read, matching real camera rollout.
+
+        The scratch data never advances physics: unobserved passive joints stay
+        at model defaults. Kinematics alone updates the EE site without contact
+        solving or mutating the physical state used by rewards and cameras.
+        """
+        self._obs_fk_data.qpos[self.joint_qposadr] = qpos
+        mujoco.mj_kinematics(self.model, self._obs_fk_data)
+        return self._obs_fk_data.site_xpos[self.ee_site_id].copy()
+
     def _compute_state_obs(self):
         """Build one actor-state frame (the part repeated through history).
 
         qpos/qvel take the encoder path (fresh; qvel differenced like
         real/rollout_common.ArmLoop); markers serve the held per-tag
         detections with their ages; the live object channel uses the shared
-        hold/age state. The final derived vector is the current kinematic EE
-        position minus that same held live centroid, so it remains deployable
-        and inherits object-channel staleness/noise. The BPS block and
-        privileged tail are separate."""
+        hold/age state. The final derived vector is FK from that same noisy/
+        bias-shifted joint read minus the held live centroid, inheriting both
+        encoder error and object-channel staleness/noise. Unobserved passive
+        joints use model defaults, as in real camera rollout. The BPS block
+        and privileged tail are separate."""
         qpos, qvel = self._encoder_obs()
         markers, marker_age = self._tag_obs(
             self._held_marker_pos, self._held_marker_rot,
@@ -1184,7 +1210,7 @@ class SO101BaseEnv(SO101ArmEnv):
             qpos, qvel, markers, marker_age,
             live, [live_age], self._obs_extra(live),
             self._prev_actions.flatten(),
-            ee_object_delta(self._get_ee_pos(), live),
+            ee_object_delta(self._observed_ee_pos(qpos), live),
         ]).astype(np.float32)
 
     def _serve_obs(self, reset: bool):
@@ -1219,7 +1245,7 @@ class SO101BaseEnv(SO101ArmEnv):
                                live, [live_age],
                                self._obs_extra(live),
                                self._prev_actions.flatten(),
-                               ee_object_delta(self._get_ee_pos(), live),
+                               ee_object_delta(self._observed_ee_pos(qpos), live),
                                self._bps_state.serve(self.data.time).flat(),
                                self._priv_tail()]).astype(np.float32)
 
@@ -1534,8 +1560,7 @@ class SO101BaseEnv(SO101ArmEnv):
                     "(100 cube attempts each); check the spawn box and tag camera")
 
         self._on_reset(cube_pos)
-        self._servo_profile.reset(joint_pos)
-        self._ctrl_target = joint_pos.copy()
+        self._reset_control(joint_pos)
         self.step_count = 0
         self._max_cube_height = cube_pos[2]
         self._grasp_steps = 0

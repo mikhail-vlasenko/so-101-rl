@@ -31,9 +31,9 @@ SERVO_ACCEL_UNIT_RAD_S2 = 8.7 * np.pi / 180.0
 # ~5 commanded raw units under gravity load.
 SERVO_DEADZONE_RAW = 4.0
 
-# Headroom (raw units) the per-tick safety clamp allows above the policy's max
-# commanded step, so the clamp catches mapping/calibration bugs without
-# truncating in-distribution actions.
+# Headroom above the nominal measured-position-relative action step. The clamp
+# instead bounds previous-target-relative changes, so valid actions can still
+# bind when tracking lags or the policy reverses direction.
 RAW_DELTA_HEADROOM = 2
 
 
@@ -54,6 +54,16 @@ def max_raw_delta_per_step(action_scale: float) -> int:
 def max_joint_speed_rad_s(action_scale: float, control_hz: float) -> float:
     """Peak joint velocity the policy can command: one full-scale step per tick."""
     return action_scale * control_hz
+
+
+def clamp_target_delta(previous: np.ndarray, requested: np.ndarray,
+                       max_delta: float | int) -> np.ndarray:
+    """Bound a target change in the caller's units, relative to the last command.
+
+    Shared by raw real-bus commands, simulated policy commands, and rad-domain
+    sysid trajectories. The previous value must be the previously limited target.
+    """
+    return previous + np.clip(requested - previous, -max_delta, max_delta)
 
 
 def action_to_target(current: np.ndarray, action: np.ndarray, action_scale: float,

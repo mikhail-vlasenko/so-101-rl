@@ -21,14 +21,15 @@ from typing import Callable
 
 import numpy as np
 
+from src.units import clamp_target_delta
+
 
 def clamp_raw_delta(prev_raw: np.ndarray, target_raw: np.ndarray,
                     max_delta: int) -> np.ndarray:
     """Limit the per-tick raw move to ±max_delta so a large target jump can't
     command a full-speed lunge. Callers derive max_delta from the action scale
     via `src.units.max_raw_delta_per_step`."""
-    delta = np.clip(target_raw - prev_raw, -max_delta, max_delta)
-    return (prev_raw + delta).astype(np.int64)
+    return clamp_target_delta(prev_raw, target_raw, max_delta).astype(np.int64)
 
 
 def stream_sub_targets(

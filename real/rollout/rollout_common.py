@@ -33,7 +33,7 @@ from src.bps import BPSConfig, validate_checkpoint_bps
 from src.checkpoints import resolve_model_path
 from src.units import action_to_target, max_joint_speed_rad_s, max_raw_delta_per_step
 
-from ..calib.compliance import encoder_from_true, gravity_deflection
+from ..calib.compliance import encoder_raw_to_true, true_to_encoder_raw
 from ..twin.constants import (
     INTERP_HZ,
     SERVO_ACCEL,
@@ -43,11 +43,11 @@ from ..twin.constants import (
     SERVO_TORQUE_LIMIT,
 )
 from ..twin.control import clamp_raw_delta, stream_sub_targets
-from ..twin.mapping import JointMaps, rad_to_raw, raw_to_rad
+from ..twin.mapping import FOLLOWER_CALIBRATION_PATH, JointMaps
 from ..twin.servo_io import ServoBus
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_CAL = REPO_ROOT / "real" / "follower_calibration.json"
+DEFAULT_CAL = FOLLOWER_CALIBRATION_PATH
 
 # Tolerance (rad) on the boot-pose calibration check: encoder noise and
 # resting-against-a-limit poses may read slightly past the XML joint range.
@@ -165,7 +165,6 @@ class ArmLoop:
             f"compliance must be ({self.n_joints},), got {self.compliance.shape}"
         self._model = model
         self._grav_data = mujoco.MjData(model)
-        self._qposadr = jm.qposadr()
         self.xml_low, self.xml_high = jm.xml_low(), jm.xml_high()
         self.action_scale = action_scale
         self.execute = execute
@@ -218,18 +217,18 @@ class ArmLoop:
     def _encoder_to_true(self, raw: np.ndarray) -> np.ndarray:
         """Encoder raw -> true joint angle (rad):
         theta_true = theta_enc - bias - compliance * tau_grav(theta_enc - bias)."""
-        q_bc = raw_to_rad(raw, self.jm, self.direction) - self.qpos_bias
-        return q_bc - gravity_deflection(self._model, self._grav_data, self._qposadr,
-                                         q_bc, self.compliance)
+        return encoder_raw_to_true(
+            self._model, self._grav_data, self.jm, self.direction, raw,
+            self.qpos_bias, self.compliance)
 
     def _true_to_encoder_raw(self, qpos_true: np.ndarray) -> np.ndarray:
         """True joint target (rad) -> encoder raw. Inverts _encoder_to_true so a hold
         target round-trips to the present raw: recover the bias-corrected encoder pose
         whose gravity deflection lands the link at the target, then add the bias and map
         to raw (rad_to_raw is calibrated against the encoder angle)."""
-        q_bc = encoder_from_true(self._model, self._grav_data, self._qposadr,
-                                 qpos_true, self.compliance)
-        return rad_to_raw(q_bc + self.qpos_bias, self.jm, self.direction)
+        return true_to_encoder_raw(
+            self._model, self._grav_data, self.jm, self.direction, qpos_true,
+            self.qpos_bias, self.compliance)
 
     def boot(self) -> np.ndarray:
         """Begin an episode from the arm's current pose.

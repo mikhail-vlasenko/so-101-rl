@@ -29,6 +29,12 @@ teacher_obs: null
 # speed limits) come from src/units.py — don't hand-compute them in comments.
 action_scale: 0.07
 
+# Simulation matches the real previous-command clamp in raw encoder units,
+# including follower_calibration.json and calib/calibration.yaml conversion.
+# The clamp runs before the servo profile and can bind on valid action reversals
+# when the joints lag. Calibration changes therefore affect simulated commands.
+# prev_actions stores requested clipped actions; it does not expose clamp state.
+
 # Feed sim ctrl through the Feetech firmware motion profile (src/servo_profile.py).
 # true = write the profiled setpoint; false = write the raw tick target straight
 # to data.ctrl (pre-55bd1ba behavior). ON by default: the baked so101.xml fit was
@@ -182,7 +188,11 @@ marker_include_rot: false
 # Lag taps served as observation history (src/obs_history.py): the policy
 # input carries the state block at [t - tap] control ticks for each entry —
 # each state ends with FK EE position minus the held live sponge centroid —
-# geometric spacing per .claude/plans/obs_history_features.md, e.g.
+# computed from the same noisy/bias-shifted observed motor positions. Passive
+# joints use model defaults, matching real camera rollout. Existing EE-delta
+# checkpoints keep their layout/normalization but should be PPO-refined after
+# this observation-distribution correction.
+# Geometric spacing per .claude/plans/obs_history_features.md, e.g.
 # [0, 4, 16, 48] ≈ 0/0.27/1.07/3.2 s at 15 Hz — while the privileged tail
 # and current BPS block each stay a single copy. Must start at 0, strictly
 # ascending. [0] = no history.

@@ -53,6 +53,13 @@ def _true_center(env):
     return env.data.geom_xpos[env.cube_geom_id].copy()
 
 
+def _observed_ee(env, obs):
+    data = mujoco.MjData(env.model)
+    data.qpos[env.joint_qposadr] = obs[:env.n_joints]
+    mujoco.mj_forward(env.model, data)
+    return data.site_xpos[env.ee_site_id].copy()
+
+
 def test_reset_serves_fresh_live_and_bps(env):
     for seed in range(10):
         obs, _ = env.reset(seed=seed)
@@ -80,7 +87,7 @@ def test_ee_object_delta_uses_held_live_centroid(env):
     the observation, never the simulator's ground-truth sponge position."""
     obs, _ = env.reset(seed=7)
     np.testing.assert_allclose(
-        obs[EE_OBJECT_DELTA], env._get_ee_pos() - obs[LIVE], atol=1e-7)
+        obs[EE_OBJECT_DELTA], _observed_ee(env, obs) - obs[LIVE], atol=1e-7)
 
     held_live = obs[LIVE].copy()
     env.data.qpos[env.cube_qpos_idx:env.cube_qpos_idx + 3] = (-1.0, -1.0, 0.0125)
@@ -88,7 +95,7 @@ def test_ee_object_delta_uses_held_live_centroid(env):
     obs, *_ = env.step(_zero(env))
     np.testing.assert_array_equal(obs[LIVE], held_live)
     np.testing.assert_allclose(
-        obs[EE_OBJECT_DELTA], env._get_ee_pos() - held_live, atol=1e-7)
+        obs[EE_OBJECT_DELTA], _observed_ee(env, obs) - held_live, atol=1e-7)
 
 
 def test_out_of_view_holds_and_ages(env):

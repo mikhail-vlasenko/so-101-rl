@@ -21,6 +21,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+FOLLOWER_CALIBRATION_PATH = Path(__file__).resolve().parents[1] / "follower_calibration.json"
+
 JOINT_NAMES = [
     "shoulder_pan", "shoulder_lift", "elbow_flex",
     "wrist_flex", "wrist_roll", "gripper",

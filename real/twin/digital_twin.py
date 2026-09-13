@@ -34,12 +34,12 @@ from .constants import (
 from .control import clamp_raw_delta, stream_sub_targets
 from .gamepad import gamepad_worker
 from .gui import CONTROL, MIRROR, TwinState, run as run_gui
-from .mapping import JointMaps, load_joint_maps, rad_to_raw, raw_to_norm
+from .mapping import FOLLOWER_CALIBRATION_PATH, JointMaps, load_joint_maps, rad_to_raw, raw_to_norm
 from .servo_io import ServoBus
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_XML = REPO_ROOT / "so101" / "scene.xml"
-DEFAULT_CAL = REPO_ROOT / "real" / "follower_calibration.json"
+DEFAULT_CAL = FOLLOWER_CALIBRATION_PATH
 CONFIG_YAML = REPO_ROOT / "conf" / "config.yaml"
 
 READ_HZ = 15.0

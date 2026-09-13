@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 
 from src.base_env import JOINT_NAMES
 from src.servo_profile import ServoProfile
-from src.units import max_raw_delta_per_step, raw_units_to_rad
+from src.units import clamp_target_delta, max_raw_delta_per_step, raw_units_to_rad
 from sysid.io import OUT_DIR_SIM, REPO_ROOT, write_log
 from sysid.trajectories import SETTLE_S, SYSID_DT, SYSID_HZ, TRAJECTORIES
 
@@ -45,7 +45,7 @@ def clamp_traj(traj: np.ndarray, max_delta_rad: float) -> np.ndarray:
     cmd = traj[0].copy()
     out[0] = cmd
     for i in range(1, len(traj)):
-        cmd = cmd + np.clip(traj[i] - cmd, -max_delta_rad, max_delta_rad)
+        cmd = clamp_target_delta(cmd, traj[i], max_delta_rad)
         out[i] = cmd
     return out
 

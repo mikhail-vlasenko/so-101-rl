@@ -96,9 +96,8 @@ def test_max_action_is_above_deadzone(action_scale):
 
 
 @pytest.mark.parametrize("action_scale", [0.02, 0.035, 0.05, 0.07, 0.1])
-def test_raw_clamp_never_truncates_full_action(action_scale):
-    """The real-bus safety clamp must sit above the policy's max per-tick step,
-    otherwise in-distribution actions get silently truncated on the real arm."""
+def test_raw_clamp_covers_nominal_measured_position_delta(action_scale):
+    """Headroom covers a nominal action step; lagged target reversals may still bind."""
     assert max_raw_delta_per_step(action_scale) >= rad_to_raw_units(action_scale)
 
 
