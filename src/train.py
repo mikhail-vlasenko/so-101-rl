@@ -6,7 +6,7 @@ import hydra
 import wandb
 from omegaconf import DictConfig, OmegaConf
 from stable_baselines3 import PPO, SAC
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
@@ -29,6 +29,9 @@ from src.lift_env import SO101LiftEnv
 from src.legacy_tag_env import LegacyTagActorObs
 from src.pickplace_env import SO101PickPlaceEnv
 from src.reach_env import SO101ReachEnv
+from src.reward_norm import (
+    BestRewardNormCallback, RewardCheckpointCallback, save_reward_norm, training_reward_env,
+)
 from src.sim_bps import SyntheticCloudConfig
 
 
@@ -88,13 +91,16 @@ def resume_overrides(cfg: DictConfig) -> dict:
     are deliberately absent.
     """
     _, algo_kwargs_fn, _ = ALGORITHM_REGISTRY[cfg.algorithm]
-    return {
+    overrides = {
         "learning_rate": make_lr_schedule(cfg.train.lr_schedule,
                                           cfg.train.learning_rate, cfg.train.lr_min),
         "batch_size": cfg.train.batch_size,
         "gamma": cfg.train.gamma,
         **algo_kwargs_fn(cfg),
     }
+    if cfg.seed is not None:
+        overrides["seed"] = int(cfg.seed)
+    return overrides
 
 
 def make_env(env_cls, env_cfg, xml_path, render_mode=None, slow_factor=1,
@@ -310,7 +316,10 @@ def train(cfg: DictConfig):
     vec_env = SubprocVecEnv(env_fns)
     if seed is not None:
         vec_env.seed(int(seed))
-    env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, gamma=gamma)
+    checkpoint_path = None
+    if cfg.resume is not None:
+        checkpoint_path = os.path.join(orig_dir, cfg.resume)
+    env = training_reward_env(vec_env, gamma, checkpoint_path)
 
     stats_tracker = EvalStatsTracker(eval_inner)
     eval_vec_env = DummyVecEnv([lambda: Monitor(stats_tracker)])
@@ -351,7 +360,7 @@ def train(cfg: DictConfig):
     if cfg.train.time_limit_minutes is not None:
         callbacks.append(TimeLimitCallback(cfg.train.time_limit_minutes))
 
-    callbacks.append(CheckpointCallback(
+    callbacks.append(RewardCheckpointCallback(
         save_freq=cfg.train.checkpoint_freq // n_envs,
         save_path=os.path.join(log_dir, "checkpoints"),
         name_prefix=algo_name,
@@ -364,13 +373,11 @@ def train(cfg: DictConfig):
         eval_freq=cfg.train.eval_freq // n_envs,
         n_eval_episodes=cfg.train.n_eval_episodes,
         deterministic=True,
+        callback_on_new_best=BestRewardNormCallback(os.path.join(log_dir, "best_model.zip")),
         callback_after_eval=EvalStatsCallback(stats_tracker),
     ))
 
-    if cfg.resume is not None:
-        checkpoint_path = cfg.resume
-        if not os.path.isabs(checkpoint_path):
-            checkpoint_path = os.path.join(orig_dir, checkpoint_path)
+    if checkpoint_path is not None:
         overrides = resume_overrides(cfg)
         print(f"Loading checkpoint from {checkpoint_path} "
               f"(hyperparameters re-applied from config: {sorted(overrides)})")
@@ -400,6 +407,7 @@ def train(cfg: DictConfig):
     print(f"Training {algo_name.upper()} ({cfg.env_name}) for {cfg.train.total_timesteps} steps...")
     model.learn(total_timesteps=cfg.train.total_timesteps, callback=callbacks, log_interval=cfg.train.log_interval)
     model.save(os.path.join(log_dir, "final_model"))
+    save_reward_norm(model, os.path.join(log_dir, "final_model"))
     print(f"Model saved to {log_dir}/final_model.zip")
 
     if run is not None:

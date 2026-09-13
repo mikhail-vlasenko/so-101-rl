@@ -38,6 +38,7 @@ def _resume_cfg():
     """Config whose every tunable differs from the checkpoint's values below."""
     return OmegaConf.create({
         "algorithm": "ppo",
+        "seed": 123,
         "train": {"lr_schedule": "constant", "learning_rate": 1e-3, "lr_min": 1e-3,
                   "batch_size": 4, "gamma": 0.9},
         "ppo": {"n_steps": 8, "n_epochs": 3, "clip_range": 0.1, "ent_coef": 0.02,
@@ -59,6 +60,7 @@ def test_resume_overrides_win_over_checkpoint(tmp_path):
 
     # Plain attributes come from the config, not the zip.
     assert loaded.gamma == 0.9
+    assert loaded.seed == 123
     assert loaded.batch_size == 4
     assert loaded.n_epochs == 3
     assert loaded.ent_coef == 0.02
@@ -83,4 +85,10 @@ def test_resume_overrides_only_tunables():
     overrides = resume_overrides(_resume_cfg())
     assert set(overrides) == {"learning_rate", "batch_size", "gamma", "n_steps",
                               "n_epochs", "clip_range", "ent_coef", "gae_lambda",
-                              "vf_coef"}
+                              "vf_coef", "seed"}
+
+
+def test_unspecified_seed_preserves_checkpoint_seed():
+    cfg = _resume_cfg()
+    cfg.seed = None
+    assert "seed" not in resume_overrides(cfg)

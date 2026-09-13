@@ -44,14 +44,13 @@ Unresolved, actionable work only. Not a changelog or project-status document.
 
 ## Lift policy deployment
 
-- **Fine-tune and benchmark the corrected baseline.** Resume
-  `logs/ppo_lift/bps_proper_grasp_light3/final_model.zip` with the EE/control fixes;
-  compare paired sim starts and real first-attempt pickups with unchanged perception.
+- **Compare refined and reference policies on hardware.** Test first-attempt
+  success and object disturbance with unchanged perception; use
+  `bps_ee_clamp_refine_20260913/final_model.zip` versus
+  `bps_proper_grasp_light3/final_model.zip` under `logs/ppo_lift/`.
 - **Improve clearance and retention.** Train wider jaw/depth margins, require
   sustained unsupported lift, and prevent repeated height credit after drops.
   Resolve the lift cases in `tests/env/test_review_regressions.py`.
-- **Preserve reward normalization on resume.** Save/load `VecNormalize` reward
-  statistics, test resume parity, and define their handling across curriculum changes.
 - **Check object-perception parity.** Compare real/sim centroids and static gates
   during approach/occlusion; measure stereo timing errors before adding more noise.
 - **Revisit policy memory if failures persist.** Measure clamp binding and compare

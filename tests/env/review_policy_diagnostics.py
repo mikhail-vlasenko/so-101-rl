@@ -4,14 +4,19 @@ Uses current scene/config and a small disjoint seed sample. This is descriptive,
 not a deployment acceptance test, and does not run in normal test discovery.
 """
 
+import hashlib
+import json
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 from hydra import compose, initialize
+from omegaconf import OmegaConf
 from stable_baselines3 import PPO
 
+from src.bps import validate_checkpoint_bps
 from src.lift_env import SO101LiftEnv
 from src.train import runtime_cfg_from_hydra
 
@@ -53,6 +58,94 @@ def test_reference_policy_approach_diagnostics():
                    "precontact_near_opening_min_median_max_rad": opening_range,
                    "saturated_action_fraction": round(float(np.mean(saturated)), 3),
                    "drag_ratio": round(float(info["cube_drag_ratio"]), 3)})
+    finally:
+        env.close()
+        torch.set_num_threads(previous_threads)
+
+
+def test_paired_refinement_benchmark():
+    """Manual benchmark configured by LIFT_BENCHMARK_{CONFIG,MODEL,OUTPUT,SEED,EPISODES}.
+
+    CONFIG is a saved Hydra config; MODEL and OUTPUT select one policy/result.
+    Repeat with the same CONFIG, SEED and EPISODES for paired starts. This measures
+    current first-height-crossing success, not sustained retention or real pickup.
+    Floor forces are sampled at control ticks, not substep impact peaks.
+    """
+    if "LIFT_BENCHMARK_CONFIG" not in os.environ:
+        pytest.skip("Set LIFT_BENCHMARK_* to run the paired refinement benchmark")
+    config_path = Path(os.environ["LIFT_BENCHMARK_CONFIG"])
+    checkpoint = Path(os.environ["LIFT_BENCHMARK_MODEL"])
+    output = Path(os.environ["LIFT_BENCHMARK_OUTPUT"])
+    seed_start = int(os.environ["LIFT_BENCHMARK_SEED"])
+    episodes = int(os.environ["LIFT_BENCHMARK_EPISODES"])
+    assert episodes > 0
+    assert not output.exists(), f"refusing to overwrite benchmark {output}"
+    cfg = OmegaConf.load(config_path)
+    assert cfg.env_name == "lift"
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    env = SO101LiftEnv(env_cfg=cfg.lift_env, cfg=runtime_cfg_from_hydra(cfg))
+    rows = []
+    try:
+        policy = PPO.load(checkpoint, device="cpu")
+        validate_checkpoint_bps(policy, env.bps_config)
+        for seed in range(seed_start, seed_start + episodes):
+            obs, _ = env.reset(seed=seed)
+            start_qpos = env.data.qpos.copy().tolist()
+            cube_start = env._get_cube_pos().copy()
+            # The local axis closest to world-up identifies flat/side/upright.
+            vertical_axis = int(np.argmax(np.abs(env.data.geom_xmat[env.cube_geom_id].reshape(3, 3)[2])))
+            orientation = ("upright", "side", "flat")[vertical_axis]
+            pregrasp_displacement = 0.0
+            ever_grasped = False
+            grasp_losses = 0
+            was_grasped = False
+            floor_forces = []
+            first_contact_angle = None
+            total_reward = 0.0
+            for step in range(env.max_steps):
+                action, _ = policy.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, info = env.step(action)
+                assert np.isfinite(reward) and np.all(np.isfinite(obs))
+                total_reward += float(reward)
+                if not ever_grasped:
+                    displacement = np.linalg.norm(env._get_cube_pos()[:2] - cube_start[:2])
+                    pregrasp_displacement = max(pregrasp_displacement, float(displacement))
+                grasped = bool(info["grasped"])
+                grasp_losses += int(was_grasped and not grasped)
+                ever_grasped |= grasped
+                was_grasped = grasped
+                floor_forces.append(env._arm_floor_contact_force())
+                if first_contact_angle is None and env._n_jaw_contacts():
+                    first_contact_angle = float(env.data.qpos[env.joint_qposadr[env.gripper_idx]])
+                if terminated or truncated:
+                    break
+            row = {
+                "seed": seed, "start_qpos": start_qpos, "orientation": orientation,
+                "success": bool(info["lift_success"]), "steps": step + 1,
+                "return": total_reward, "ever_grasped": ever_grasped,
+                "grasp_losses": grasp_losses,
+                "pregrasp_max_xy_displacement_m": pregrasp_displacement,
+                "mean_floor_force_n": float(np.mean(floor_forces)),
+                "max_tick_floor_force_n": float(np.max(floor_forces)),
+                "first_jaw_contact_angle_rad": first_contact_angle,
+                "drag_ratio": float(info["cube_drag_ratio"]),
+            }
+            rows.append(row)
+            print(f"{checkpoint.parent.name}: {len(rows)}/{episodes} "
+                  f"success={row['success']} steps={row['steps']}", flush=True)
+        artifacts = [checkpoint, config_path, Path("so101/so101.xml"),
+                     Path("real/follower_calibration.json"), Path("real/calib/calibration.yaml")]
+        result = {
+            "checkpoint": str(checkpoint),
+            "config": OmegaConf.to_container(cfg, resolve=True),
+            "sha256": {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in artifacts},
+            "episodes": rows,
+        }
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("x") as handle:
+            json.dump(result, handle, indent=2)
+        print(f"Saved {output}: {sum(row['success'] for row in rows)}/{episodes} successes", flush=True)
     finally:
         env.close()
         torch.set_num_threads(previous_threads)

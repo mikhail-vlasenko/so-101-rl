@@ -12,7 +12,7 @@ algorithm: ppo
 # history_taps, marker_include_rot) and net_arch must still match the checkpoint.
 resume: null
 deterministic: true
-seed: null
+seed: null  # explicit seeds also override the saved seed on resume; null retains it
 slow_factor: 2
 render: true   # eval.py only: false for headless metric collection
 stream_port: null  # eval/show_starts: serve sim view as MJPEG on this port (web panel)
