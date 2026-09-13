@@ -1,7 +1,11 @@
-import cv2
+import argparse
 from dataclasses import replace
+
+import cv2
 import numpy as np
 
+import real.calib.calibrate_stereo as calibrate_stereo
+import real.diagnostics.snapshot_cam_mount as snapshot_cam_mount
 from real.calib.calibrate_camera import object_points
 from real.calib.calibrate_stereo import (
     StereoCalibrationLimits,
@@ -73,3 +77,30 @@ def test_quality_gate_reports_each_failed_contract():
 
     assert any("aux reprojection" in failure for failure in failures)
     assert any("rectified vertical" in failure for failure in failures)
+
+
+def test_complete_setup_opens_live_alignment_view(monkeypatch, tmp_path):
+    module_calls = []
+    monkeypatch.setattr(
+        calibrate_stereo, "_run_module",
+        lambda module, *args: module_calls.append((module, *args)),
+    )
+    monkeypatch.setattr(calibrate_stereo, "_wait_for_operator", lambda prompt: None)
+    monkeypatch.setattr(
+        snapshot_cam_mount, "snapshot_mount",
+        lambda camera, frames, family: camera,
+    )
+    monkeypatch.setattr(snapshot_cam_mount, "print_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(snapshot_cam_mount, "update_scene_mounts", lambda *args: None)
+
+    args = argparse.Namespace(
+        family="apriltag",
+        frames=60,
+        output=tmp_path / "stereo.yaml",
+        save_frames=None,
+        mount_frames=100,
+    )
+    calibrate_stereo._complete_setup(args)
+
+    assert module_calls[0] == (
+        "real.calib.align_stereo_rig", "--family", "apriltag", "--gui")

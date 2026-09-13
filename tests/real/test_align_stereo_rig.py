@@ -12,12 +12,14 @@ from real.calib.align_stereo_rig import (
     camera_movement_warning,
     coverage_guidance,
     evaluate_alignment,
+    format_anchor_quality,
     load_alignment_limits,
     load_workspace_corners,
     project_rectified_workspace,
     project_workspace,
     relative_pose_change,
 )
+from real.calib.table_anchor import TableAnchorQuality
 from real.vision.overlay import GREEN, RED
 
 
@@ -44,6 +46,17 @@ def _coverage(margins=(80.0, 80.0, 80.0, 80.0)) -> CameraCoverage:
         pixels=np.zeros((8, 2)),
         margins_px=np.asarray(margins, dtype=np.float64),
         all_in_front=True,
+    )
+
+
+def _anchor_quality(updated=True) -> TableAnchorQuality:
+    return TableAnchorQuality(
+        visible_ids=(10, 11) if updated else (10,),
+        updated=updated,
+        reprojection_rmse_px=0.3 if updated else None,
+        camera_translation_disagreement_mm=1.0 if updated else None,
+        camera_rotation_disagreement_deg=0.2 if updated else None,
+        rejection=None if updated else "both table tags not visible",
     )
 
 
@@ -195,8 +208,8 @@ def test_missing_anchor_frames_evict_stale_measurements_from_window():
 def test_anchor_search_and_measured_view_have_same_header_height():
     limits = _limits()
     image_sizes = {"main": (1280, 720), "aux": (1280, 720)}
-    visible = {"main": True, "aux": True}
-    search_header, _ = _viewer_lines(None, limits, image_sizes, visible)
+    qualities = {"main": _anchor_quality(), "aux": _anchor_quality()}
+    search_header, _ = _viewer_lines(None, limits, image_sizes, qualities)
 
     main = np.eye(4)
     aux = np.eye(4)
@@ -209,7 +222,7 @@ def test_anchor_search_and_measured_view_have_same_header_height():
         sample_count=30,
         limits=limits,
     )
-    measured_header, _ = _viewer_lines(report, limits, image_sizes, visible)
+    measured_header, _ = _viewer_lines(report, limits, image_sizes, qualities)
     assert len(search_header) == len(measured_header) == 2
 
 
@@ -231,8 +244,26 @@ def test_metric_header_colors_each_angle_independently():
     header, _ = _viewer_lines(
         report, limits,
         {"main": (1280, 720), "aux": (1280, 720)},
-        {"main": True, "aux": True},
+        {"main": _anchor_quality(), "aux": _anchor_quality()},
     )
     assert [span.color for span in header[1].spans] == [
         GREEN, GREEN, GREEN, RED, GREEN,
     ]
+
+
+def test_anchor_quality_names_missing_id_and_pose_gate_metrics():
+    missing = _anchor_quality(updated=False)
+    assert format_anchor_quality(missing) == "missing tag(s) 11; visible IDs: 10"
+
+    rejected = TableAnchorQuality(
+        visible_ids=(10, 11),
+        updated=False,
+        reprojection_rmse_px=None,
+        camera_translation_disagreement_mm=7.25,
+        camera_rotation_disagreement_deg=2.5,
+        rejection="tag camera positions disagree",
+    )
+    message = format_anchor_quality(rejected)
+    assert "tag camera positions disagree" in message
+    assert "7.2 mm" in message
+    assert "2.50 deg" in message

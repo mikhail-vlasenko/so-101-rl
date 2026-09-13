@@ -28,7 +28,7 @@ raises with every required adjustment rather than silently returning success.
 from __future__ import annotations
 
 import argparse
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
@@ -48,7 +48,11 @@ from real.calib.calibrate_stereo import (
     load_stereo_rectification,
     save_anchor_reference,
 )
-from real.calib.table_anchor import TableAnchorTracker, load_table_anchor_limits
+from real.calib.table_anchor import (
+    TableAnchorQuality,
+    TableAnchorTracker,
+    load_table_anchor_limits,
+)
 from real.marker_spec import TABLE_TAG_IDS
 from real.vision.detect import make_detector
 from real.vision.overlay import (
@@ -418,20 +422,42 @@ def _current_measurement(measurements: deque,
     return transforms, report
 
 
+def format_anchor_quality(quality: TableAnchorQuality) -> str:
+    """Explain the latest table-board acceptance or rejection."""
+    if quality.updated:
+        return "table anchor accepted"
+    if quality.rejection == "both table tags not visible":
+        missing = [str(tag) for tag in TABLE_TAG_IDS
+                   if tag not in quality.visible_ids]
+        visible = ",".join(str(tag) for tag in quality.visible_ids) or "none"
+        return f"missing tag(s) {','.join(missing)}; visible IDs: {visible}"
+
+    details = []
+    if quality.reprojection_rmse_px is not None:
+        details.append(f"reprojection {quality.reprojection_rmse_px:.2f} px")
+    if quality.camera_translation_disagreement_mm is not None:
+        details.append(
+            f"tag-pose delta {quality.camera_translation_disagreement_mm:.1f} mm")
+    if quality.camera_rotation_disagreement_deg is not None:
+        details.append(
+            f"{quality.camera_rotation_disagreement_deg:.2f} deg")
+    suffix = f" ({', '.join(details)})" if details else ""
+    return f"{quality.rejection}{suffix}"
+
+
 def _viewer_lines(report: AlignmentReport | None,
                   limits: AlignmentLimits,
                   image_sizes: dict[str, tuple[int, int]],
-                  table_visible: dict[str, bool]) -> tuple[
+                  anchor_quality: dict[str, TableAnchorQuality]) -> tuple[
                       list[OverlayLine], dict[str, list[OverlayLine]]]:
     if report is None:
         return [
             OverlayLine("collecting two-tag board poses", TABLE_BLUE),
             OverlayLine("keep both complete anchors visible in both views", TABLE_BLUE),
         ], {
-            camera: [OverlayLine(
-                f"{camera}: " + ("both table tags visible" if table_visible[camera] else
-                                  "ANCHOR PAIR INCOMPLETE - show both full tags"),
-                GREEN if table_visible[camera] else RED)]
+            camera: [OverlayLine(f"{camera}: " + format_anchor_quality(
+                anchor_quality[camera]),
+                GREEN if anchor_quality[camera].updated else RED)]
             for camera in CAMERA_NAMES
         }
     status_color = GREEN if report.passed else RED
@@ -465,9 +491,8 @@ def _viewer_lines(report: AlignmentReport | None,
         margins = "/".join(f"{value:.0f}" for value in camera_coverage.margins_px)
         camera_lines[camera] = [
             OverlayLine(
-                "both table anchors visible" if table_visible[camera] else
-                "ANCHOR PAIR INCOMPLETE - show both full tags",
-                GREEN if table_visible[camera] else RED),
+                format_anchor_quality(anchor_quality[camera]),
+                GREEN if anchor_quality[camera].updated else RED),
             OverlayLine(f"{camera} workspace L/R/T/B {margins} px",
                         GREEN if margin_ok else RED),
             OverlayLine(coverage_guidance(
@@ -517,6 +542,8 @@ def main() -> None:
 
     measurements = deque(maxlen=limits.sample_window)
     seen_counts = {camera: 0 for camera in CAMERA_NAMES}
+    pair_detection_counts = {camera: 0 for camera in CAMERA_NAMES}
+    rejection_counts = {camera: Counter() for camera in CAMERA_NAMES}
     viewer = StereoViewer("stereo rig alignment") if args.gui else None
     last_views = {}
     image_sizes = {}
@@ -535,9 +562,13 @@ def main() -> None:
                 by_id = {d.id: d for d in detector.detect(gray)}
                 table_dets[camera] = {
                     tag: by_id[tag] for tag in TABLE_TAG_IDS if tag in by_id}
+                if len(table_dets[camera]) == len(TABLE_TAG_IDS):
+                    pair_detection_counts[camera] += 1
                 if anchors[camera].observe(table_dets[camera]):
                     seen_counts[camera] += 1
                     poses[camera] = anchors[camera].value()
+                else:
+                    rejection_counts[camera][anchors[camera].quality.rejection] += 1
             paired = len(poses) == len(CAMERA_NAMES)
             measurements.append(poses if paired else None)
             loops += 1
@@ -545,12 +576,9 @@ def main() -> None:
             measurement = _current_measurement(
                 measurements, mats, dists, image_sizes, workspace, limits)
             report = None if measurement is None else measurement[1]
-            table_visible = {
-                camera: len(table_dets[camera]) == len(TABLE_TAG_IDS)
-                for camera in CAMERA_NAMES
-            }
             header, camera_lines = _viewer_lines(
-                report, limits, image_sizes, table_visible)
+                report, limits, image_sizes,
+                {camera: anchors[camera].quality for camera in CAMERA_NAMES})
             views = {}
             for camera in CAMERA_NAMES:
                 if report is None:
@@ -590,12 +618,19 @@ def main() -> None:
             print(f"wrote {path}")
 
     if measurement is None:
-        visibility = ", ".join(
-            f"{camera}={seen_counts[camera]}/{loops}"
-            for camera in CAMERA_NAMES)
+        diagnostics = []
+        for camera in CAMERA_NAMES:
+            rejections = ", ".join(
+                f"{reason}={count}"
+                for reason, count in rejection_counts[camera].most_common())
+            diagnostics.append(
+                f"{camera}: accepted={seen_counts[camera]}/{loops}, "
+                f"both-detected={pair_detection_counts[camera]}/{loops}, "
+                f"rejections=[{rejections}], last="
+                f"{format_anchor_quality(anchors[camera].quality)}")
         raise RuntimeError(
-            "no paired two-tag-board pose was measured; per-camera acceptances: "
-            f"{visibility}. Put both complete table tags inside both frames")
+            "no paired two-tag-board pose was measured:\n  "
+            + "\n  ".join(diagnostics))
     report = measurement[1]
     summary = format_report(report, limits)
     print(f"\n{summary}", flush=True)

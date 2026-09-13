@@ -381,12 +381,14 @@ def _wait_for_operator(prompt: str) -> None:
 def _complete_setup(args: argparse.Namespace) -> None:
     print(
         "\nSTAGE 1/4 - VERIFY CAMERA ALIGNMENT\n"
-        "Remove the checkerboard and keep table tags 10 and 11 visible in both views.",
+        "Remove the checkerboard and keep table tags 10 and 11 visible in both views.\n"
+        "Adjust the rig until every check is green, then press q or Esc.",
         flush=True,
     )
     _run_module(
         "real.calib.align_stereo_rig",
         "--family", args.family,
+        "--gui",
     )
 
     _wait_for_operator(
