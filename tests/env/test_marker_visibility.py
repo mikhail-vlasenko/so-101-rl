@@ -64,6 +64,12 @@ def _cfg():
         "floor_force_coeff": 0.0,
         "poke_force_coeff": 0.0,
         "cube_tip_coeff": 0.0,
+        "cube_motion_coeff": 0.0,
+        "ee_cube_coeff": 0.0,
+        "jaw_contact_reward": 0.0,
+        "gripper_close_coeff": 0.0,
+        "cube_motion_deadzone": 0.0,
+        "time_penalty": 0.0,
         "target_height": 0.10,
     }
 

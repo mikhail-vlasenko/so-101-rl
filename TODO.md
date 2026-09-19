@@ -44,10 +44,13 @@ Unresolved, actionable work only. Not a changelog or project-status document.
 
 ## Lift policy deployment
 
-- **Compare refined and reference policies on hardware.** Test first-attempt
-  success and object disturbance with unchanged perception; use
-  `bps_ee_clamp_refine_20260913/final_model.zip` versus
-  `bps_proper_grasp_light3/final_model.zip` under `logs/ppo_lift/`.
+- **Test simpler floor shaping.** Compare weaker binary floor/proximity
+  costs from the same parent, keeping table-slide and floor-force costs fixed.
+  Compare success, table travel and forces across seeds; confirm candidates on held-out starts.
+- **Validate grasp-only refinement on fresh starts and hardware.** Test
+  `bps_grasp_only_full_20m_20260919/final_model.zip` against
+  `bps_ee_clamp_refine_20260913/final_model.zip` under `logs/ppo_lift/`, with
+  unchanged perception; compare first-attempt pickups, sponge motion and floor pushing.
 - **Improve clearance and retention.** Train wider jaw/depth margins, require
   sustained unsupported lift, and prevent repeated height credit after drops.
   Resolve the lift cases in `tests/env/test_review_regressions.py`.

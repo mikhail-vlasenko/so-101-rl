@@ -11,6 +11,10 @@ lift_env:
   cube_smallest_face_only: ${cube_smallest_face_only}   # defined in config.yaml
   cube_no_flat_spawns: ${cube_no_flat_spawns}           # defined in config.yaml
   target_height: 0.10
+  time_penalty: ${lift_time_penalty}
+  # ee_cube_coeff / jaw_contact_reward / gripper_close_coeff are stage-owned:
+  # bootstrap acquisition in none, disabled in light/full.
+  cube_motion_deadzone: ${cube_motion_deadzone}
   success_dwell_steps: 2  # real rollout: consecutive fresh above-target centroid observations
   # Real lift rollout only. The target is FOLDED_REST_QPOS in
   # real/twin/constants.py. The return uses a cosine ramp and the same raw clamp /
@@ -19,7 +23,7 @@ lift_env:
   rest_duration_s: 5.0
   rest_action_scale: 0.025
   rest_settle_s: 1.0
-  # floor_contact_penalty / floor_proximity_* / floor_force_coeff / poke_force_coeff / cube_tip_coeff are
+  # floor_contact_penalty / floor_proximity_* / floor_force_coeff / poke_force_coeff / cube_tip_coeff / cube_motion_coeff are
   # careful-behavior shaping, owned by the `shaping` config group
   # (conf/shaping/{full,light,none}.yaml) so they can be toggled off for stage 1.
   # AprilTag detector dropout (marker_dropout) lives in the `dr` group, not here.

@@ -2,6 +2,16 @@
 
 Simpler than pick-and-place — agent learns to grasp and lift a cube.
 Terminates when cube reaches target height.
+
+Shaping penalizes horizontal object speed only during active cube-table contact,
+regardless of grasp. Contact and travel are accumulated at physics substeps so
+lifting off or landing within a control tick cannot charge airborne transport.
+The deadzone applies per substep; integrated excess travel is divided by the
+control timestep to retain the coefficient's per-m/s-per-control-tick scale.
+Vertical progress and unsupported horizontal transport are free of this term.
+The stage-independent time cost is configured separately to allow careful approaches.
+Distance, jaw contact and closure are bootstrap shaping only (shaping=none).
+In light/full, positive rewards require a proper grasp.
 """
 
 import numpy as np
@@ -10,29 +20,16 @@ from src.base_env import SO101BaseEnv
 
 
 # Reward constants
-TIME_PENALTY = -0.05
-EE_CUBE_COEFF = -0.5
 GRASP_HOLD_REWARD = 0.15         # a static grasp must strictly beat the pre-grasp shaping rungs
 HEIGHT_PROGRESS_COEFF = 200.0    # credited only while grasped
 # Terminal bonus for a grasped lift to target_height. Holding just under the
-# target nets ~+0.09/step (grasp hold minus time and ee-dist penalties) forever,
+# target nets at most +0.14/step with the default time cost (before ee-distance),
 # while crossing the last millimeter pays 200 * 0.001 = 0.2 once and ends the
 # episode — so without this bonus the optimal policy hovers instead of
-# finishing. Must clearly beat the discounted hold annuity: at gamma=0.99 over
-# a full 300-step episode that's ~= 0.09/(1-0.99) ~= 9; re-check if gamma or
-# GRASP_HOLD_REWARD changes.
+# finishing. It must beat the discounted hold annuity: at gamma=0.99 the
+# infinite-horizon upper bound is 0.14/(1-0.99) = 14. Re-check if gamma,
+# time_penalty or GRASP_HOLD_REWARD changes.
 LIFT_BONUS = 15.0
-# Contact-quality bridge reach -> grasp (the gradient out of the local optima).
-# Both rungs are gated on real cube↔jaw contact so the bonus can't be farmed by
-# shoving the sponge with a closed gripper near it (which is what proximity-only
-# shaping produced). The close rung and every proper-grasp reward additionally
-# require load on opposing sponge faces, so a high-friction corner pinch cannot
-# solve the task. Only horizontal flinging is penalized; gentle grasp contact is
-# free.
-JAW_CONTACT_REWARD = 0.05        # one+ gripper jaw touching the cube, pre-grasp
-GRIPPER_CLOSE_COEFF = 0.05       # per unit closedness, only once BOTH jaws straddle the cube
-CUBE_MOTION_COEFF = -1.0         # per m/s of horizontal cube speed past the deadzone, pre-grasp
-CUBE_MOTION_DEADZONE = 0.05      # m/s; cube jitter below this isn't penalized
 
 
 class SO101LiftEnv(SO101BaseEnv):
@@ -44,38 +41,88 @@ class SO101LiftEnv(SO101BaseEnv):
 
     def _parse_config(self, cfg):
         self.target_height = float(cfg["target_height"])
-        # Careful-behavior shaping (floor avoidance + gentle grasp). Owned by the
-        # `shaping` config group (conf/shaping/{full,light,none}.yaml); zeroed for the
-        # from-scratch stage so it can't block learning to grasp at all. Each term
-        # is gated on its coefficient below, so `shaping=none` skips the extra work.
+        self.time_penalty = float(cfg["time_penalty"])
+        assert self.time_penalty <= 0.0, "time_penalty must be nonpositive"
+        self.ee_cube_coeff = float(cfg["ee_cube_coeff"])
+        assert self.ee_cube_coeff <= 0.0, "ee_cube_coeff must be nonpositive"
+        self.jaw_contact_reward = float(cfg["jaw_contact_reward"])
+        self.gripper_close_coeff = float(cfg["gripper_close_coeff"])
+        assert self.jaw_contact_reward >= 0.0, "jaw_contact_reward must be nonnegative"
+        assert self.gripper_close_coeff >= 0.0, "gripper_close_coeff must be nonnegative"
+        # The shaping group owns these costs; none disables them for learning
+        # to grasp from scratch. Table travel is still measured when its cost is zero.
         self.floor_proximity_thresh = float(cfg["floor_proximity_thresh"])
         self.floor_proximity_penalty = float(cfg["floor_proximity_penalty"])
         self.floor_force_coeff = float(cfg["floor_force_coeff"])
         self.poke_force_coeff = float(cfg["poke_force_coeff"])
         self.cube_tip_coeff = float(cfg["cube_tip_coeff"])
+        self.cube_motion_coeff = float(cfg["cube_motion_coeff"])
+        self.cube_motion_deadzone = float(cfg["cube_motion_deadzone"])
+        assert self.cube_motion_coeff <= 0.0, "cube_motion_coeff must be nonpositive"
+        assert self.cube_motion_deadzone >= 0.0, "cube_motion_deadzone must be nonnegative"
 
     def _obs_extra(self, cube_pos):
         return [0.0, 0.0, 0.0, self.TASK_ID]
 
     def _on_reset(self, cube_pos):
         self._prev_cube_pos = cube_pos.copy()
+        self._motion_prev_cube_xy = cube_pos[:2].copy()
+        self._table_slide_distance = 0.0
+        self._table_slide_excess_distance = 0.0
+        self._episode_table_slide_distance = 0.0
+        self._episode_motion_penalty = 0.0
+
+    def _cube_has_table_contact(self):
+        """Active cube-floor contact, not arm-floor contact or a height proxy."""
+        for contact in self.data.contact:
+            if ((contact.geom1 == self.cube_geom_id and contact.geom2 == self.floor_geom_id)
+                    or (contact.geom2 == self.cube_geom_id and contact.geom1 == self.floor_geom_id)):
+                if contact.efc_address >= 0 and contact.dist <= 0.0:
+                    return True
+        return False
+
+    def _record_table_motion(self):
+        cube_xy = self._get_cube_pos()[:2]
+        if self._cube_has_table_contact():
+            distance = float(np.linalg.norm(cube_xy - self._motion_prev_cube_xy))
+            self._table_slide_distance += distance
+            self._table_slide_excess_distance += max(
+                0.0, distance - self.cube_motion_deadzone * self.model.opt.timestep)
+        self._motion_prev_cube_xy = cube_xy.copy()
+
+    def _on_substep(self):
+        # MuJoCo's contacts describe the solve for the just-integrated substep.
+        self._record_table_motion()
+        super()._on_substep()
+
+    def _on_episode_end(self, info):
+        info["episode_table_slide_distance_m"] = self._episode_table_slide_distance
+        info["episode_motion_penalty"] = self._episode_motion_penalty
 
     def _compute_step(self, ee_pos, cube_pos, ee_cube_dist, grasped, floor_contact):
-        reward = TIME_PENALTY
-        reward += EE_CUBE_COEFF * ee_cube_dist
+        reward = self.time_penalty
+        reward += self.ee_cube_coeff * ee_cube_dist
+
+        motion_penalty = self.cube_motion_coeff * self._table_slide_excess_distance / self._step_dt
+        reward += motion_penalty
+        table_slide_distance = self._table_slide_distance
+        self._episode_motion_penalty += motion_penalty
+        self._episode_table_slide_distance += table_slide_distance
+        self._table_slide_distance = 0.0
+        self._table_slide_excess_distance = 0.0
 
         if grasped:
             reward += GRASP_HOLD_REWARD
             height_delta = cube_pos[2] - self._prev_cube_pos[2]
             reward += HEIGHT_PROGRESS_COEFF * height_delta
         else:
-            horiz_speed = np.linalg.norm((cube_pos - self._prev_cube_pos)[:2]) / self._step_dt
-            reward += CUBE_MOTION_COEFF * max(0.0, horiz_speed - CUBE_MOTION_DEADZONE)
-            n_jaw = self._n_jaw_contacts()
-            if n_jaw >= 1:
-                reward += JAW_CONTACT_REWARD
-            if n_jaw == 2 and self._has_opposed_gripper_contact():
-                reward += GRIPPER_CLOSE_COEFF * self._gripper_closedness()
+            if self.jaw_contact_reward or self.gripper_close_coeff:
+                n_jaw = self._n_jaw_contacts()
+                if n_jaw >= 1:
+                    reward += self.jaw_contact_reward
+                # Closure credit requires load on opposing faces, not a corner pinch.
+                if self.gripper_close_coeff and n_jaw == 2 and self._has_opposed_gripper_contact():
+                    reward += self.gripper_close_coeff * self._gripper_closedness()
             # Gentle approach: penalize hard pokes and rolling the sponge over,
             # pre-grasp only (after grasp the cube rides with the gripper).
             if self.poke_force_coeff:
@@ -114,5 +161,7 @@ class SO101LiftEnv(SO101BaseEnv):
             "grasped": grasped,
             "cube_height": cube_pos[2],
             "lift_success": terminated,
+            "motion_penalty": motion_penalty,
+            "table_slide_distance_m": table_slide_distance,
         }
         return reward, terminated, info

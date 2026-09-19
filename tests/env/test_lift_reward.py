@@ -1,7 +1,9 @@
 """Smoke + behavior tests for the lift reward changes."""
 
 import numpy as np
+import mujoco
 import pytest
+from hydra import compose, initialize
 
 from src.base_env import (
     RuntimeEnvConfig,
@@ -9,9 +11,8 @@ from src.base_env import (
     _dominant_loaded_cube_face,
 )
 from src.lift_env import (
-    SO101LiftEnv, CUBE_MOTION_COEFF, CUBE_MOTION_DEADZONE,
-    HEIGHT_PROGRESS_COEFF, GRASP_HOLD_REWARD, LIFT_BONUS, TIME_PENALTY,
-    EE_CUBE_COEFF, JAW_CONTACT_REWARD, GRIPPER_CLOSE_COEFF,
+    SO101LiftEnv,
+    HEIGHT_PROGRESS_COEFF, GRASP_HOLD_REWARD, LIFT_BONUS,
 )
 
 
@@ -31,6 +32,12 @@ def _cfg():
         "floor_force_coeff": 0.0,
         "poke_force_coeff": 0.0,
         "cube_tip_coeff": 0.0,
+        "cube_motion_coeff": -1.0,
+        "cube_motion_deadzone": 0.002,
+        "time_penalty": -0.01,
+        "ee_cube_coeff": -0.5,
+        "jaw_contact_reward": 0.05,
+        "gripper_close_coeff": 0.05,
         "target_height": 0.10,
     }
 
@@ -75,7 +82,7 @@ def test_height_progress_gated_on_grasp(monkeypatch):
     )
     # Pre-grasp vertical rise must NOT be credited the height-progress term, and
     # horizontal-only motion penalty means a purely vertical move isn't penalized.
-    assert reward == pytest.approx(TIME_PENALTY + EE_CUBE_COEFF * 0.05)
+    assert reward == pytest.approx(env.time_penalty + env.ee_cube_coeff * 0.05)
     # If gating broke, this would be > +9 from the height-progress term.
     assert reward > -2.0  # sanity bound
 
@@ -94,8 +101,7 @@ def test_height_progress_credited_when_grasped():
         floor_contact=False,
     )
     assert not terminated
-    # Expected: TIME_PENALTY + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF*0.05
-    assert reward == pytest.approx(-0.05 + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF * 0.05)
+    assert reward == pytest.approx(env.time_penalty + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF * 0.05)
 
 
 def test_lift_success_bonus():
@@ -115,7 +121,7 @@ def test_lift_success_bonus():
     assert terminated
     assert info["lift_success"]
     assert reward == pytest.approx(
-        -0.05 + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF * 0.02 + LIFT_BONUS)
+        env.time_penalty + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF * 0.02 + LIFT_BONUS)
 
 
 def test_floor_proximity_penalty(monkeypatch):
@@ -159,6 +165,7 @@ def test_cube_motion_penalty_pregrasp(monkeypatch):
     env._prev_cube_pos = np.array([0.20, 0.0, 0.05])
     # Move cube 1 cm laterally in one step (dt ~ 0.0667s) → speed ~0.15 m/s
     cube_pos = np.array([0.21, 0.0, 0.05])
+    _record_motion(env, env._prev_cube_pos, cube_pos, True, monkeypatch)
     reward, _, _ = env._compute_step(
         ee_pos=np.array([0.21, 0.0, 0.05]),
         cube_pos=cube_pos,
@@ -168,15 +175,222 @@ def test_cube_motion_penalty_pregrasp(monkeypatch):
     )
     speed = 0.01 / env._step_dt
     # Only horizontal speed past the deadzone is penalized; no jaw contact.
-    expected = TIME_PENALTY + CUBE_MOTION_COEFF * max(0.0, speed - CUBE_MOTION_DEADZONE)
+    expected = env.time_penalty + env.cube_motion_coeff * max(0.0, speed - env.cube_motion_deadzone)
     assert reward == pytest.approx(expected)
 
 
-def test_grasp_contact_ladder_pregrasp(monkeypatch):
-    """Pre-grasp reward rises from one jaw to a closed opposing-face pinch."""
-    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
+@pytest.fixture(params=["none", "light", "full"])
+def motion_env(request, monkeypatch):
+    with initialize(config_path="../../conf", version_base=None):
+        cfg = compose(config_name="config", overrides=[
+            "env=lift", "dr=none", f"shaping={request.param}"])
+    env = SO101LiftEnv(env_cfg=cfg.lift_env, cfg=RuntimeEnvConfig())
     env.reset(seed=0)
-    monkeypatch.setattr(env, "_gripper_closedness", lambda: 1.0)
+    monkeypatch.setattr(env, "_n_jaw_contacts", lambda: 0)
+    monkeypatch.setattr(env, "_min_arm_floor_dist", lambda threshold: threshold)
+    monkeypatch.setattr(env, "_arm_floor_contact_force", lambda: 0.0)
+    monkeypatch.setattr(env, "_arm_cube_contact_force", lambda: 0.0)
+    monkeypatch.setattr(env, "_cube_angular_speed", lambda: 0.0)
+    assert env.cube_motion_coeff == {"none": 0.0, "light": -2.5, "full": -5.0}[request.param]
+    assert env.cube_motion_deadzone == cfg.cube_motion_deadzone == 0.002
+    assert env.time_penalty == cfg.lift_time_penalty == -0.01
+    assert env.ee_cube_coeff == {"none": -0.5, "light": 0.0, "full": 0.0}[request.param]
+    assert env.jaw_contact_reward == {"none": 0.05, "light": 0.0, "full": 0.0}[request.param]
+    assert env.gripper_close_coeff == {"none": 0.05, "light": 0.0, "full": 0.0}[request.param]
+    assert LIFT_BONUS > (GRASP_HOLD_REWARD + env.time_penalty) / (1.0 - cfg.train.gamma)
+    yield env
+    env.close()
+
+
+@pytest.mark.parametrize("grasped", [False, True])
+def test_distance_shaping_only_in_bootstrap_stage(motion_env, grasped):
+    env = motion_env
+    cube = env._get_cube_pos().copy()
+    near, _, near_info = env._compute_step(cube, cube, 0.02, grasped, False)
+    far, _, far_info = env._compute_step(cube, cube, 0.20, grasped, False)
+    assert far - near == pytest.approx(env.ee_cube_coeff * 0.18)
+    assert near_info["ee_cube_dist"] == 0.02
+    assert far_info["ee_cube_dist"] == 0.20
+
+
+@pytest.mark.parametrize("grasped", [False, True])
+@pytest.mark.parametrize("supported", [False, True])
+@pytest.mark.parametrize("speed", [0.0, 0.001, 0.002, 0.01, 0.05])
+def test_horizontal_motion_penalty_across_stages_and_grasps(
+        motion_env, grasped, supported, speed, monkeypatch):
+    env = motion_env
+    # Support is mocked independently of height and grasp; geometry is tested below.
+    start = np.array([0.2, 0.0, 0.08])
+    cube = start + np.array([-0.6, 0.8, 0.0]) * speed * env._step_dt
+    env._prev_cube_pos = start.copy()
+    _record_motion(env, start, cube, supported, monkeypatch)
+    reward, terminated, info = env._compute_step(cube, cube, 0.0, grasped, False)
+    expected_motion = (env.cube_motion_coeff * max(0.0, speed - env.cube_motion_deadzone)
+                       if supported else 0.0)
+    expected = env.time_penalty + (GRASP_HOLD_REWARD if grasped else 0.0) + expected_motion
+    assert reward == pytest.approx(expected)
+    assert not terminated
+    assert info["motion_penalty"] == pytest.approx(expected_motion)
+    assert info["table_slide_distance_m"] == pytest.approx(speed * env._step_dt if supported else 0.0)
+    np.testing.assert_array_equal(env._prev_cube_pos, cube)
+    # Once movement stops, the preceding tick's displacement must not be charged again.
+    stopped, _, _ = env._compute_step(cube, cube, 0.0, grasped, False)
+    assert stopped == pytest.approx(env.time_penalty + (GRASP_HOLD_REWARD if grasped else 0.0))
+
+
+@pytest.mark.parametrize("grasped", [False, True])
+def test_vertical_motion_stays_free_of_sliding_penalty(motion_env, grasped, monkeypatch):
+    env = motion_env
+    env._prev_cube_pos = np.array([0.2, 0.0, 0.05])
+    cube = np.array([0.2, 0.0, 0.09])
+    _record_motion(env, env._prev_cube_pos, cube, True, monkeypatch)
+    reward, _, _ = env._compute_step(cube, cube, 0.0, grasped, False)
+    expected = env.time_penalty
+    if grasped:
+        expected += GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF * 0.04
+    assert reward == pytest.approx(expected)
+
+
+def test_careful_approach_time_and_motion_tradeoff(motion_env, monkeypatch):
+    env = motion_env
+    start = np.array([0.2, 0.0, 0.05])
+    env._prev_cube_pos = start.copy()
+    wait_return = sum(env._compute_step(start, start, 0.0, False, False)[0]
+                      for _ in range(10))
+    assert 10 * env._step_dt == pytest.approx(2 / 3)
+    assert wait_return == pytest.approx(-0.1)
+
+    moved = start + np.array([0.05, 0.0, 0.0])
+    _record_motion(env, start, moved, True, monkeypatch)
+    slide_return, _, _ = env._compute_step(moved, moved, 0.0, False, False)
+    if env.cube_motion_coeff:
+        assert slide_return < wait_return
+
+
+def _record_motion(env, start, end, supported, monkeypatch):
+    """Replay a constant-velocity control interval without the observation pipeline."""
+    monkeypatch.setattr(env, "_cube_has_table_contact", lambda: supported)
+    env._motion_prev_cube_xy = start[:2].copy()
+    for i in range(env.n_substeps):
+        env.data.qpos[env.cube_qpos_idx:env.cube_qpos_idx + 3] = (
+            start + (end - start) * (i + 1) / env.n_substeps)
+        env._record_table_motion()
+
+
+@pytest.mark.parametrize("landing", [False, True])
+def test_support_transition_only_charges_supported_substeps(motion_env, monkeypatch, landing):
+    env = motion_env
+    start = np.array([0.2, 0.0, 0.05])
+    env._motion_prev_cube_xy = start[:2].copy()
+    end = start.copy()
+    # Lift-off / landing halfway through one control tick. Airborne travel is
+    # deliberately faster, and must not leak into the next supported substep.
+    for i in range(env.n_substeps):
+        supported = (i >= env.n_substeps // 2) == landing
+        monkeypatch.setattr(env, "_cube_has_table_contact", lambda value=supported: value)
+        end[0] += (0.03 if supported else 0.3) * env.model.opt.timestep
+        env.data.qpos[env.cube_qpos_idx:env.cube_qpos_idx + 3] = end
+        env._record_table_motion()
+    _, _, info = env._compute_step(end, end, 0.0, True, False)
+    distance = 0.03 * env._step_dt / 2
+    assert info["table_slide_distance_m"] == pytest.approx(distance)
+    assert info["motion_penalty"] == pytest.approx(
+        env.cube_motion_coeff * (0.03 - env.cube_motion_deadzone) / 2)
+    _, _, stopped = env._compute_step(end, end, 0.0, True, False)
+    assert stopped["motion_penalty"] == 0.0
+    assert stopped["table_slide_distance_m"] == 0.0
+    end_info = {}
+    env._on_episode_end(end_info)
+    assert end_info["episode_table_slide_distance_m"] == pytest.approx(distance)
+    assert end_info["episode_motion_penalty"] == pytest.approx(info["motion_penalty"])
+    env.reset(seed=1)
+    reset_info = {}
+    env._on_episode_end(reset_info)
+    assert reset_info["episode_table_slide_distance_m"] == 0.0
+    assert reset_info["episode_motion_penalty"] == 0.0
+    assert env._table_slide_distance == env._table_slide_excess_distance == 0.0
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_table_contact_detection_uses_actual_rotated_geometry(axis):
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
+    try:
+        env.reset(seed=0)
+        quat = np.array([1.0, 0.0, 0.0, 0.0])
+        if axis == 0:
+            quat = np.array([np.sqrt(0.5), 0.0, np.sqrt(0.5), 0.0])
+        elif axis == 1:
+            quat = np.array([np.sqrt(0.5), np.sqrt(0.5), 0.0, 0.0])
+        idx = env.cube_qpos_idx
+        env.data.qpos[idx:idx + 3] = [0.25, 0.0, env.cube_half_extents[axis] - 0.0001]
+        env.data.qpos[idx + 3:idx + 7] = quat
+        mujoco.mj_forward(env.model, env.data)
+        assert env._cube_has_table_contact()
+        # Even a 1mm gap is free; the old near-table height proxy would include it.
+        env.data.qpos[idx + 2] += 0.0011
+        mujoco.mj_forward(env.model, env.data)
+        assert not env._cube_has_table_contact()
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("airborne", [False, True])
+def test_physics_substeps_report_table_motion_and_episode_totals(airborne):
+    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
+    try:
+        env.reset(seed=0, options={
+            "cube_pos": np.array([0.25, 0.0, 0.15 if airborne else
+                                  env.model.geom_size[env.cube_geom_id, 2] - 0.0001]),
+            "cube_quat": np.array([1.0, 0.0, 0.0, 0.0])})
+        env.data.qvel[env.cube_dofadr] = 0.2
+        mujoco.mj_forward(env.model, env.data)
+        env.step_count = env.max_steps - 1
+        _, _, _, truncated, info = env.step(np.zeros(6, dtype=np.float32))
+        assert truncated
+        if airborne:
+            assert info["motion_penalty"] == 0.0
+            assert info["table_slide_distance_m"] == 0.0
+        else:
+            assert info["motion_penalty"] < 0.0
+            assert info["table_slide_distance_m"] > 0.0
+        assert info["episode_motion_penalty"] == info["motion_penalty"]
+        assert info["episode_table_slide_distance_m"] == info["table_slide_distance_m"]
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("time_penalty", [0.0, -0.01, -0.05])
+def test_time_penalty_config_override(time_penalty):
+    with initialize(config_path="../../conf", version_base=None):
+        cfg = compose(config_name="config", overrides=[
+            "env=lift", "shaping=none", f"lift_time_penalty={time_penalty}"])
+    env = SO101LiftEnv(env_cfg=cfg.lift_env, cfg=RuntimeEnvConfig())
+    try:
+        env.reset(seed=0)
+        cube = env._get_cube_pos().copy()
+        reward, _, _ = env._compute_step(cube, cube, 0.0, False, False)
+        assert env.time_penalty == time_penalty
+        assert reward == pytest.approx(time_penalty)
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("key,value", [
+    ("cube_motion_coeff", 0.1), ("cube_motion_deadzone", -0.001),
+    ("time_penalty", 0.01), ("ee_cube_coeff", 0.1),
+    ("jaw_contact_reward", -0.05), ("gripper_close_coeff", -0.05)])
+def test_invalid_motion_penalty_config_fails_loudly(key, value):
+    cfg = _cfg()
+    cfg[key] = value
+    with pytest.raises(AssertionError, match=key):
+        SO101LiftEnv(env_cfg=cfg, cfg=RuntimeEnvConfig())
+
+
+@pytest.mark.parametrize("closedness", [0.0, 0.5, 1.0])
+def test_grasp_contact_ladder_pregrasp(motion_env, monkeypatch, closedness):
+    """Only bootstrap shaping pays for touching/closing before a proper grasp."""
+    env = motion_env
+    monkeypatch.setattr(env, "_gripper_closedness", lambda: closedness)
     kwargs = dict(ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
                   ee_cube_dist=0.02, grasped=False, floor_contact=False)
 
@@ -192,10 +406,16 @@ def test_grasp_contact_ladder_pregrasp(monkeypatch):
     r_opposed = step_with(2, opposed=True)
     # A corner pinch earns only the generic contact rung. The close reward is
     # reserved for two jaws loading opposite faces.
-    assert r1 == pytest.approx(r0 + JAW_CONTACT_REWARD)
+    assert r1 == pytest.approx(r0 + env.jaw_contact_reward)
     assert r_corner == pytest.approx(r1)
     assert r_opposed == pytest.approx(
-        r0 + JAW_CONTACT_REWARD + GRIPPER_CLOSE_COEFF)  # closedness=1
+        r0 + env.jaw_contact_reward + env.gripper_close_coeff * closedness)
+    # Proper grasp keeps its hold/progress reward; pre-grasp bonuses don't stack.
+    env._prev_cube_pos = kwargs["cube_pos"] - np.array([0.0, 0.0, 0.01])
+    kwargs["grasped"] = True
+    grasp_reward, terminated, _ = env._compute_step(**kwargs)
+    assert not terminated
+    assert grasp_reward == pytest.approx(r0 + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF * 0.01)
 
 
 def test_loaded_contact_faces_are_classified_in_cube_frame():
@@ -249,7 +469,7 @@ def test_poke_force_penalty_pregrasp(monkeypatch):
         ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
         ee_cube_dist=0.0, grasped=False, floor_contact=False,
     )
-    assert reward == pytest.approx(TIME_PENALTY + env.poke_force_coeff * 20.0)
+    assert reward == pytest.approx(env.time_penalty + env.poke_force_coeff * 20.0)
 
 
 def test_floor_force_penalty_applies_while_grasped(monkeypatch):
@@ -267,7 +487,7 @@ def test_floor_force_penalty_applies_while_grasped(monkeypatch):
         ee_cube_dist=0.0, grasped=True, floor_contact=False,
     )
     assert reward == pytest.approx(
-        TIME_PENALTY + GRASP_HOLD_REWARD + env.floor_force_coeff * 15.0)
+        env.time_penalty + GRASP_HOLD_REWARD + env.floor_force_coeff * 15.0)
 
 
 def test_cube_tip_penalty_pregrasp(monkeypatch):
@@ -282,7 +502,7 @@ def test_cube_tip_penalty_pregrasp(monkeypatch):
         ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
         ee_cube_dist=0.0, grasped=False, floor_contact=False,
     )
-    assert reward == pytest.approx(TIME_PENALTY + env.cube_tip_coeff * 2.0)
+    assert reward == pytest.approx(env.time_penalty + env.cube_tip_coeff * 2.0)
 
 
 def test_shaping_terms_skipped_when_zero(monkeypatch):
@@ -300,4 +520,4 @@ def test_shaping_terms_skipped_when_zero(monkeypatch):
         ee_pos=np.array([0.20, 0.0, 0.05]), cube_pos=np.array([0.20, 0.0, 0.05]),
         ee_cube_dist=0.0, grasped=False, floor_contact=False,
     )
-    assert reward == pytest.approx(TIME_PENALTY)
+    assert reward == pytest.approx(env.time_penalty)

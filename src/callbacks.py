@@ -90,7 +90,7 @@ class MarkerHiddenCallback(BaseCallback):
 
 
 class CubeDragCallback(BaseCallback):
-    """Log mean per-episode cube-drag ratio (cube near floor + lateral motion)."""
+    """Log drag ratio and lift-only contact-based travel / paid motion reward."""
 
     def _on_step(self) -> bool:
         for done, info in zip(self.locals["dones"], self.locals["infos"]):
@@ -99,6 +99,11 @@ class CubeDragCallback(BaseCallback):
                 self.logger.record_mean("rollout/cube_drag_ratio", val)
                 if "task_name" in info:
                     self.logger.record_mean(f"rollout/{info['task_name']}/cube_drag_ratio", val)
+            if done and "episode_table_slide_distance_m" in info:
+                self.logger.record_mean("rollout/mean_table_slide_distance_m",
+                                        info["episode_table_slide_distance_m"])
+                self.logger.record_mean("rollout/mean_motion_penalty",
+                                        info["episode_motion_penalty"])
         return True
 
 

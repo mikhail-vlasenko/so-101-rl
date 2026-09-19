@@ -31,6 +31,24 @@ def test_hydra_command_golden():
                     "+episodes=5", "render=false"]
 
 
+def test_lift_reward_overrides_are_forwarded_without_panel_defaults():
+    spec = get_spec("train")
+    argv = build_command(spec, {
+        "env": "lift", "cube_motion_deadzone": "0.001",
+        "lift_time_penalty": "-0.02",
+        "lift_env.ee_cube_coeff": "0.0",
+        "lift_env.jaw_contact_reward": "0.0",
+        "lift_env.gripper_close_coeff": "0.0",
+        "lift_env.cube_motion_coeff": "-0.2",
+    })
+    assert argv == ["-m", "src.train", "env=lift", "cube_motion_deadzone=0.001",
+                    "lift_time_penalty=-0.02",
+                    "lift_env.ee_cube_coeff=0.0",
+                    "lift_env.jaw_contact_reward=0.0",
+                    "lift_env.gripper_close_coeff=0.0",
+                    "lift_env.cube_motion_coeff=-0.2"]
+
+
 def test_argparse_command_golden_with_flag_and_stream():
     spec = get_spec("rollout_lift")
     argv = build_command(spec, {
