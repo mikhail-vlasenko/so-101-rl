@@ -70,6 +70,10 @@ def test_paired_refinement_benchmark():
     Repeat with the same CONFIG, SEED and EPISODES for paired starts. This measures
     current first-height-crossing success, not sustained retention or real pickup.
     Floor forces are sampled at control ticks, not substep impact peaks.
+    Near-table travel uses the existing drag metric's height proxy, without its
+    speed threshold; it is not a direct measurement of table contact.
+    table_slide_distance_m and motion_penalty_return come from the reward's
+    physics-substep contact accumulator, not reconstructed control-tick speeds.
     """
     if "LIFT_BENCHMARK_CONFIG" not in os.environ:
         pytest.skip("Set LIFT_BENCHMARK_* to run the paired refinement benchmark")
@@ -93,6 +97,12 @@ def test_paired_refinement_benchmark():
             obs, _ = env.reset(seed=seed)
             start_qpos = env.data.qpos.copy().tolist()
             cube_start = env._get_cube_pos().copy()
+            cube_previous = cube_start.copy()
+            xy_path = 0.0
+            grasped_xy_path = 0.0
+            near_table_xy_path = 0.0
+            motion_penalty_return = 0.0
+            table_slide_distance = 0.0
             # The local axis closest to world-up identifies flat/side/upright.
             vertical_axis = int(np.argmax(np.abs(env.data.geom_xmat[env.cube_geom_id].reshape(3, 3)[2])))
             orientation = ("upright", "side", "flat")[vertical_axis]
@@ -108,10 +118,20 @@ def test_paired_refinement_benchmark():
                 obs, reward, terminated, truncated, info = env.step(action)
                 assert np.isfinite(reward) and np.all(np.isfinite(obs))
                 total_reward += float(reward)
+                cube_current = env._get_cube_pos().copy()
+                xy_step = float(np.linalg.norm(cube_current[:2] - cube_previous[:2]))
+                xy_path += xy_step
+                motion_penalty_return += info["motion_penalty"]
+                table_slide_distance += info["table_slide_distance_m"]
+                if cube_current[2] < env.cube_rest_half_z + env.DRAG_HEIGHT_TOL:
+                    near_table_xy_path += xy_step
+                cube_previous = cube_current
                 if not ever_grasped:
-                    displacement = np.linalg.norm(env._get_cube_pos()[:2] - cube_start[:2])
+                    displacement = np.linalg.norm(cube_current[:2] - cube_start[:2])
                     pregrasp_displacement = max(pregrasp_displacement, float(displacement))
                 grasped = bool(info["grasped"])
+                if grasped:
+                    grasped_xy_path += xy_step
                 grasp_losses += int(was_grasped and not grasped)
                 ever_grasped |= grasped
                 was_grasped = grasped
@@ -126,15 +146,22 @@ def test_paired_refinement_benchmark():
                 "return": total_reward, "ever_grasped": ever_grasped,
                 "grasp_losses": grasp_losses,
                 "pregrasp_max_xy_displacement_m": pregrasp_displacement,
+                "xy_path_m": xy_path, "grasped_xy_path_m": grasped_xy_path,
+                "near_table_xy_path_m": near_table_xy_path,
+                "motion_penalty_return": motion_penalty_return,
+                "table_slide_distance_m": table_slide_distance,
                 "mean_floor_force_n": float(np.mean(floor_forces)),
                 "max_tick_floor_force_n": float(np.max(floor_forces)),
                 "first_jaw_contact_angle_rad": first_contact_angle,
                 "drag_ratio": float(info["cube_drag_ratio"]),
             }
+            assert table_slide_distance == pytest.approx(info["episode_table_slide_distance_m"])
+            assert motion_penalty_return == pytest.approx(info["episode_motion_penalty"])
             rows.append(row)
             print(f"{checkpoint.parent.name}: {len(rows)}/{episodes} "
                   f"success={row['success']} steps={row['steps']}", flush=True)
         artifacts = [checkpoint, config_path, Path("so101/so101.xml"),
+                     Path("src/lift_env.py"), Path("src/base_env.py"),
                      Path("real/follower_calibration.json"), Path("real/calib/calibration.yaml")]
         result = {
             "checkpoint": str(checkpoint),
