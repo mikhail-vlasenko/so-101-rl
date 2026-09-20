@@ -1378,13 +1378,15 @@ class SO101BaseEnv(SO101ArmEnv):
         return float(np.linalg.norm(w))
 
     def _detect_grasp(self):
-        """Grasp = cube close to EE + gripper closing + opposing jaw contact."""
+        """Grasp = cube close to EE + load-bearing opposing jaw contact.
+
+        Wide sponge grasps can hold the jaws open, so joint angle is not a
+        grasp criterion.
+        """
         ee_pos = self._get_ee_pos()
         cube_pos = self._get_cube_pos()
         dist = np.linalg.norm(ee_pos - cube_pos)
-        gripper_val = self.data.qpos[self.joint_ids[self.gripper_idx]]
         return (dist < 0.05
-                and gripper_val < 0.3
                 and self._has_opposed_gripper_contact())
 
     def _gripper_closedness(self):
