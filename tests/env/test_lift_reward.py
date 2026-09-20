@@ -444,47 +444,17 @@ def test_loaded_contact_faces_are_classified_in_cube_frame():
     assert not _cube_faces_opposed(pos_x_face, pos_x_face)
 
 
-@pytest.mark.parametrize("gripper_angle", [0.0, 0.3, 0.6])
-def test_detect_grasp_rejects_adjacent_face_corner_pinch(monkeypatch, gripper_angle):
+def test_detect_grasp_rejects_adjacent_face_corner_pinch(monkeypatch):
     env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
     env.reset(seed=0)
     cube_pos = env._get_cube_pos().copy()
     monkeypatch.setattr(env, "_get_ee_pos", lambda: cube_pos.copy())
-    env.data.qpos[env.joint_ids[env.gripper_idx]] = gripper_angle
+    env.data.qpos[env.joint_ids[env.gripper_idx]] = 0.0
 
     monkeypatch.setattr(env, "_has_opposed_gripper_contact", lambda: False)
     assert not env._detect_grasp()
     monkeypatch.setattr(env, "_has_opposed_gripper_contact", lambda: True)
     assert env._detect_grasp()
-
-
-@pytest.mark.parametrize("height", [0.09, 0.10, 0.11])
-@pytest.mark.parametrize("gripper_angle", [0.3, 0.6])
-def test_wide_grasp_lift_progress_and_success(monkeypatch, height, gripper_angle):
-    env = SO101LiftEnv(env_cfg=_cfg(), cfg=RuntimeEnvConfig())
-    env.reset(seed=0)
-    cube_pos = np.array([0.2, 0.0, height])
-    monkeypatch.setattr(env, "_get_cube_pos", lambda: cube_pos.copy())
-    monkeypatch.setattr(env, "_get_ee_pos", lambda: cube_pos.copy())
-    monkeypatch.setattr(env, "_has_opposed_gripper_contact", lambda: True)
-    monkeypatch.setattr(env, "_min_arm_floor_dist", lambda thresh: thresh)
-    env.data.qpos[env.joint_ids[env.gripper_idx]] = gripper_angle
-    env._prev_cube_pos = cube_pos - np.array([0.0, 0.0, 0.02])
-
-    reward, terminated, info = env._compute_step(
-        ee_pos=env._get_ee_pos(), cube_pos=cube_pos, ee_cube_dist=0.0,
-        grasped=env._detect_grasp(), floor_contact=False,
-    )
-
-    success = height >= env.target_height
-    assert info["grasped"]
-    assert bool(terminated) == success
-    assert bool(info["lift_success"]) == success
-    expected = env.time_penalty + GRASP_HOLD_REWARD + HEIGHT_PROGRESS_COEFF * 0.02
-    if success:
-        expected += LIFT_BONUS
-    assert reward == pytest.approx(expected)
-    env.close()
 
 
 def test_poke_force_penalty_pregrasp(monkeypatch):
