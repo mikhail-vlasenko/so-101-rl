@@ -1,0 +1,25 @@
+{
+  "name": "perception-explainer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "render:story": "node scripts/render-story.mjs",
+    "render:motion": "node scripts/render-motion.mjs",
+    "render:film": "node scripts/render-film.mjs",
+    "test:film": "node --test scripts/film.test.mjs",
+    "test:motion": "node --test scripts/motion.test.mjs"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "three": "^0.186.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0",
+    "vite": "^7.0.0"
+  }
+}
