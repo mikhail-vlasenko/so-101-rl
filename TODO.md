@@ -2,6 +2,20 @@
 
 Unresolved, actionable work only. Not a changelog or project-status document.
 
+## Perception explainer
+
+- **Record the explainer's voiceover.** Record the script in
+  explainer preview's generated “Narration script” against the captioned timeline, adjust wording
+  or pauses as needed, and mux the approved narration into the MP4.
+- **Review the complete explainer's pacing.** Watch the full film with someone
+  unfamiliar with robotics; check that the surface-only orbit, held cloud,
+  two shutter captures, and false depth are understandable, then revise any
+  confusing beats while keeping the ending within the timeline's duration limit.
+- **Decide whether to include recorded perception.** Review whether a short
+  real camera/cloud insert would improve the rendered explanation; if so,
+  obtain a matching still–lateral movement–still sequence with masks, positions,
+  and accepted clouds, and verify its timing before including it.
+
 ## Tag-free object tracking (dual C922 + SAM), follow-ups
 
 - **Pickplace dense-stereo rollout.** Add the equivalent camera object source to

@@ -6,6 +6,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FILM_DURATION, FILM_FPS, FILM_CAPTIONS, FILM_VIDEO } from '../src/filmTimeline.js';
+import { FILM_REVIEW_TIMES } from './film-review.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const output = path.resolve(root, process.argv[2] || `public${FILM_VIDEO}`);
@@ -22,8 +23,7 @@ try {
   await page.evaluate(() => document.fonts.ready);
   encoder = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-n', '-f', 'image2pipe', '-framerate', String(FILM_FPS), '-vcodec', 'png', '-i', 'pipe:0', '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', output], { stdio: ['pipe', 'inherit', 'inherit'] });
   const completion = once(encoder, 'close');
-  const reviewSeconds = [0, 1.6, 3, 4, 6, 10, 12, 15, 20.1, 20.6, 20.95, 22.4, 23, 26.8, 32, 34.8, 35.6, 36, 37.8, 39.5, 43, 47.6, 48, 48.8, 52.8, FILM_DURATION - 0.5];
-  const reviewFrames = new Set(reviewSeconds.map((seconds) => Math.round(seconds * FILM_FPS)));
+  const reviewFrames = new Set(FILM_REVIEW_TIMES.map((seconds) => Math.round(seconds * FILM_FPS)));
   for (let index = 0; index < FILM_DURATION * FILM_FPS; index++) {
     if (errors.length) throw new Error(errors.join('\n'));
     const result = await page.evaluate((seconds) => window.perceptionFilm.renderFrame(seconds), index / FILM_FPS);

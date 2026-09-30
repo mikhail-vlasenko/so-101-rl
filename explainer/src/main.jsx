@@ -6,7 +6,8 @@ import { SCENE_STYLES } from './sceneStyles.js';
 import { DRAFT_DURATION, sampleDraft } from './motionDraft.js';
 import { STORY_FRAMES } from './storyFrames.js';
 import { FilmScene } from './FilmScene.jsx';
-import { FILM_DURATION, FILM_VIDEO, FILM_CAPTION_FILE, sampleFilm } from './filmTimeline.js';
+import { FILM_DURATION, FILM_SCRIPT, FILM_VIDEO, FILM_CAPTION_FILE, sampleFilm } from './filmTimeline.js';
+import { SPONGE_SIZE } from './sceneConfig.js';
 
 function App() {
   const clean = new URLSearchParams(window.location.search).has('frame');
@@ -116,10 +117,14 @@ function App() {
       </div>}
       {!clean && <footer><span>{film ? sampleFilm(time).chapter.title : keyframe ? STORY_FRAMES[keyframe].note : motion ? sampleDraft(time).phase : 'Drag to orbit · scroll to zoom · right-drag to pan'}</span><span>{timed ? 'Drag to pause and explore · play resumes the authored camera' : 'Drag to orbit · scroll to zoom · right-drag to pan'}</span></footer>}
       {!clean && film && <details className="film-notes">
+        <summary>Narration script</summary>
+        <p>{FILM_SCRIPT}</p>
+      </details>}
+      {!clean && film && <details className="film-notes">
         <summary>How this maps to the real system</summary>
         <p>SAM 3 finds the object from the prompt “sponge”; SAM 2 tracks its pixels in each image. The two mask centers provide an approximate position. That estimate can also have timing errors.</p>
         <p>Dense stereo matches image details to measure the visible surface. Independent cameras expose at different times: rectifying their images aligns geometry, but cannot align the moments they captured. During movement the system holds its last accepted surface measurement, then attempts a refresh after the object settles.</p>
-        <p>This film uses rendered illustrations of the 6 × 4 × 2.5 cm sponge and a fixed camera pair. Motion eases into and out of a steady cruising speed; travel is compressed while the sponge is faded out for the depth explanation. The spacing between shutters is illustrative, not a measured camera delay. The cloud shows only the three observed faces.</p>
+        <p>This film uses rendered illustrations of the {SPONGE_SIZE[0]} × {SPONGE_SIZE[2]} × {SPONGE_SIZE[1]} cm sponge and a fixed camera pair. Motion eases into and out of a steady cruising speed; travel is compressed while the sponge is faded out for the depth explanation. The spacing between shutters is illustrative, not a measured camera delay. The cloud shows only the three observed faces.</p>
         <a href={FILM_CAPTION_FILE} download>Last exported captions</a>
       </details>}
     </main>

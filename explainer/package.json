@@ -7,6 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
+    "script": "node scripts/print-script.mjs",
     "render:story": "node scripts/render-story.mjs",
     "render:motion": "node scripts/render-motion.mjs",
     "render:film": "node scripts/render-film.mjs",

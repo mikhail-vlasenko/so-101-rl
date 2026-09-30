@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { buildStoryFrame, capture, panel, ghost, spongeCorner, beam, dot, closestRayPoint, textLabel } from './storyFrames.js';
 import { CAMERA_A_COLOR, CAMERA_B_COLOR } from './sceneConfig.js';
-import { SHUTTERS, spongeX, introView } from './filmTimeline.js';
+import { SHUTTERS, INTRO_TIMING, spongeX, introView } from './filmTimeline.js';
 import { LIVE_X, SNAPSHOT_X } from './motionDraft.js';
 import { buildSurfaceReconstruction } from './surfaceReconstruction.js';
 import { buildImageCenterCue } from './imageCenterCue.js';
@@ -18,7 +18,7 @@ export function buildFilmShot(objects, id, renderer) {
     mask.scale.setScalar(1.012);
     objects.scene.add(mask);
     objects.modelMask = mask;
-    const view = introView(8, objects.captureCameras[0].lens.toArray());
+    const view = introView((INTRO_TIMING.lensEntryEnd + INTRO_TIMING.pullbackStart) / 2, objects.captureCameras[0].lens.toArray());
     const camera = new THREE.PerspectiveCamera(view.fov, 16 / 9, 0.1, 2000);
     camera.position.set(...view.eye);
     camera.lookAt(...view.target);

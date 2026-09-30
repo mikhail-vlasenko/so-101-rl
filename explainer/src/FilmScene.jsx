@@ -4,9 +4,10 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildScene } from './PerceptionScene.jsx';
 import { STORY_FRAMES } from './storyFrames.js';
 import { buildFilmShot } from './filmShots.js';
+import { buildCaptionLayer } from './captionLayer.js';
 import { LIVE_X } from './motionDraft.js';
 import { CAMERA_A_COLOR, CAMERA_B_COLOR } from './sceneConfig.js';
-import { FILM_DURATION, FILM_SHOTS, REFRESH_AT, SHUTTERS, ease, sampleFilm, surfaceView, surfaceReconstruction, introView, movementView } from './filmTimeline.js';
+import { FILM_DURATION, FILM_SHOTS, REFRESH_AT, REFRESH_END, SHUTTERS, SHUTTER_EFFECTS, INTRO_TIMING, LABEL_TIMING, DEPTH_CLEANUP, SURFACE_CONTEXT_FADE, DEPTH_RECONSTRUCTION, ease, sampleFilm, surfaceView, surfaceReconstruction, introView, movementView } from './filmTimeline.js';
 
 function groupMaterials(materials, group) {
   return materials.filter(({ object }) => {
@@ -90,8 +91,9 @@ export function FilmScene({ onTime, onPlaying }) {
     const hud = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
     hud.renderOrder = 2;
     const black = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ color: '#080d15', transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
-    black.renderOrder = 3;
+    black.renderOrder = 6;
     composite.add(background, foreground, hud, black);
+    const captions = buildCaptionLayer(composite);
 
     const controls = new OrbitControls(shots.intro.camera, renderer.domElement);
     controls.enableDamping = true;
@@ -106,8 +108,8 @@ export function FilmScene({ onTime, onPlaying }) {
     const exporting = new URLSearchParams(window.location.search).has('export');
 
     const drawHud = (state) => {
-      const prompt = state.time >= 4 && state.time < 10.5;
-      const key = `${state.chapter.number}|${state.caption}|${state.captionOpacity}|${prompt}`;
+      const prompt = state.time >= INTRO_TIMING.lensEntryEnd && state.time < INTRO_TIMING.pullbackStart;
+      const key = `${state.chapter.number}|${prompt}`;
       if (key === hudKey) return;
       hudKey = key;
       ctx.clearRect(0, 0, 1280, 720);
@@ -131,20 +133,11 @@ export function FilmScene({ onTime, onPlaying }) {
       }
       // Keep the subtitle backdrop through cue gaps; toggling it with the text
       // made the whole lower scene flash between captions and chapters.
-      const bottom = ctx.createLinearGradient(0, 565, 0, 720);
+      const bottom = ctx.createLinearGradient(0, 520, 0, 720);
       bottom.addColorStop(0, '#080d1500');
       bottom.addColorStop(1, '#080d15ed');
       ctx.fillStyle = bottom;
-      ctx.fillRect(0, 565, 1280, 155);
-      if (state.caption) {
-        ctx.globalAlpha = state.captionOpacity;
-        const lines = state.caption.split('\n');
-        ctx.textAlign = 'center';
-        ctx.font = '400 28px Arial';
-        ctx.fillStyle = '#f0f5f9';
-        lines.forEach((line, index) => ctx.fillText(line, 640, lines.length === 1 ? 661 : 636 + index * 37));
-        ctx.globalAlpha = 1;
-      }
+      ctx.fillRect(0, 520, 1280, 200);
       hudTexture.needsUpdate = true;
     };
 
@@ -156,8 +149,8 @@ export function FilmScene({ onTime, onPlaying }) {
       let fov = frame.fov || 43;
       if (id === 'intro') {
         ({ eye, target, fov } = introView(state.time, objects.captureCameras[0].lens.toArray()));
-        const pullback = ease(state.time, 10.5, 16);
-        objects.modelMask.material.opacity = 0.57 * ease(state.time, 4.4, 6.8) * (1 - ease(state.time, 12.5, 15.5));
+        const pullback = ease(state.time, INTRO_TIMING.pullbackStart, INTRO_TIMING.pullbackEnd);
+        objects.modelMask.material.opacity = 0.57 * ease(state.time, INTRO_TIMING.maskStart, INTRO_TIMING.maskEnd) * (1 - ease(state.time, INTRO_TIMING.maskFadeStart, INTRO_TIMING.maskFadeEnd));
         objects.modelMask.visible = objects.modelMask.material.opacity > 0;
         objects.sponge.material.transparent = false;
         objects.sponge.material.opacity = 1;
@@ -171,9 +164,9 @@ export function FilmScene({ onTime, onPlaying }) {
           mesh.position.copy(origin).multiplyScalar(1 - state.centerConvergence);
           mesh.material.opacity = 0.85 * state.centerCueOpacity;
         }
-        objects.position.position.copy(cue.center).lerp(objects.positionEstimate, ease(state.time, 10.5, 14.5));
+        objects.position.position.copy(cue.center).lerp(objects.positionEstimate, ease(state.time, INTRO_TIMING.pullbackStart, INTRO_TIMING.positionBlendEnd));
         objects.position.scale.setScalar(state.introPointScale * (1 + 1.2 * pullback));
-        const rays = ease(state.time, 11, 14.5);
+        const rays = ease(state.time, INTRO_TIMING.raysStart, INTRO_TIMING.raysEnd);
         for (const { mesh, origin } of objects.triangulationRays) {
           mesh.scale.setScalar(rays);
           mesh.position.copy(origin).multiplyScalar(1 - rays);
@@ -181,14 +174,14 @@ export function FilmScene({ onTime, onPlaying }) {
           mesh.material.opacity = 1 - 0.78 * state.positionEmphasis;
         }
         for (const feature of objects.triangulationFeatures) {
-          feature.visible = state.time >= 12;
+          feature.visible = state.time >= INTRO_TIMING.featuresStart;
           feature.material.transparent = true;
           feature.material.opacity = 1 - 0.78 * state.positionEmphasis;
         }
-        objects.triangulationRing.visible = state.time >= 14.5;
+        objects.triangulationRing.visible = state.time >= INTRO_TIMING.raysEnd;
         objects.triangulationRing.material.opacity = 0.7 * (1 - state.positionEmphasis);
-        objects.triangulationTitle.visible = state.time >= 14.5;
-        for (const rig of objects.captureCameras) rig.caption.visible = state.time < 2 || state.time >= 13;
+        objects.triangulationTitle.visible = state.time >= INTRO_TIMING.raysEnd;
+        for (const rig of objects.captureCameras) rig.caption.visible = state.time < INTRO_TIMING.rigLabelsHide || state.time >= INTRO_TIMING.rigLabelsReturn;
         // The viewer crosses the camera's own housing on lens exit.
         objects.captureCameras[0].rig.visible = objects.captureCameras[0].lens.distanceTo(new THREE.Vector3(...eye)) > 4;
       }
@@ -206,7 +199,7 @@ export function FilmScene({ onTime, onPlaying }) {
             mesh.position.copy(origin).multiplyScalar(1 - growth);
           }
         });
-        const contextOpacity = 1 - ease(state.time, 23.4, 25);
+        const contextOpacity = 1 - ease(state.time, SURFACE_CONTEXT_FADE.start, SURFACE_CONTEXT_FADE.end);
         objects.surfaceContext.visible = contextOpacity > 0;
         for (const { object, opacity } of shot.context) object.material.opacity = opacity * contextOpacity;
       }
@@ -216,8 +209,8 @@ export function FilmScene({ onTime, onPlaying }) {
         objects.position.position.x = state.liveX;
         objects.positionLabel.position.x = state.liveX;
         objects.positionLeader.position.x = state.liveX - LIVE_X;
-        const refresh = ease(state.time, REFRESH_AT, 52.6);
-        const labels = (1 - ease(state.time, 33.8, 34.6) * (1 - ease(state.time, 47.1, 48.2))) * (1 - refresh);
+        const refresh = ease(state.time, REFRESH_AT, REFRESH_END);
+        const labels = (1 - ease(state.time, LABEL_TIMING.fadeStart, LABEL_TIMING.fadeEnd) * (1 - ease(state.time, LABEL_TIMING.returnStart, LABEL_TIMING.returnEnd))) * (1 - refresh);
         for (const annotation of [objects.surfaceLabel, objects.surfaceLeader]) annotation.material.opacity = labels * state.heldCloudOpacity;
         for (const annotation of [objects.positionLabel, objects.positionLeader]) annotation.material.opacity = labels * state.spongeOpacity;
         objects.position.visible = state.spongeOpacity > 0;
@@ -237,18 +230,18 @@ export function FilmScene({ onTime, onPlaying }) {
         for (let index = 0; index < 2; index++) {
           const shutterTime = index === 0 ? SHUTTERS.first : SHUTTERS.second;
           const captured = index === 0 ? state.firstCaptured : state.secondCaptured;
-          const panelOpacity = ease(state.time, shutterTime, shutterTime + 0.25) * (1 - ease(state.time, 40, 41.3));
-          const evidenceOpacity = captured ? 1 - ease(state.time, 46, 47.2) : 0;
+          const panelOpacity = ease(state.time, shutterTime, shutterTime + SHUTTER_EFFECTS.panelRevealSeconds) * (1 - ease(state.time, DEPTH_RECONSTRUCTION.start, DEPTH_RECONSTRUCTION.start + SHUTTER_EFFECTS.panelFadeSeconds));
+          const evidenceOpacity = captured ? 1 - ease(state.time, DEPTH_CLEANUP.evidenceFadeStart, DEPTH_CLEANUP.evidenceFadeEnd) : 0;
           objects.shutterContexts[index].visible = panelOpacity > 0;
           setOpacity(shot.exposureMaterials[index], panelOpacity);
           objects.shutterEvidence[index].visible = evidenceOpacity > 0;
           setOpacity(shot.evidenceMaterials[index], evidenceOpacity);
-          const flash = state.time >= shutterTime ? Math.max(0, 1 - (state.time - shutterTime) / 0.4) : 0;
+          const flash = state.time >= shutterTime ? Math.max(0, 1 - (state.time - shutterTime) / SHUTTER_EFFECTS.flashSeconds) : 0;
           objects.shutterPanels[index].frame.material.emissive.set(index === 0 ? CAMERA_A_COLOR : CAMERA_B_COLOR);
           objects.shutterPanels[index].frame.material.emissiveIntensity = 0.15 + flash * 2;
           objects.captureCameras[index].ring.material.color.set(index === 0 ? CAMERA_A_COLOR : CAMERA_B_COLOR).lerp(new THREE.Color('#ffffff'), flash);
         }
-        const rays = ease(state.time, 40.6, 41.8) * (1 - ease(state.time, 45.8, 46.6));
+        const rays = state.depthRays;
         for (const { mesh, origin } of objects.triangulationRays) {
           mesh.scale.setScalar(rays);
           mesh.position.copy(origin).multiplyScalar(1 - rays);
@@ -285,6 +278,7 @@ export function FilmScene({ onTime, onPlaying }) {
       foreground.material.opacity = state.dissolve;
       black.material.opacity = state.ending;
       drawHud(state);
+      captions.update(state);
       renderer.setRenderTarget(null);
       renderer.render(composite, screenCamera);
       return state;
@@ -321,6 +315,7 @@ export function FilmScene({ onTime, onPlaying }) {
       hudCanvas.width = drawingSize.x;
       hudCanvas.height = drawingSize.y;
       ctx.setTransform(drawingSize.x / 1280, 0, 0, drawingSize.y / 720, 0, 0);
+      captions.resize(drawingSize.x, drawingSize.y);
       hudKey = '';
       for (const rt of targets) rt.setSize(drawingSize.x, drawingSize.y);
       for (const shot of Object.values(shots)) {
@@ -337,7 +332,7 @@ export function FilmScene({ onTime, onPlaying }) {
         renderFrame(seconds) {
           exploring = false;
           const state = render(seconds);
-          return { png: renderer.domElement.toDataURL('image/png'), state, hudPixels: { width: hudCanvas.width, height: hudCanvas.height } };
+          return { png: renderer.domElement.toDataURL('image/png'), state, hudPixels: { width: hudCanvas.width, height: hudCanvas.height }, captionPixels: captions.stats() };
         },
       };
     } else {
@@ -371,6 +366,7 @@ export function FilmScene({ onTime, onPlaying }) {
       }
       for (const mesh of [background, foreground, hud, black]) { mesh.geometry.dispose(); mesh.material.dispose(); }
       hudTexture.dispose();
+      captions.dispose();
       for (const rt of targets) rt.dispose();
       renderer.dispose();
       container.removeChild(renderer.domElement);
